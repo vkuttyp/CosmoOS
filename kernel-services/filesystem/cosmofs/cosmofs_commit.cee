@@ -1,0 +1,1320 @@
+// cosmofs_commit.cee - The commit, in CeeSafe: roadmap 2.0 SA7. tests/host/test_cfscommit.c holds it to the digest of
+// the C it replaced.
+//
+// The bitmap's reserve-then-write fixpoint, the root write, the record of what a transaction freed and of what a root
+// still owes (and their replay at mount), the commit's reservation, and the commit itself in the order that keeps a
+// crash at any point consistent.
+//
+// Rules (docs/kernel-services/vfs/design.md): the in-memory bitmap is authoritative during a transaction and its
+// chunks are written at commit through a reserve-then-write fixpoint; blocks freed in a transaction become allocatable
+// only after that transaction's root is on disk.
+//
+// struct cfs, the buffers, the reservation and the inodes stay C (cosmofs_internal.h, cosmofs_format.h). An inode the C
+// kept on the stack is kept in a zeroed slot of words. cosmofs_commit_floor.c keeps the two test seams a build
+// configuration decides.
+
+@header("kernel/blk.h", "kernel/storage.h", "kernel/kmalloc.h", "kernel/string.h", "cosmofs_internal.h")
+extern "C" {
+    struct spool {
+        state_seq: u64;
+    }
+    struct cfs_mac {
+        on: bool;
+    }
+    struct cfs_super {
+        version: u32;
+        generation: u64;
+        inode_count: u64;
+        free_blocks: u64;
+        free_root: u64;
+        orphan_root: u64;
+    }
+    struct cfs_memstate {
+        first_usable: u64;
+        chunk0: u32;
+        nchunks: u32;
+        alloc_root: u64;
+        free_blocks: u64;
+        state_root: u64;
+    }
+    struct cfs_clone {
+        id: u64;
+    }
+    struct cfs {
+        pool: *mut spool;
+        sb: cfs_super;
+        sb_slot: u32;
+        gen: u64;
+        nblocks: u64;
+        bitmap: *mut u8;
+        bitmap_dirty: *mut u8;
+        nr_chunks: u32;
+        free_blocks: u64;
+        mem: *mut cfs_memstate;
+        nmembers: u32;
+        pending_free: *mut u64;
+        nr_pending: u32;
+        pending_exempt: *mut u64;
+        nr_exempt: u32;
+        orphans: *mut u64;
+        nr_orphans: u32;
+        bufs: list_node;
+        nr_dirty: u32;
+        test_fail_freelog: bool;
+        test_fail_orphan: bool;
+        cur_clone: *mut cfs_clone;
+        failed: i32;
+        rdonly: bool;
+        replay_freed: u32;
+        replay_orphans: u32;
+        commits: u64;
+        mac: cfs_mac;
+        copystate_seq: u64;
+        snap_count: u32;
+        first_dirty_ns: u64;
+    }
+    struct cfs_buf {
+        link: list_node;
+        blkno: u64;
+        data: *mut u8;
+        dirty: bool;
+    }
+    struct cfs_res {
+        blk: *mut u64;
+        n: u32;
+        used: u32;
+    }
+    struct cfs_inode {
+        mode: u32;
+        nlink: u32;
+        size: u64;
+        ino: u64;
+    }
+
+    fn cfs_buf_get(fs: *mut cfs, blkno: u64, kind: u32, out: *mut *mut cfs_buf) -> i32;
+    fn cfs_buf_put(fs: *mut cfs, b: *mut cfs_buf);
+    fn cfs_buf_cow(fs: *mut cfs, bp: *mut *mut cfs_buf, parent_slot: *mut u64) -> i32;
+    fn cfs_buf_alloc(fs: *mut cfs, blkno: u64) -> *mut cfs_buf;
+    fn cfs_buf_find(fs: *mut cfs, blkno: u64) -> *mut cfs_buf;
+    fn cfs_buf_new_at(fs: *mut cfs, kind: u32, blk: u64, out: *mut *mut cfs_buf) -> i32;
+    fn cfs_buf_mark_dirty(fs: *mut cfs, b: *mut cfs_buf);
+    fn cfs_buf_mark_clean(fs: *mut cfs, b: *mut cfs_buf);
+    fn cfs_mhdr_seal(fs: *mut cfs, block: *mut u8, kind: u32, blkno: u64);
+    fn cfs_super_seal(mac: *cfs_mac, block: *mut u8);
+    fn cfs_res_take(r: *mut cfs_res) -> u64;
+    fn cfs_res_untake(r: *mut cfs_res);
+    fn cfs_alloc_run(fs: *mut cfs, cls: u32, hint: u64, want: u32, start: *mut u64, got: *mut u64) -> i32;
+    fn cfs_free_block_deferred(fs: *mut cfs, blk: u64);
+    fn cfs_free_block_exempt(fs: *mut cfs, blk: u64);
+    fn cfs_dva_lin(fs: *cfs, dva: u64) -> u64;
+    fn cfs_freelog_count_ok(count: u64) -> bool;
+    fn cfs_orphan_count_ok(count: u64) -> bool;
+    fn cfs_inode_read_raw(fs: *mut cfs, ino: u64, out: *mut cfs_inode) -> i32;
+    fn cfs_inode_write(fs: *mut cfs, ino: u64, inode: *cfs_inode) -> i32;
+    fn cfs_truncate_blocks(fs: *mut cfs, inode: *mut cfs_inode, keep_blocks: u64) -> i32;
+    fn cfs_members_store(fs: *mut cfs) -> i32;
+    fn cfs_copystate_prepare(fs: *mut cfs) -> i32;
+    fn cfs_copystate_fill(fs: *mut cfs) -> i32;
+    fn cfs_copystate_recorded(fs: *mut cfs) -> bool;
+    fn cfs_labels_update(fs: *mut cfs) -> i32;
+    fn cfs_clones_publish(fs: *mut cfs) -> i32;
+    fn cfs_clone_leave(fs: *mut cfs);
+    fn cfs_clone_enter(fs: *mut cfs, c: *mut cfs_clone);
+    fn cfs_snapshot_reserve_bound(fs: *mut cfs, pending_bound: u32) -> u32;
+    fn cfs_snapshot_exempt_bound(fs: *mut cfs) -> u32;
+    fn cfs_snapshot_fill(fs: *mut cfs, res: *mut cfs_res, held: *mut bool, n: u32, appended: *mut u32) -> i32;
+    fn cfs_note_dirty(fs: *mut cfs);
+    fn pool_write(p: *mut spool, dva: u64, buf: *void) -> i32;
+    fn pool_write_flags(p: *mut spool, dva: u64, buf: *void, flags: u32) -> i32;
+    fn pool_flush(p: *mut spool) -> i32;
+    fn pool_commit_done(p: *mut spool, gen: u64);
+    fn kzalloc(size: usize) -> *mut void;
+    fn memcpy(dst: *mut void, src: *void, n: usize) -> *mut void;
+    fn memset(p: *mut void, c: i32, n: usize) -> *mut void;
+    /// cosmofs_commit_floor.c: the debug build's "the machine stops at this commit"; test-snapshot's crash point.
+    fn cfs_commit_floor_stopped(fs: *mut cfs) -> bool;
+    fn cfs_commit_floor_switch_stop(fs: *mut cfs);
+}
+
+// ---- errno.h, blk.h, storage.h, cosmofs_internal.h and cosmofs_format.h values (asserted in
+// tests/host/test_cfscommit.c) ----
+
+const EIO: i32 = 5;
+const ENOMEM: i32 = 12;
+const ENOSPC: i32 = 28;
+const KMEM_ZERO: u32 = 1;
+const BIO_PREFLUSH: u32 = 1;
+const BIO_FUA: u32 = 2;
+const POOL_WRITE_ONLINE: u32 = 0x80000000;
+const POOL_MAX_COPIES: u32 = 4;
+const CFS_DVA_NONE: u64 = 0xFFFFFFFFFFFFFFFF;
+const CFS_DVA_VDEV_SHIFT: u32 = 56;
+const CFS_DVA_BLK_MASK: u64 = 0x00FFFFFFFFFFFFFF;
+const CFS_BLOCK: usize = 4096;
+const CFS_MHDR_SIZE: usize = 32;
+const CFS_BITS_PER_BITMAP: u64 = 32512;
+const CFS_SUPER_A: u32 = 0;
+const CFS_SUPER_B: u32 = 1;
+const CFS_INODE_SIZE: usize = 256;
+const CFS_KIND_ALLOCIDX: u32 = 4;
+const CFS_KIND_BITMAP: u32 = 5;
+const CFS_KIND_FREELOG: u32 = 13;
+const CFS_KIND_ORPHAN: u32 = 14;
+const CFS_KIND_COPYSTATE: u32 = 17;
+/// enum cfs_alloc_class's CFS_ALLOC_META.
+const CFS_ALLOC_META: u32 = 0;
+/// Where a header keeps its kind, and where a FREELOG or ORPHAN block (struct cfs_dead_block) keeps its chain, its
+/// count and its entries: checked by the test.
+const MHDR_KIND: usize = 4;
+const DEAD_NEXT: usize = 0;
+const DEAD_COUNT: usize = 8;
+const DEAD_BLK: usize = 16;
+
+/// Entries a FREELOG block holds: the deadlist's shape, reused rather than twinned (CFS_DEAD_PER_BLOCK).
+const CFS_FREELOG_PER_BLOCK: u32 = 506;
+/// CFS_ORPHANS_PER_BLOCK, the same.
+const CFS_ORPHANS_PER_BLOCK: u32 = 506;
+/// No record is this long in a sound filesystem; one that is has a cycle, and the walk says so rather than following
+/// it forever.
+const CFS_FREELOG_MAX_CHAIN: u32 = 4096;
+const CFS_ORPHAN_MAX_CHAIN: u32 = 4096;
+
+/// The stack slot an inode is kept in, in words (checked against the C size).
+const INODE_WORDS: usize = 32;
+
+// ---- The C state, through its addresses ----
+
+/// Safety: `fs` is a mounted filesystem's state.
+unsafe fn fsOf(fs: *mut cfs) -> borrow mut(static) cfs => Ptr.toBorrowMut(fs);
+
+/// Safety: `fs` is a mounted filesystem's state, `v` one of its members.
+unsafe fn memOf(fs: *mut cfs, v: u32) -> borrow mut(static) cfs_memstate =>
+    Ptr.toBorrowMut(fsOf(fs).mem.add(v as usize));
+
+/// Safety: `b` is a buffer.
+unsafe fn bufOf(b: *mut cfs_buf) -> borrow mut(static) cfs_buf => Ptr.toBorrowMut(b);
+
+/// A held buffer's payload, past its header.
+/// Safety: `b` is a held buffer.
+unsafe fn payloadOf(b: *mut cfs_buf) -> *mut u8 => bufOf(b).data.add(CFS_MHDR_SIZE);
+
+/// Word `at` (a byte offset) of a held buffer's payload.
+/// Safety: as payloadOf.
+unsafe fn word(b: *mut cfs_buf, at: usize) -> u64 =>
+    ByteOrder.readU64LE(Slice.fromRaw(payloadOf(b) as *u8, CFS_BLOCK - CFS_MHDR_SIZE), at);
+
+/// Safety: as payloadOf.
+unsafe fn setWord(b: *mut cfs_buf, at: usize, v: u64) {
+    ByteOrder.writeU64LE(SliceMut.fromRaw(payloadOf(b), CFS_BLOCK - CFS_MHDR_SIZE), at, v);
+}
+
+/// Safety: `node` is a buffer's link.
+unsafe fn bufOfLink(node: *mut list_node) -> *mut cfs_buf => containerOf(node, offsetOf<cfs_buf>(link)) as *mut cfs_buf;
+
+fn dvaOf(vdev: u32, blk: u64) -> u64 => ((vdev as u64) << CFS_DVA_VDEV_SHIFT) | (blk & CFS_DVA_BLK_MASK);
+
+fn dvaVdev(dva: u64) -> u32 => truncate<u32>(dva >> CFS_DVA_VDEV_SHIFT);
+
+fn inodeFits() -> bool => layoutOf<cfs_inode>().size <= INODE_WORDS * 8;
+
+/// Bit `i` of the bitmap.
+/// Safety: `fs` is a mounted filesystem's state, `i` within its bitmap.
+unsafe fn bitTest(fs: *mut cfs, i: u64) -> bool =>
+    ((fsOf(fs).bitmap.add((i >> 3) as usize).read() >> truncate<u8>(i & 7)) & 1) != 0;
+
+/// A block's bit cleared now: it is free in memory, and its chunk is dirty for the next commit.
+/// Safety: as bitTest; `dva` a block of the pool whose linear number is `lin`.
+unsafe fn release(fs: *mut cfs, dva: u64, lin: u64) {
+    let at = fsOf(fs).bitmap.add((lin >> 3) as usize);
+    at.write(at.read() & ((1u8 << truncate<u8>(lin & 7)) ^ 0xFF));
+    fsOf(fs).bitmap_dirty.add((lin / CFS_BITS_PER_BITMAP) as usize).write(1);
+    let f = fsOf(fs);
+    f.free_blocks = f.free_blocks.wrappingAdd(1);
+    let m = memOf(fs, dvaVdev(dva));
+    m.free_blocks = m.free_blocks.wrappingAdd(1);
+}
+
+/// "<a><n><b>" at error level.
+fn errorLine(a: StringView, n: u64, b: StringView) {
+    var buffer = [0u8; 160];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text(a);
+    line.decimal(n);
+    line.text(b);
+    KernelLog.send(LogLevel.Error, line);
+}
+
+/// "<a><n><b><rc><c>" at error level.
+fn errorRc(a: StringView, n: u64, b: StringView, rc: i32, c: StringView) {
+    var buffer = [0u8; 200];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text(a);
+    line.decimal(n);
+    line.text(b);
+    line.signed(rc as i64);
+    line.text(c);
+    KernelLog.send(LogLevel.Error, line);
+}
+
+// ---- Commit ----
+
+/// One member's dirty bitmap chunks, into fresh blocks on that member: the bitmap written until no allocation made by
+/// the writing itself leaves a chunk dirty. Its index is copied like any other metadata block; the parent pointer is
+/// the member's own alloc_root, which is why a member's allocation metadata never lives on another member.
+/// Safety: `fs` is a mounted filesystem's state, its lock held; `reserved` holds nr_chunks words.
+unsafe fn commitMemberBitmap(fs: *mut cfs, v: u32, reserved: *mut u64) -> i32 {
+    let m = memOf(fs, v);
+    var idx = 0 as *mut cfs_buf;
+    var rc = cfs_buf_get(fs, m.alloc_root, CFS_KIND_ALLOCIDX, borrow mut idx as *mut *mut cfs_buf);
+    if (rc != 0) {
+        return rc;
+    }
+    rc = cfs_buf_cow(fs, borrow mut idx as *mut *mut cfs_buf, borrow mut m.alloc_root as *mut u64);
+    if (rc == 0) {
+        for (c in 0u32..m.nchunks) {
+            let gc = m.chunk0 + c;
+            let dirty = fsOf(fs).bitmap_dirty.add(gc as usize);
+            if (dirty.read() == 0) {
+                continue;
+            }
+            let res = reserved.add(gc as usize);
+            if (res.read() == 0) {
+                // A dirty chunk the reservation pass did not see. Writing it to DVA 0 would put a bitmap on member
+                // 0's superblock, so the transaction fails instead.
+                errorLine("cosmofs: bitmap chunk ", gc as u64, " has no reserved block");
+                rc = -EIO;
+                break;
+            }
+            let nb = cfs_buf_alloc(fs, res.read());
+            if (nb.isNull()) {
+                rc = -ENOMEM;
+                break;
+            }
+            let bytes = (CFS_BITS_PER_BITMAP / 8) as usize;
+            let off = gc as usize * bytes;
+            let total = ((fsOf(fs).nblocks + 7) / 8) as usize;
+            let n = if (off + bytes <= total) bytes else total - off;
+            let data = bufOf(nb).data;
+            memset(data as *mut void, 0, CFS_BLOCK);
+            memcpy(data.add(CFS_MHDR_SIZE) as *mut void, fsOf(fs).bitmap.add(off) as *void, n);
+            cfs_mhdr_seal(fs, data, CFS_KIND_BITMAP, res.read());
+            cfs_buf_mark_dirty(fs, nb);
+            cfs_buf_put(fs, nb);
+            let slot = word(idx, c as usize * 8);
+            if (slot != 0) {
+                cfs_free_block_deferred(fs, slot);
+            }
+            setWord(idx, c as usize * 8, res.read());
+            res.write(0); // used: commitBitmap gives back only the rest
+            dirty.write(0);
+        }
+        if (rc == 0) {
+            // Re-seal the index (it was copied or dirtied above).
+            cfs_mhdr_seal(fs, bufOf(idx).data, CFS_KIND_ALLOCIDX, bufOf(idx).blkno);
+        }
+    }
+    cfs_buf_put(fs, idx);
+    return rc;
+}
+
+/// Safety: as commitMemberBitmap.
+unsafe fn commitBitmap(fs: *mut cfs) -> i32 {
+    let nchunks = fsOf(fs).nr_chunks;
+    let reserved = kzalloc(nchunks as usize * 8) as *mut u64;
+    if (reserved.isNull()) {
+        return -ENOMEM;
+    }
+
+    // Reserve a destination block for every dirty chunk before writing any of them; reserving may dirty further
+    // chunks, so iterate to a fixpoint. Each chunk's replacement comes from its own member, so that a member's bitmap
+    // stays on the member it describes.
+    //
+    // The member table is copy-on-written first, so the block that takes is already counted in the bitmaps written
+    // below. Its contents are filled in again at the end, once every member's new allocation root is known; by then
+    // the block is writable in this generation and the second call allocates nothing.
+    var rc = cfs_members_store(fs);
+
+    // Every allocation index this commit will write is copied first, for the same reason: a copy takes a block, and
+    // that block has to be counted in the bitmaps this commit writes. Doing it inside the write loop instead dirties a
+    // chunk the reservation pass has already been over -- and on a pool of several members the block comes from
+    // whichever member has the most room, so the chunk it dirties need not even belong to the member being written.
+    var v: u32 = 0;
+    while (v < fsOf(fs).nmembers && rc == 0) {
+        var idx = 0 as *mut cfs_buf;
+        rc = cfs_buf_get(fs, memOf(fs, v).alloc_root, CFS_KIND_ALLOCIDX, borrow mut idx as *mut *mut cfs_buf);
+        if (rc == 0) {
+            rc = cfs_buf_cow(fs, borrow mut idx as *mut *mut cfs_buf, borrow mut memOf(fs, v).alloc_root as *mut u64);
+            cfs_buf_put(fs, idx);
+        }
+        v += 1;
+    }
+    var progress = true;
+    while (progress && rc == 0) {
+        progress = false;
+        v = 0;
+        while (v < fsOf(fs).nmembers && rc == 0) {
+            let m = memOf(fs, v);
+            for (c in 0u32..m.nchunks) {
+                let gc = m.chunk0 + c;
+                let res = reserved.add(gc as usize);
+                if (fsOf(fs).bitmap_dirty.add(gc as usize).read() == 0 || res.read() != 0) {
+                    continue;
+                }
+                var got: u64 = 0;
+                rc = cfs_alloc_run(fs, CFS_ALLOC_META, dvaOf(v, m.first_usable), 1, res, borrow mut got as *mut u64);
+                if (rc != 0) {
+                    break;
+                }
+                progress = true;
+            }
+            v += 1;
+        }
+    }
+    v = 0;
+    while (v < fsOf(fs).nmembers && rc == 0) {
+        rc = commitMemberBitmap(fs, v, reserved);
+        v += 1;
+    }
+    if (rc == 0) {
+        rc = cfs_members_store(fs);
+    }
+    if (rc != 0) {
+        // Reserved and never written: nothing names these blocks, and left allocated they are a leak the next commit's
+        // bitmap makes durable. Given back deferred, like every rolled-back allocation (CF17).
+        for (gc in 0u32..fsOf(fs).nr_chunks) {
+            let r = reserved.add(gc as usize).read();
+            if (r != 0) {
+                cfs_free_block_deferred(fs, r);
+            }
+        }
+    }
+    kfree(reserved as *mut void);
+    return rc;
+}
+
+/// The root write: flushed before (every block of the transaction is stable first) and durable when it completes
+/// (BIO_PREFLUSH | BIO_FUA).
+/// Safety: as commitMemberBitmap.
+@export("cfs_super_write")
+unsafe fn superWrite(fs: *mut cfs, slot: u32, flags: u32) -> i32 {
+    let block = kmalloc(CFS_BLOCK, KMEM_ZERO) as *mut u8;
+    if (block.isNull()) {
+        return -ENOMEM;
+    }
+    memcpy(block as *mut void, borrow fsOf(fs).sb as *cfs_super as *void, layoutOf<cfs_super>().size);
+    cfs_super_seal(borrow fsOf(fs).mac as *cfs_mac, block);
+    // ONLINE copies only: a copy being resilvered gets its superblocks when it holds everything they name (design.md,
+    // "Resilvering").
+    let rc = pool_write_flags(fsOf(fs).pool, slot as u64, block as *void, flags | POOL_WRITE_ONLINE);
+    kfree(block as *mut void);
+    return rc;
+}
+
+/// The open transaction is abandoned: it is never committed, and the last committed root stays current.
+/// Safety: `fs` is a mounted filesystem's state.
+@export("cfs_fail")
+unsafe fn fail(fs: *mut cfs, rc: i32) {
+    let f = fsOf(fs);
+    if (f.failed == 0) {
+        f.failed = if (rc != 0) rc else -EIO;
+        var buffer = [0u8; 128];
+        var line = TextWriter.create(mut buffer[..]);
+        line.text("cosmofs: transaction abandoned after error ");
+        line.signed(rc as i64);
+        line.text("; the last committed root stays current");
+        KernelLog.send(LogLevel.Error, line);
+    }
+}
+
+// ---- The record of what a transaction freed ----
+//
+// docs/audit/next-subsystem-unmount-leak.md. A commit clears the freed blocks' bits only after its root is durable,
+// and marks those bitmap chunks for the next commit -- which at an unmount never comes. The record is what carries them
+// across: written before the root, made true by it, and replayed by a mount that finds one.
+
+/// Apply the record at mount: the blocks this root freed, whose bits the last commit cleared only in memory.
+///
+/// Read before the bitmap is trusted for allocation, so the space is available in this session rather than after
+/// another mount. A block named here is free by the root's own word, so a bit that is already clear is not an error --
+/// it means a commit got there first.
+/// Safety: as commitMemberBitmap.
+@export("cfs_freelog_replay")
+unsafe fn freelogReplay(fs: *mut cfs) -> i32 {
+    if (fsOf(fs).sb.version < 9) {
+        return 0;
+    }
+    var at = fsOf(fs).sb.free_root;
+    var guard: u32 = 0;
+    var applied: u32 = 0;
+    while (at != 0) {
+        let over = guard > CFS_FREELOG_MAX_CHAIN;
+        guard += 1;
+        if (over) {
+            errorLine("cosmofs: free record chain too long at ", at, "");
+            return -EIO;
+        }
+        var b = 0 as *mut cfs_buf;
+        let rc = cfs_buf_get(fs, at, CFS_KIND_FREELOG, borrow mut b as *mut *mut cfs_buf);
+        if (rc != 0) {
+            // The root says these blocks are free and will not say which. Mounting anyway would leave an allocator
+            // that cannot be trusted, so the mount fails and the operator has a checker.
+            errorRc("cosmofs: free record at ", at, " unreadable (", rc, "); refusing the mount");
+            return -EIO;
+        }
+        let next = word(b, DEAD_NEXT);
+        let count = word(b, DEAD_COUNT);
+        if (!cfs_freelog_count_ok(count)) {
+            // The block's checksum is good and its contents are not: a count past the payload is a record this kernel
+            // cannot read, which is the unreadable case and gets the same answer. Treating it as empty would silently
+            // drop every free it names and report them later as ordinary leaks.
+            var buffer = [0u8; 200];
+            var line = TextWriter.create(mut buffer[..]);
+            line.text("cosmofs: free record at ");
+            line.decimal(at);
+            line.text(" names ");
+            line.decimal(count);
+            line.text(" blocks, more than the ");
+            line.decimal(CFS_FREELOG_PER_BLOCK as u64);
+            line.text(" a block holds; refusing the mount");
+            KernelLog.send(LogLevel.Error, line);
+            cfs_buf_put(fs, b);
+            return -EIO;
+        }
+        for (i in 0u64..count) {
+            let dva = word(b, DEAD_BLK + i as usize * 8);
+            let lin = cfs_dva_lin(fs as *cfs, dva);
+            if (lin == CFS_DVA_NONE || !bitTest(fs, lin)) {
+                continue; // a commit already applied it
+            }
+            release(fs, dva, lin);
+            applied += 1;
+        }
+        cfs_buf_put(fs, b);
+        at = next;
+    }
+    let f = fsOf(fs);
+    f.replay_freed = applied;
+    if (applied != 0 && !f.rdonly) {
+        var buffer = [0u8; 128];
+        var line = TextWriter.create(mut buffer[..]);
+        line.text("cosmofs: reclaimed ");
+        line.decimal(applied as u64);
+        line.text(" block(s) the last commit freed and could not write");
+        KernelLog.send(LogLevel.Info, line);
+    }
+    return 0;
+}
+
+/// Release the chain of a record the current root names (the free record's or the orphan record's). It is the *old*
+/// root's statement and the new root replaces it, so without this every commit leaks its predecessor's record -- the
+/// free record's own defect, one level up.
+///
+/// Deliberately not through the snapshot filter. That asks whether a snapshot's recorded bitmap marks the block
+/// allocated, and these blocks were allocated when an older snapshot was taken, so the generic path would hold them
+/// and append them to a deadlist. No snapshot can reach a record: a snapshot preserves imap_root and alloc_root, not
+/// free_root or orphan_root. The rule the exception rests on: the snapshot filter is for blocks a snapshot's tree might
+/// name, and a block reachable only from a superblock field that snapshots do not copy is not one of those.
+/// Safety: as commitMemberBitmap.
+unsafe fn recordRelease(fs: *mut cfs, head: u64, kind: u32, limit: u32, what: StringView) -> i32 {
+    var at = head;
+    var guard: u32 = 0;
+    while (at != 0) {
+        let over = guard > limit;
+        guard += 1;
+        if (over) {
+            var buffer = [0u8; 128];
+            var line = TextWriter.create(mut buffer[..]);
+            line.text("cosmofs: ");
+            line.text(what);
+            line.text(" record chain too long at ");
+            line.decimal(at);
+            KernelLog.send(LogLevel.Error, line);
+            return -EIO;
+        }
+        var b = 0 as *mut cfs_buf;
+        let rc = cfs_buf_get(fs, at, kind, borrow mut b as *mut *mut cfs_buf);
+        if (rc != 0) {
+            return rc;
+        }
+        let next = word(b, DEAD_NEXT);
+        cfs_buf_put(fs, b);
+        cfs_free_block_exempt(fs, at); // freed for the new root, and no snapshot's to hold
+        at = next;
+    }
+    return 0;
+}
+
+/// Safety: as commitMemberBitmap.
+unsafe fn freelogReleasePrevious(fs: *mut cfs) -> i32 {
+    let at = if (fsOf(fs).sb.version >= 9) fsOf(fs).sb.free_root else 0;
+    let rc = recordRelease(fs, at, CFS_KIND_FREELOG, CFS_FREELOG_MAX_CHAIN, "free");
+    if (rc != 0) {
+        return rc;
+    }
+    let f = fsOf(fs);
+    f.sb.free_root = 0;
+    return 0;
+}
+
+/// Blocks the orphan record needs. Unlike the free record's, this bound is exact: nr_orphans is what it is before the
+/// fixpoint and commitBitmap cannot add to it.
+/// Safety: `fs` is a mounted filesystem's state.
+unsafe fn orphanReserveBound(fs: *mut cfs) -> u32 {
+    let f = fsOf(fs);
+    if (f.sb.version < 10 || f.nr_orphans == 0) {
+        return 0;
+    }
+    return f.nr_orphans.wrappingAdd(CFS_ORPHANS_PER_BLOCK - 1) / CFS_ORPHANS_PER_BLOCK;
+}
+
+/// The commit's reservation: blocks taken before the bitmap fixpoint and handed out after it.
+///
+/// Two consumers, and the second is optional. The deadlist fill takes from the front and needs its blocks on **every**
+/// filesystem that has a snapshot, whatever the format version; the record takes what is left and exists only from
+/// version 9. So `withRecord` widens the reservation rather than gating it: a version-8 filesystem with a snapshot
+/// still reserves the deadlist's share, because the alternative is a release loop that frees a snapshot's blocks.
+///
+/// The record's bound is what is pending now, plus what commitBitmap can add: one block per chunk it may rewrite and
+/// one index per member. Generous by design; freelogFill puts the leftovers in the record itself.
+/// Safety: as commitMemberBitmap; `res` a reservation.
+unsafe fn commitReserve(fs: *mut cfs, res: *mut cfs_res, withRecord: bool) -> i32 {
+    let r = Ptr.toBorrowMut(res);
+    r.blk = 0 as *mut u64;
+    r.n = 0;
+    r.used = 0;
+    let f = fsOf(fs);
+    // What the record must be able to name, and what the snapshot list may add to it: the blocks its copies supersede
+    // are freed by this root like any other, so they are entries here too.
+    let pendingBound = f.nr_pending.wrappingAdd(f.nr_chunks).wrappingAdd(f.nmembers);
+    let bound: u64 = if (withRecord)
+        pendingBound as u64 + f.nr_exempt as u64 + cfs_snapshot_exempt_bound(fs) as u64
+    else
+        0;
+    // And the blocks the snapshot list's own work needs, which are blocks rather than entries: the chain's copy, a
+    // copied deadlist head and a fresh deadlist block per CFS_DEAD_PER_BLOCK holds. One reservation, two consumers --
+    // the deadlist fill takes from the front and the record gets what is left, so a block nobody needed is a leftover
+    // the record names as free, which is the mechanism that already keeps the record's own bound from having to be
+    // tight.
+    let snapExtra = cfs_snapshot_reserve_bound(fs, pendingBound);
+    // And the orphan record's, which is exact rather than generous: nr_orphans is what it is before the fixpoint and
+    // commitBitmap cannot add to it.
+    let orphanExtra = orphanReserveBound(fs);
+    if (bound == 0 && snapExtra == 0 && orphanExtra == 0) {
+        return 0;
+    }
+    let n = truncate<u32>((bound + (CFS_FREELOG_PER_BLOCK - 1) as u64) / CFS_FREELOG_PER_BLOCK as u64)
+        .wrappingAdd(snapExtra).wrappingAdd(orphanExtra);
+    if (n == 0) {
+        return 0;
+    }
+    let blk = kmalloc(n as usize * 8, KMEM_ZERO) as *mut u64;
+    if (blk.isNull()) {
+        return -ENOMEM;
+    }
+    for (i in 0u32..n) {
+        var got: u64 = 0;
+        let rc = cfs_alloc_run(fs, CFS_ALLOC_META, 0, 1, blk.add(i as usize), borrow mut got as *mut u64);
+        if (rc != 0) {
+            // Give back what was taken: a failed commit leaves nothing.
+            for (k in 0u32..i) {
+                cfs_free_block_deferred(fs, blk.add(k as usize).read());
+            }
+            kfree(blk as *mut void);
+            return rc;
+        }
+    }
+    r.blk = blk;
+    r.n = n;
+    return 0;
+}
+
+/// Fill the reserved blocks with what is now final, and chain them. A block the bound over-reserved is listed in the
+/// record as free: a block that describes its own release, which is what keeps the bound from having to be tight.
+/// Safety: as commitMemberBitmap; `blk` `n` reserved blocks; `held` null or `heldN` verdicts.
+unsafe fn freelogFill(fs: *mut cfs, blk: *mut u64, n: u32, held: *bool, heldN: u32) -> i32 {
+    let f = fsOf(fs);
+    if (n == 0) {
+        // Nothing reserved for the record. That is right when there is nothing to record and a silent unmount leak
+        // when there is, so the second case stops the commit rather than writing no record and reporting success.
+        if (f.nr_pending != 0 || f.nr_exempt != 0) {
+            var buffer = [0u8; 128];
+            var line = TextWriter.create(mut buffer[..]);
+            line.text("cosmofs: no reservation left for the free record (");
+            line.decimal(f.nr_pending as u64);
+            line.text(" pending, ");
+            line.decimal(f.nr_exempt as u64);
+            line.text(" exempt)");
+            KernelLog.send(LogLevel.Error, line);
+            return -EIO;
+        }
+        f.sb.free_root = 0;
+        return 0;
+    }
+    if (f.test_fail_freelog) {
+        return -EIO; // test hook: fail with the reservation outstanding
+    }
+    let total = f.nr_pending.wrappingAdd(f.nr_exempt);
+    // Room for the entries *and* for the leftovers, which are entries too. `total / CFS_FREELOG_PER_BLOCK` is not
+    // enough: when the last block comes out exactly full the leftovers have nowhere to go, and dropping them there
+    // strands a block on every such commit, which a clean unmount then loses for good.
+    //
+    // Each block used is one fewer leftover, so the requirement is `need * PER_BLOCK >= total + (n - need)`, that is
+    // `need >= (total + n) / (PER_BLOCK + 1)`, rounded up.
+    var need = total.wrappingAdd(n).wrappingAdd(CFS_FREELOG_PER_BLOCK) / (CFS_FREELOG_PER_BLOCK + 1);
+    if (need == 0) {
+        need = 1; // the leftovers still need somewhere to be said
+    }
+    if (need > n) {
+        need = n; // then there are no leftovers, and n blocks hold `bound`
+    }
+
+    // Through the buffer cache, not pool_write: a block just allocated may have a stale buffer from its previous life
+    // further down the list, and cfs_buf_get would find that one. cfs_buf_alloc puts a fresh one at the front, which is
+    // what cfs_buf_cow does for the same reason, and the commit's dirty loop writes it.
+    var at: u32 = 0; // entries of pending_free written so far
+    for (i in 0u32..need) {
+        let b = cfs_buf_alloc(fs, blk.add(i as usize).read());
+        if (b.isNull()) {
+            return -ENOMEM; // cfs_commit gives every reserved block back
+        }
+        setWord(b, DEAD_NEXT, if (i + 1 < need) blk.add((i + 1) as usize).read() else 0);
+        var k: u32 = 0;
+        while (k < CFS_FREELOG_PER_BLOCK && at < total) {
+            // The exempt list after the pending one, as one sequence: both are freed by this root and both must be in
+            // what it says it freed, or an unmount loses them.
+            let idx = at;
+            let exempt = idx >= f.nr_pending;
+            let dva = if (exempt) f.pending_exempt.add((idx - f.nr_pending) as usize).read()
+                else f.pending_free.add(idx as usize).read();
+            at += 1;
+            let lin = cfs_dva_lin(fs as *cfs, dva);
+            if (lin == CFS_DVA_NONE || !bitTest(fs, lin)) {
+                continue;
+            }
+            // Exactly what the release loop will clear, and not asked again: cfs_snapshot_fill took the verdict once,
+            // before this, and recorded the held blocks on a deadlist. The record names what is left. Recording a block
+            // a snapshot keeps would tell the next mount to free it, and asking a second time would be two verdicts
+            // where one will do.
+            if (!exempt && !held.isNull() && idx < heldN && held.add(idx as usize).read()) {
+                continue;
+            }
+            setWord(b, DEAD_BLK + k as usize * 8, dva);
+            k += 1;
+        }
+        // The reserved blocks nobody needed say so here, in the last block, whose capacity `need` was chosen to leave
+        // room in.
+        if (i + 1 == need) {
+            var x = need;
+            while (x < n && k < CFS_FREELOG_PER_BLOCK) {
+                setWord(b, DEAD_BLK + k as usize * 8, blk.add(x as usize).read());
+                k += 1;
+                x += 1;
+            }
+            if (x < n) {
+                // The arithmetic above says this cannot happen. If it ever does, a block would be freed in memory and
+                // named by nothing, so refuse the commit instead.
+                errorLine("cosmofs: free record has no room for ", (n - x) as u64, " leftover block(s)");
+                cfs_buf_mark_clean(fs, b);
+                cfs_buf_put(fs, b);
+                return -EIO;
+            }
+        }
+        setWord(b, DEAD_COUNT, k as u64);
+        cfs_mhdr_seal(fs, bufOf(b).data, CFS_KIND_FREELOG, blk.add(i as usize).read());
+        cfs_buf_mark_dirty(fs, b);
+        cfs_buf_put(fs, b);
+    }
+    // The leftovers are named by the record, so they are free from the moment this root lands -- and the in-memory
+    // bitmap must agree, or the allocator will not hand them out until a remount.
+    for (y in need..n) {
+        cfs_free_block_deferred(fs, blk.add(y as usize).read());
+    }
+    f.sb.free_root = blk.read();
+    return 0;
+}
+
+// ---- The record of what this root still owes ----
+//
+// docs/audit/next-subsystem-orphan.md. An inode whose last name has gone while something still references it has
+// nlink 0 on disk, its extents intact and no directory entry reaching it; the only thing that will free it is a
+// cfs_evict call that lives in this mount's memory. A crash or a forced unmount before that loses the inode and its
+// blocks for good, because no mount reconsiders them.
+//
+// Unlike the snapshot list, this is not a structure a commit edits: the set is derived from memory, so the record is
+// written out whole each time and the previous one released. Nothing is copied because nothing is edited.
+
+/// Safety: as commitMemberBitmap.
+unsafe fn orphanReleasePrevious(fs: *mut cfs) -> i32 {
+    let at = if (fsOf(fs).sb.version >= 10) fsOf(fs).sb.orphan_root else 0;
+    let rc = recordRelease(fs, at, CFS_KIND_ORPHAN, CFS_ORPHAN_MAX_CHAIN, "orphan");
+    if (rc != 0) {
+        return rc;
+    }
+    let f = fsOf(fs);
+    f.sb.orphan_root = 0;
+    return 0;
+}
+
+/// Write the set out whole, chained, from the reservation.
+/// Safety: as commitMemberBitmap; `res` the reservation.
+unsafe fn orphanFill(fs: *mut cfs, res: *mut cfs_res) -> i32 {
+    let f = fsOf(fs);
+    f.sb.orphan_root = 0;
+    if (f.sb.version < 10 || f.nr_orphans == 0) {
+        return 0;
+    }
+    if (f.test_fail_orphan) {
+        return -EIO; // test hook: fail with the reservation outstanding
+    }
+    let need = f.nr_orphans.wrappingAdd(CFS_ORPHANS_PER_BLOCK - 1) / CFS_ORPHANS_PER_BLOCK;
+    var head: u64 = 0;
+    var prev: u64 = 0;
+    var at: u32 = 0;
+    for (i in 0u32..need) {
+        let blk = cfs_res_take(res);
+        if (blk == 0) {
+            KernelLog.write(LogLevel.Error, "cosmofs: the commit's reservation is short of an orphan record block");
+            return -ENOSPC;
+        }
+        var b = 0 as *mut cfs_buf;
+        let rc = cfs_buf_new_at(fs, CFS_KIND_ORPHAN, blk, borrow mut b as *mut *mut cfs_buf);
+        if (rc != 0) {
+            cfs_res_untake(res);
+            return rc;
+        }
+        setWord(b, DEAD_NEXT, 0);
+        var k: u32 = 0;
+        while (k < CFS_ORPHANS_PER_BLOCK && at < f.nr_orphans) {
+            setWord(b, DEAD_BLK + k as usize * 8, f.orphans.add(at as usize).read());
+            k += 1;
+            at += 1;
+        }
+        setWord(b, DEAD_COUNT, k as u64);
+        cfs_mhdr_seal(fs, bufOf(b).data, CFS_KIND_ORPHAN, blk);
+        cfs_buf_mark_dirty(fs, b);
+        cfs_buf_put(fs, b);
+        // Chain forward: the block before this one names it, and it is still dirty and unwritten, so the edit reaches
+        // the disk.
+        if (prev != 0) {
+            let pb = cfs_buf_find(fs, prev);
+            if (pb.isNull()) {
+                errorLine("cosmofs: the orphan record's previous block ", prev, " went away");
+                return -EIO;
+            }
+            setWord(pb, DEAD_NEXT, blk);
+        } else {
+            head = blk;
+        }
+        prev = blk;
+    }
+    f.sb.orphan_root = head;
+    return 0;
+}
+
+/// Apply the record at mount: do what cfs_evict would have done for every inode the root still owed.
+///
+/// An inode whose slot is already empty is skipped *before* the inode_count decrement, not after it. That is what
+/// makes a repeated replay harmless -- a mount that replays and goes away without committing leaves the record
+/// standing, and the next mount reads it again -- and it is the one place the superblock's count could be taken twice
+/// off the same inode.
+/// Safety: as commitMemberBitmap.
+@export("cfs_orphan_replay")
+unsafe fn orphanReplay(fs: *mut cfs) -> i32 {
+    if (fsOf(fs).sb.version < 10 || !inodeFits()) {
+        return 0;
+    }
+    var at = fsOf(fs).sb.orphan_root;
+    var guard: u32 = 0;
+    var applied: u32 = 0;
+    var gone: u32 = 0;
+    var suspect: u32 = 0;
+    while (at != 0) {
+        let over = guard > CFS_ORPHAN_MAX_CHAIN;
+        guard += 1;
+        if (over) {
+            errorLine("cosmofs: orphan record chain too long at ", at, "");
+            return -EIO;
+        }
+        var b = 0 as *mut cfs_buf;
+        let rc = cfs_buf_get(fs, at, CFS_KIND_ORPHAN, borrow mut b as *mut *mut cfs_buf);
+        if (rc != 0) {
+            // The root says it owes these inodes and will not say which. Mounting anyway would leave an inode map that
+            // cannot be trusted, so the mount fails and the operator has a checker -- the same answer the free record
+            // gives.
+            errorRc("cosmofs: orphan record at ", at, " unreadable (", rc, "); refusing the mount");
+            return -EIO;
+        }
+        let next = word(b, DEAD_NEXT);
+        let count = word(b, DEAD_COUNT);
+        if (!cfs_orphan_count_ok(count)) {
+            var buffer = [0u8; 200];
+            var line = TextWriter.create(mut buffer[..]);
+            line.text("cosmofs: orphan record at ");
+            line.decimal(at);
+            line.text(" names ");
+            line.decimal(count);
+            line.text(" inodes, more than the ");
+            line.decimal(CFS_ORPHANS_PER_BLOCK as u64);
+            line.text(" a block holds; refusing the mount");
+            KernelLog.send(LogLevel.Error, line);
+            cfs_buf_put(fs, b);
+            return -EIO;
+        }
+        let inos = if (count != 0) kmalloc(count as usize * 8, 0) as *mut u64 else 0 as *mut u64;
+        if (count != 0 && inos.isNull()) {
+            cfs_buf_put(fs, b);
+            return -ENOMEM;
+        }
+        for (i in 0u64..count) {
+            inos.add(i as usize).write(word(b, DEAD_BLK + i as usize * 8));
+        }
+        cfs_buf_put(fs, b);
+        for (i in 0u64..count) {
+            let ino = inos.add(i as usize).read();
+            var slot = [0u64; 32];
+            let inode = borrow mut slot as *mut [u64; 32] as *mut cfs_inode;
+            // Raw, because every inode this record names has nlink 0 and the ordinary read calls that absent -- the
+            // same reason the structural check reads orphans this way.
+            if (cfs_inode_read_raw(fs, ino, inode) != 0) {
+                // One inode, not the map: report it and carry on, and the checker still finds it as an orphan.
+                var buffer = [0u8; 96];
+                var line = TextWriter.create(mut buffer[..]);
+                line.text("cosmofs: orphan record names inode ");
+                line.decimal(ino);
+                line.text(", which does not read");
+                KernelLog.send(LogLevel.Warn, line);
+                continue;
+            }
+            let n = Ptr.toBorrow(inode as *cfs_inode);
+            if (n.mode == 0 && n.size == 0 && n.ino == 0) {
+                gone += 1; // a commit got there first: not an error
+                continue;
+            }
+            // The record says this inode has no name. Check rather than believe: a record whose checksum is good and
+            // whose contents are wrong would otherwise have this delete a file somebody is still using, which is the
+            // worst thing in this file. Skipped rather than refused, because skipping leaves the filesystem exactly as
+            // it was and mountable, and the checker still reports the inode -- while refusing the mount would take the
+            // filesystem away from the operator to protect it from a leak.
+            if (n.nlink != 0) {
+                var buffer = [0u8; 128];
+                var line = TextWriter.create(mut buffer[..]);
+                line.text("cosmofs: orphan record names inode ");
+                line.decimal(ino);
+                line.text(", which has ");
+                line.decimal(n.nlink as u64);
+                line.text(" link(s); refusing to reclaim it");
+                KernelLog.send(LogLevel.Error, line);
+                suspect += 1;
+                continue;
+            }
+            // From the truncate on, a failure cannot be skipped. cfs_truncate_blocks frees every extent into
+            // pending_free and *then* stores the shortened extent list, so a failure leaves the blocks queued to be
+            // freed while the inode still names them -- and the first commit would publish that. The first version of
+            // this skipped such an inode under the comment "nothing changed for it", which was not true.
+            //
+            // Nothing has been published at this point, so failing the mount discards the whole transaction and leaves
+            // the filesystem exactly as it was found.
+            let trc = cfs_truncate_blocks(fs, inode, 0);
+            if (trc != 0) {
+                errorRc("cosmofs: orphan inode ", ino, " could not be released (", trc, "); refusing the mount");
+                kfree(inos as *mut void);
+                return trc;
+            }
+            var emptySlot = [0u64; 32];
+            let empty = borrow mut emptySlot as *mut [u64; 32] as *mut cfs_inode;
+            let wrc = cfs_inode_write(fs, ino, empty as *cfs_inode);
+            if (wrc != 0) {
+                errorRc("cosmofs: orphan inode ", ino, " was released but its slot could not be cleared (", wrc,
+                    "); refusing the mount");
+                kfree(inos as *mut void);
+                return wrc;
+            }
+            let f = fsOf(fs);
+            if (f.sb.inode_count > 0) {
+                f.sb.inode_count -= 1;
+            }
+            applied += 1;
+        }
+        kfree(inos as *mut void);
+        at = next;
+    }
+    let f = fsOf(fs);
+    f.replay_orphans = applied;
+    if ((applied != 0 || gone != 0) && !f.rdonly) {
+        var buffer = [0u8; 128];
+        var line = TextWriter.create(mut buffer[..]);
+        line.text("cosmofs: reclaimed ");
+        line.decimal(applied as u64);
+        line.text(" inode(s) unlinked with a handle open (");
+        line.decimal(gone as u64);
+        line.text(" already gone)");
+        KernelLog.send(LogLevel.Info, line);
+    }
+    if (suspect != 0) {
+        errorLine("cosmofs: the orphan record named ", suspect as u64,
+            " inode(s) that still have links; run the structural check");
+    }
+    return 0;
+}
+
+/// A commit that fails after cfs_snapshot_fill added deadlist entries cannot be retried: the entries stay in the open
+/// transaction, and the next attempt's fill would add the same blocks to the same list again
+/// (cfs_snapshot_deadlist_dups). The transaction is abandoned instead, as the fill itself does when it fails partway
+/// (CF17).
+/// Safety: `fs` is a mounted filesystem's state.
+unsafe fn commitUnfilled(fs: *mut cfs, rc: i32, appended: u32) -> i32 {
+    if (appended > 0) {
+        fail(fs, rc);
+    }
+    return rc;
+}
+
+/// The state blocks again, sealed and written: after a copy changed state during the commit that had already written
+/// them (cfs_commit_ex).
+/// Safety: as commitMemberBitmap.
+unsafe fn copystateRewrite(fs: *mut cfs) -> i32 {
+    var rc = cfs_copystate_fill(fs);
+    var v: u32 = 0;
+    while (v < fsOf(fs).nmembers && rc == 0) {
+        let stateRoot = memOf(fs, v).state_root;
+        v += 1;
+        if (stateRoot == 0) {
+            continue;
+        }
+        let b = cfs_buf_find(fs, stateRoot);
+        if (b.isNull()) {
+            return -EIO; // prepare made it dirty in this generation; it is cached
+        }
+        cfs_mhdr_seal(fs, bufOf(b).data, CFS_KIND_COPYSTATE, bufOf(b).blkno);
+        rc = pool_write(fsOf(fs).pool, bufOf(b).blkno, bufOf(b).data as *void);
+    }
+    return rc;
+}
+
+/// The commit's end after a failure: the verdicts freed, and the transaction abandoned when the deadlist was filled.
+/// Safety: as commitUnfilled; `held` null or kmalloc's.
+unsafe fn commitFailed(fs: *mut cfs, held: *mut bool, rc: i32, appended: u32) -> i32 {
+    kfree(held as *mut void);
+    return commitUnfilled(fs, rc, appended);
+}
+
+/// Clear the bits of the blocks in `list`, `n` of them, skipping the held ones when there is a verdict.
+/// Safety: as commitMemberBitmap; `list` `n` entries; `held` null or `heldN` verdicts.
+unsafe fn releaseAll(fs: *mut cfs, list: *mut u64, n: u32, held: *bool, heldN: u32) {
+    for (i in 0u32..n) {
+        if (!held.isNull() && i < heldN && held.add(i as usize).read()) {
+            continue; // a snapshot's, and already on its deadlist
+        }
+        let dva = list.add(i as usize).read();
+        let lin = cfs_dva_lin(fs as *cfs, dva);
+        if (lin == CFS_DVA_NONE || !bitTest(fs, lin)) {
+            continue;
+        }
+        release(fs, dva, lin);
+    }
+}
+
+/// The commit. `published` (optional) says whether *this call* put a new root on disk. It is not derivable from the
+/// generation number: a commit that fails after `fs->sb.generation = fs->gen` -- at the label update, the flush or the
+/// superblock write, all three below -- leaves the number advanced and `fs->gen` where it was, because only success
+/// reaches the `fs->gen++` at the end. A later retry then republishes the same number, and a caller comparing before
+/// against after would see no change and conclude nothing was published. Nor is `rc == 0` enough: the early return
+/// below is "there was nothing to commit".
+/// Safety: as commitMemberBitmap; `published` null or writable.
+@export("cfs_commit_ex")
+unsafe fn commitEx(fs: *mut cfs, published: *mut bool) -> i32 {
+    if (!published.isNull()) {
+        published.write(false);
+    }
+    let f = fsOf(fs);
+    if (f.failed != 0) {
+        return f.failed;
+    }
+    // A read-only mount writes nothing (CFS-1): what its replay changed stays in memory, and a writable mount replays
+    // it again.
+    if (f.rdonly) {
+        return 0;
+    }
+    if (f.nr_dirty == 0 && f.nr_pending == 0 && f.nr_exempt == 0) {
+        // A copy that changed state is something to record, with or without a change to the tree (design.md, "Format
+        // version 13").
+        var any = Ptr.toBorrow(f.pool as *spool).state_seq != f.copystate_seq;
+        for (c in 0u32..f.nr_chunks) {
+            any = any || f.bitmap_dirty.add(c as usize).read() != 0;
+        }
+        if (!any) {
+            return 0;
+        }
+    }
+    // Test hook: the machine "stops" at this commit.
+    if (cfs_commit_floor_stopped(fs)) {
+        fail(fs, -EIO);
+        return -EIO;
+    }
+    // The record of what this transaction frees (docs/audit/next-subsystem-unmount-leak.md). The order below is the
+    // design, and both halves of it are load-bearing:
+    //
+    //  - Everything that allocates must happen *before* commitBitmap, which is the one pass that makes the on-disk
+    //    bitmap agree with the bits in memory. Allocating after it publishes a root whose bitmap does not know about
+    //    the blocks, so the next allocation hands them out and the filesystem eats its own metadata.
+    //  - The set to record is not final until commitBitmap has run, because it frees every chunk and index it copies.
+    //
+    // Reserve before, fill after: that breaks the circle without a second pass and without a loop.
+    //
+    // Only from version 9. Below it the superblock word is the first of `reserved[5]` and writing a chain head there
+    // would put a pointer in a field an older kernel does not know about -- and this kernel would not read it back
+    // either, since the gate is on reading too, so every record would be a leak nobody could see.
+    //
+    // The copy state's blocks, and the raise to 13 the first of them needs: before anything is reserved, because they
+    // take blocks and a raise rewrites the snapshot list (design.md, "The record, written by the commit").
+    var rc = cfs_copystate_prepare(fs);
+    if (rc != 0) {
+        return rc;
+    }
+    let recordFrees = fsOf(fs).sb.version >= 9;
+    // The clones' roots into their entries, on a copy of the list: before anything below allocates past the fixpoint.
+    rc = cfs_clones_publish(fs);
+    if (rc != 0) {
+        return rc;
+    }
+    var resSlot = [0u64; 2];
+    let res = borrow mut resSlot as *mut [u64; 2] as *mut cfs_res;
+    var held = 0 as *mut bool;
+    var appended: u32 = 0; // deadlist entries this attempt added: a retry would add them again
+    var heldN: u32 = 0;
+    if (recordFrees) {
+        rc = freelogReleasePrevious(fs);
+        if (rc != 0) {
+            return rc;
+        }
+    }
+    // The same for what this root still owes: the old record's blocks are freed by this transaction, so they are
+    // entries in the new free record like any other.
+    if (fsOf(fs).sb.version >= 10) {
+        rc = orphanReleasePrevious(fs);
+        if (rc != 0) {
+            return rc;
+        }
+    }
+    // Always, not only from version 9: the deadlist fill below needs its blocks on any filesystem that has a snapshot,
+    // and a release loop that cannot record a hold is a release loop that frees a snapshot's blocks.
+    rc = commitReserve(fs, res, recordFrees);
+    if (rc != 0) {
+        return rc;
+    }
+
+    rc = commitBitmap(fs);
+    // The deadlist, before the record and before the root. It takes the verdict for every pending free once and puts
+    // the held ones on a copy of the snapshot's deadlist; the record then names what is left, and the release loop
+    // below clears exactly that (docs/audit/next-subsystem-snap-deadlist.md).
+    if (rc == 0 && fsOf(fs).nr_pending > 0 && fsOf(fs).snap_count > 0) {
+        heldN = fsOf(fs).nr_pending;
+        held = kzalloc(heldN as usize) as *mut bool;
+        if (held.isNull()) {
+            rc = -ENOMEM;
+        } else {
+            rc = cfs_snapshot_fill(fs, res, held, heldN, borrow mut appended as *mut u32);
+        }
+        if (rc == 0 && fsOf(fs).nr_pending != heldN) {
+            // Nothing in the fill defers a free, so this cannot move. If it ever does, the record would name a block a
+            // snapshot holds, so the commit stops rather than guessing.
+            var buffer = [0u8; 128];
+            var line = TextWriter.create(mut buffer[..]);
+            line.text("cosmofs: the pending list moved during the deadlist fill (");
+            line.decimal(heldN as u64);
+            line.text(" -> ");
+            line.decimal(fsOf(fs).nr_pending as u64);
+            line.text(")");
+            KernelLog.send(LogLevel.Error, line);
+            rc = -EIO;
+        }
+    }
+    // Before the free record and after the deadlist, for the same reason the deadlist is before the record: it takes
+    // blocks from the shared reservation and its predecessor's blocks are frees this root must be able to name. The
+    // record is last because it names the leftovers.
+    if (rc == 0) {
+        rc = orphanFill(fs, res);
+    }
+    let r = Ptr.toBorrowMut(res);
+    let snapUsed = r.used;
+    if (rc == 0 && recordFrees) {
+        rc = freelogFill(fs, r.blk.add(r.used as usize), r.n - r.used, held as *bool, heldN);
+    } else if (rc == 0) {
+        // No record on this filesystem, so nothing will name the blocks the reservation did not need: give them back.
+        // They are free from the next commit, which is the same bargain a version-8 filesystem already makes with
+        // every other deferred free.
+        for (i in r.used..r.n) {
+            cfs_free_block_deferred(fs, r.blk.add(i as usize).read());
+        }
+        r.used = r.n;
+    }
+    if (rc != 0 && !r.blk.isNull()) {
+        // This root will not be published, so nothing names the blocks the record's share of the reservation took.
+        // Left allocated they are a leak the *next* successful commit makes durable, because that commit writes this
+        // bitmap. Give them back the way every other rolled-back allocation in a transaction does -- deferred, so the
+        // bit survives until a root says they are free -- and drop whatever freelogFill had already written into them,
+        // which must not reach the disk under an owner that no longer exists.
+        //
+        // The snapshot list's share -- `res.blk[0 .. snapUsed)` -- is *not* given back, because `fs->sb.snap_root`
+        // names it. The copy stays in the still-open transaction, where the next attempt finds it stamped with this
+        // generation and copies nothing; giving it back would leave the root pointing at a block the allocator had
+        // handed away.
+        for (i in snapUsed..r.n) {
+            let blk = r.blk.add(i as usize).read();
+            let b = cfs_buf_find(fs, blk);
+            if (!b.isNull()) {
+                cfs_buf_mark_clean(fs, b);
+            }
+            cfs_free_block_deferred(fs, blk);
+        }
+        let g = fsOf(fs);
+        g.sb.free_root = 0;
+        g.sb.orphan_root = 0;
+    }
+    kfree(r.blk as *mut void);
+    if (rc != 0) {
+        return commitFailed(fs, held, rc, appended);
+    }
+
+    // What each copy that will miss this commit missed, this commit included: the record is the last metadata to
+    // change (CF25).
+    rc = cfs_copystate_fill(fs);
+    if (rc != 0) {
+        return commitFailed(fs, held, rc, appended);
+    }
+    let pool = fsOf(fs).pool;
+    var filledSeq = Ptr.toBorrow(pool as *spool).state_seq;
+
+    // Every dirty metadata block, re-sealed with its final contents.
+    let head = borrow mut fsOf(fs).bufs as *mut list_node;
+    var node = List.first(head as *list_node);
+    while (!node.isNull()) {
+        let b = bufOfLink(node);
+        node = List.next(head as *list_node, node);
+        if (!bufOf(b).dirty) {
+            continue;
+        }
+        let data = bufOf(b).data;
+        let kind = ByteOrder.readU32LE(Slice.fromRaw(data as *u8, 64), MHDR_KIND);
+        cfs_mhdr_seal(fs, data, kind, bufOf(b).blkno);
+        rc = pool_write(pool, bufOf(b).blkno, data as *void);
+        if (rc != 0) {
+            return commitFailed(fs, held, rc, appended);
+        }
+    }
+
+    // The root, into the other slot, flushed before and after (one call: the block layer runs flush, write, flush).
+    // free_blocks excludes this transaction's pending frees: they are still referenced by the previous root until this
+    // one is on disk.
+    let g = fsOf(fs);
+    g.sb.generation = g.gen;
+    g.sb.free_blocks = g.free_blocks;
+    // Every device's label carries the commit it took part in, stamped after that commit's blocks are stable and
+    // before the root that publishes them: a label is never newer than the root it belongs to, so a device that misses
+    // a commit can be told apart at the next mount (design.md, "Format version 5").
+    rc = cfs_labels_update(fs);
+    if (rc != 0) {
+        return commitFailed(fs, held, rc, appended);
+    }
+    // Now make all of it stable, on every device. The root write's own preflush reaches only the devices carrying the
+    // superblock, which is member 0's; a root that names blocks still sitting in another member's write cache is a
+    // root that can outlive them. This is not about labels alone -- it has been true of every block on another member
+    // since a pool could have more than one.
+    //
+    // A copy that died while those were written is one the records just written do not describe: write them again --
+    // they are this generation's blocks -- and flush again, until the state holds still (CF25). Each round takes a copy
+    // out, so it ends.
+    var round: u32 = 0;
+    while (true) {
+        if (Ptr.toBorrow(pool as *spool).state_seq != filledSeq) {
+            rc = copystateRewrite(fs);
+            filledSeq = Ptr.toBorrow(pool as *spool).state_seq;
+            if (rc != 0) {
+                return commitFailed(fs, held, rc, appended);
+            }
+        }
+        rc = pool_flush(pool);
+        if (rc != 0) {
+            return commitFailed(fs, held, rc, appended);
+        }
+        if (Ptr.toBorrow(pool as *spool).state_seq == filledSeq || round >= 2 * POOL_MAX_COPIES) {
+            break;
+        }
+        round += 1;
+    }
+    // test-snapshot's crash point "during the switch".
+    cfs_commit_floor_switch_stop(fs);
+    let slot = if (fsOf(fs).sb_slot == CFS_SUPER_A) CFS_SUPER_B else CFS_SUPER_A;
+    rc = superWrite(fs, slot, BIO_PREFLUSH | BIO_FUA);
+    if (rc != 0) {
+        return commitFailed(fs, held, rc, appended);
+    }
+    let h = fsOf(fs);
+    h.sb_slot = slot;
+    h.commits = h.commits.wrappingAdd(1);
+    h.first_dirty_ns = 0;
+    pool_commit_done(pool, h.sb.generation);
+    if (cfs_copystate_recorded(fs)) {
+        let k = fsOf(fs);
+        k.copystate_seq = filledSeq;
+    }
+
+    // The new root is durable: the old generation's blocks are free.
+    node = List.first(head as *list_node);
+    while (!node.isNull()) {
+        let k = bufOf(bufOfLink(node));
+        k.dirty = false;
+        node = List.next(head as *list_node, node);
+    }
+    let k = fsOf(fs);
+    k.nr_dirty = 0;
+    // A block reaches pending_free exactly when the previous tree named it and the new one does not -- which is what a
+    // snapshot still names. While one exists the block is remembered on its deadlist and its bitmap bit stays set, so
+    // the allocator never hands it out (design.md, "Not freeing what a snapshot names").
+    //
+    // What is left here is the clearing. The remembering happened before the root, in cfs_snapshot_fill, and `held` is
+    // that verdict: this loop neither allocates, nor writes, nor asks the snapshot list anything. It used to do all
+    // three, and that is what a crash and an unmount each lost half of (docs/audit/next-subsystem-snap-deadlist.md).
+    releaseAll(fs, k.pending_free, k.nr_pending, held as *bool, heldN);
+    k.nr_pending = 0;
+    kfree(held as *mut void);
+    // And the blocks no snapshot may hold, with no filter at all.
+    releaseAll(fs, k.pending_exempt, k.nr_exempt, 0 as *bool, 0);
+    k.nr_exempt = 0;
+    k.gen = k.gen.wrappingAdd(1);
+    // The frees dirtied bitmap chunks for the next commit; that is bookkeeping of this commit, not a new change to age.
+    k.first_dirty_ns = 0;
+    // A copy whose state this commit could not record is a commit still due, whether or not anything else is written
+    // (Codex on #439): the writeback thread commits only what is marked dirty.
+    if (Ptr.toBorrow(pool as *spool).state_seq != k.copystate_seq) {
+        cfs_note_dirty(fs);
+    }
+    var buffer = [0u8; 96];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("cosmofs: committed generation ");
+    line.decimal(k.sb.generation);
+    line.text(" (");
+    line.decimal(k.free_blocks);
+    line.text(" free blocks)");
+    KernelLog.send(LogLevel.Debug, line);
+    if (!published.isNull()) {
+        published.write(true);
+    }
+    return 0;
+}
+
+/// A commit publishes the live tree's roots and every clone's: an operation inside a clone that commits (fsync) leaves
+/// it first.
+/// Safety: as commitMemberBitmap.
+@export("cfs_commit")
+unsafe fn commit(fs: *mut cfs) -> i32 {
+    let c = fsOf(fs).cur_clone;
+    if (!c.isNull()) {
+        cfs_clone_leave(fs);
+    }
+    let rc = commitEx(fs, 0 as *mut bool);
+    if (!c.isNull()) {
+        cfs_clone_enter(fs, c);
+    }
+    return rc;
+}

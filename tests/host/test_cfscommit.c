@@ -1,5 +1,5 @@
 /*
- * test_cfscommit.c - cosmofs's commit (kernel-services/filesystem/cosmofs/cosmofs_commit.c) on the host: roadmap 2.0
+ * test_cfscommit.c - cosmofs's commit (kernel-services/filesystem/cosmofs/cosmofs_commit.cee) on the host: roadmap 2.0
  * SA7. A digest recorded from the C over seeded filesystems the test builds and owns, with the real buffer cache and
  * header seals (cosmofs_buf.cee), the real allocator and inode map (cosmofs_alloc.cee) and the real decoders
  * (cfsparse): pools of one or two members whose allocation indexes, inode maps, free records and orphan records are on
@@ -26,6 +26,24 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* The values the CeeSafe port writes as its own constants. */
+_Static_assert(EIO == 5 && ENOMEM == 12 && ENOSPC == 28 && KMEM_ZERO == 1 && BIO_PREFLUSH == 1 && BIO_FUA == 2 &&
+                   POOL_WRITE_ONLINE == 0x80000000u && POOL_MAX_COPIES == 4,
+               "cosmofs_commit's errno.h, kmalloc.h, blk.h and storage.h values");
+_Static_assert(CFS_DVA_NONE == 0xFFFFFFFFFFFFFFFFull && CFS_DVA_VDEV_SHIFT == 56 &&
+                   CFS_DVA_BLK_MASK == 0x00FFFFFFFFFFFFFFull && CFS_BLOCK == 4096 && CFS_MHDR_SIZE == 32 &&
+                   CFS_BITS_PER_BITMAP == 32512 && CFS_SUPER_A == 0 && CFS_SUPER_B == 1 && CFS_INODE_SIZE == 256 &&
+                   CFS_KIND_ALLOCIDX == 4 && CFS_KIND_BITMAP == 5 && CFS_KIND_FREELOG == 13 &&
+                   CFS_KIND_ORPHAN == 14 && CFS_KIND_COPYSTATE == 17 && CFS_ALLOC_META == 0 &&
+                   CFS_DEAD_PER_BLOCK == 506 && CFS_ORPHANS_PER_BLOCK == 506,
+               "cosmofs_commit's cosmofs_format.h and cosmofs_internal.h values");
+_Static_assert(offsetof(struct cfs_mhdr, kind) == 4 && offsetof(struct cfs_dead_block, next) == 0 &&
+                   offsetof(struct cfs_dead_block, count) == 8 && offsetof(struct cfs_dead_block, blk) == 16,
+               "cosmofs_commit.cee reads and writes a record block at these offsets");
+/* cosmofs_commit.cee keeps an inode in a stack slot of 32 words and the reservation in one of 2. */
+_Static_assert(sizeof(struct cfs_inode) <= 32 * 8 && sizeof(struct cfs_res) <= 2 * 8 && sizeof(bool) == 1,
+               "cosmofs_commit.cee's stack slots");
 
 /* The digest of the C (cosmofs_commit.c, 2026-11-07), which the CeeSafe port gives. */
 #define COMMIT_DIGEST 0xddff362db23559a0ull

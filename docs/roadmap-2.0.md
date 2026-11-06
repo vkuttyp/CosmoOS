@@ -1386,6 +1386,20 @@ tagged and untagged, prepared, allocated and discarded
 (0x583d1da8b67f7b98, clang and gcc; every line and branch).
 `cfs_note_dirty` stayed in `cosmofs_core.c`: it starts the writeback
 thread.
+`cosmofs_commit.cee`, the third, the commit and its records:
+`tests/host/test_cfscommit.c` runs it with the real buffer cache,
+allocator and decoders over a disk it keeps -- formats 8 to 15, a
+mount's replay of the free and orphan records (sound, damaged, in a loop,
+too long), transactions that allocate, free, write inodes and orphan
+hundreds of them, on pools nearly full, with snapshots holding blocks,
+copies changing state at every flush and the hooks that stop a commit
+(0xddff362db23559a0, clang and gcc; every line and branch that can be
+reached -- the orphan replay's "already gone" inode cannot, since
+`cfs_inode_read_raw` refuses an emptied slot first).
+`cosmofs_commit_floor.c` keeps the two test seams a build configuration
+decides: the debug build's stop-at-this-commit and `COSMOFS_STOP`'s
+crash point. `cfs_sync_vnodes` stayed in `cosmofs_core.c` with the VFS
+side of the mount.
 
 Size: about 4.5x.
 

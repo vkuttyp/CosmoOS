@@ -128,6 +128,8 @@ PORTS = [
     ("kernel-services/filesystem/cosmofs/cosmofs_member.cee", "kernel-services/filesystem/cosmofs/cosmofs_member.c",
      "cosmofs's members: labels, assembly, copy state, the member table, read repair (cosmofs_internal.h)", None,
      True),
+    ("kernel-services/filesystem/cosmofs/cosmofs_commit.cee", "kernel-services/filesystem/cosmofs/cosmofs_commit.c",
+     "cosmofs's commit, its bitmap fixpoint, and the free and orphan records (cosmofs_internal.h)", None, True),
     ("kernel-services/filesystem/cosmofs/cosmofs_alloc.cee", "kernel-services/filesystem/cosmofs/cosmofs_alloc.c",
      "cosmofs's allocator, free and orphan lists, and inode map (cosmofs_internal.h)", None, True),
     ("kernel-services/filesystem/cosmofs/cosmofs_buf.cee", "kernel-services/filesystem/cosmofs/cosmofs_buf.c",

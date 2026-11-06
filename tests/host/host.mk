@@ -181,6 +181,7 @@ HOST_CFSALLOC_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/cos
 	tests/host/ceesafe_panic.c tests/host/test_cfsalloc.c
 # cosmofs's commit with the real buffer cache, allocator, inode map and decoders: the disk, the pool and every other hook are the test's.
 HOST_CFSCOMMIT_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/cosmofs_commit.c \
+	kernel-services/filesystem/cosmofs/cosmofs_commit_floor.c \
 	kernel-services/filesystem/cosmofs/cosmofs_buf.c kernel-services/filesystem/cosmofs/cosmofs_buf_floor.c \
 	kernel-services/filesystem/cosmofs/cosmofs_alloc.c kernel-services/filesystem/cosmofs/cfsparse.c kernel/core/crc32c.c \
 	kernel/security/blake2b.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_cfscommit.c
