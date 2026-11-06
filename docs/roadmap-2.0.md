@@ -1362,6 +1362,19 @@ step), and `deadlist_settle` returns -ENOMEM for one, since `kmalloc(0)`
 is NULL (kept; only a damaged pool has such a block).
 `tools/release-describe-probe.py` puts the message's old words back in
 the port by their text.
+`cosmofs_core.c` is taken apart a section at a time, each moved into a
+file of its own unchanged, then held to a digest and ported.
+`cosmofs_buf.cee`, the first, the header and superblock seals and the
+buffer cache: `tests/host/test_cfsbuf.c` runs them with the real
+BLAKE2b, CRC32C and decoders over blocks sealed by CRC and by MAC,
+damaged in each field a header has, read through a repair with a good
+copy or none; superblocks of every version with and without their key;
+and a cache filled past its size, with buffers held, dirtied, cleaned,
+copied on write and set aside (0x42be94733b86cd16, clang and gcc; every
+line and branch that can be reached). `cosmofs_buf_floor.c` keeps the
+metadata MAC, whose domain is a C `char`; the set-aside's array of
+buffer pointers is reached by its offset, which an imported struct's
+field cannot be.
 
 Size: about 4.5x.
 

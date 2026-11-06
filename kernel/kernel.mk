@@ -181,6 +181,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel-services/storage/pool_floor.c \
 	kernel-services/filesystem/cosmofs/cosmofs_core.c \
 	kernel-services/filesystem/cosmofs/cosmofs_buf.c \
+	kernel-services/filesystem/cosmofs/cosmofs_buf_floor.c \
 	kernel-services/filesystem/cosmofs/cosmofs_snap.c \
 	kernel-services/filesystem/cosmofs/cosmofs_snap_floor.c \
 	kernel-services/filesystem/cosmofs/cosmofs_reach.c \
@@ -362,7 +363,7 @@ $(OUT)/kernel-services/network/nettest_bench.o $(OUT)/kernel-services/network/ne
 $(OUT)/kernel-services/network/nettest_harness.o $(OUT)/kernel-services/network/nettest_harness.analyzed: EXTRA_CFLAGS += -I$(ROOT)/kernel-services/network
 $(OUT)/kernel-services/network/nettest_frame.o $(OUT)/kernel-services/network/nettest_frame.analyzed: EXTRA_CFLAGS += -I$(ROOT)/kernel-services/network
 
-# kernel-services/filesystem/cosmofs/cfsparse.c, cosmofs_reach.c, cosmofs_clone.c, cosmofs_rollback.c, cosmofs_scrub.c, cosmofs_crypt.c, cosmofs_resilver.c, cosmofs_member.c, cosmofs_check.c and cosmofs_snap.c are generated from their .cee into out/cee (scripts/cee-gen.py), away
+# kernel-services/filesystem/cosmofs/cfsparse.c, cosmofs_reach.c, cosmofs_clone.c, cosmofs_rollback.c, cosmofs_scrub.c, cosmofs_crypt.c, cosmofs_resilver.c, cosmofs_member.c, cosmofs_check.c, cosmofs_snap.c and cosmofs_buf.c are generated from their .cee into out/cee (scripts/cee-gen.py), away
 # from the cosmofs_internal.h they include by name: their objects, and their analyses, look in the cosmofs directory too.
 $(OUT)/kernel-services/filesystem/cosmofs/cfsparse.o $(OUT)/kernel-services/filesystem/cosmofs/cfsparse.analyzed: \
 	EXTRA_CFLAGS += -I$(ROOT)/kernel-services/filesystem/cosmofs
@@ -383,4 +384,6 @@ $(OUT)/kernel-services/filesystem/cosmofs/cosmofs_member.o $(OUT)/kernel-service
 $(OUT)/kernel-services/filesystem/cosmofs/cosmofs_check.o $(OUT)/kernel-services/filesystem/cosmofs/cosmofs_check.analyzed: \
 	EXTRA_CFLAGS += -I$(ROOT)/kernel-services/filesystem/cosmofs
 $(OUT)/kernel-services/filesystem/cosmofs/cosmofs_snap.o $(OUT)/kernel-services/filesystem/cosmofs/cosmofs_snap.analyzed: \
+	EXTRA_CFLAGS += -I$(ROOT)/kernel-services/filesystem/cosmofs
+$(OUT)/kernel-services/filesystem/cosmofs/cosmofs_buf.o $(OUT)/kernel-services/filesystem/cosmofs/cosmofs_buf.analyzed: \
 	EXTRA_CFLAGS += -I$(ROOT)/kernel-services/filesystem/cosmofs

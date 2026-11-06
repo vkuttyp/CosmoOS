@@ -172,6 +172,7 @@ HOST_CFSSNAP_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/cosm
 	tests/host/ceesafe_panic.c tests/host/test_cfssnap.c
 # cosmofs's checksums, headers and buffer cache with the real BLAKE2b, CRC32C and decoders: the pool, the repair, the key table and the allocator are the test's.
 HOST_CFSBUF_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/cosmofs_buf.c \
+	kernel-services/filesystem/cosmofs/cosmofs_buf_floor.c \
 	kernel-services/filesystem/cosmofs/cfsparse.c kernel/core/crc32c.c kernel/security/blake2b.c \
 	kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_cfsbuf.c
 HOST_CFSPARSE_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/cfsparse.c kernel/core/crc32c.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_cfsparse.c

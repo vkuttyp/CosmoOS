@@ -1,5 +1,5 @@
 /*
- * test_cfsbuf.c - cosmofs's checksums, headers and buffer cache (kernel-services/filesystem/cosmofs/cosmofs_buf.c)
+ * test_cfsbuf.c - cosmofs's checksums, headers and buffer cache (kernel-services/filesystem/cosmofs/cosmofs_buf.cee)
  * on the host: roadmap 2.0 SA7. A digest recorded from the C over seeded filesystems the test builds and owns, with the
  * real BLAKE2b, CRC32C and header and superblock decoders (cfsparse): metadata blocks sealed by CRC and by MAC, damaged
  * in each field a header has, read through a repair that has a good copy or not; superblocks of every version, CRC'd
@@ -24,6 +24,23 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* The values the CeeSafe port writes as its own constants. */
+_Static_assert(EIO == 5 && ENOMEM == 12 && EFBIG == 27 && ENOSPC == 28 && ENOKEY == 126 && KMEM_ZERO == 1,
+               "cosmofs_buf's errno.h and kmalloc.h values");
+_Static_assert(CFS_DVA_NONE == 0xFFFFFFFFFFFFFFFFull && CFS_DVA_VDEV_SHIFT == 56 &&
+                   CFS_DVA_BLK_MASK == 0x00FFFFFFFFFFFFFFull && CFS_BLOCK == 4096 && CFS_BUF_CACHE == 64 &&
+                   CFS_PREP_MAX == 18 && CFS_BITS_PER_BITMAP == 32512 && CFS_MHDR_MAGIC == 0x4d534643u &&
+                   CFS_CSUM_CRC32C == 1 && CFS_ALLOC_META == 0 && MHDR_OK == 0 && MHDR_MAC == 6,
+               "cosmofs_buf's cosmofs_format.h and cosmofs_internal.h values");
+_Static_assert(offsetof(struct cfs_mhdr, magic) == 0 && offsetof(struct cfs_mhdr, kind) == 4 &&
+                   offsetof(struct cfs_mhdr, generation) == 8 && offsetof(struct cfs_mhdr, blkno) == 16 &&
+                   offsetof(struct cfs_mhdr, crc) == 24 && offsetof(struct cfs_mhdr, csum_algo) == 28 &&
+                   offsetof(struct cfs_super, crc) == 160 && offsetof(struct cfs_prep, buf) == 152 &&
+                   sizeof(((struct cfs_prep *)0)->blk) == 18 * 8,
+               "cosmofs_buf.cee reads and writes these structures at these offsets");
+/* cosmofs_buf.cee keeps a struct cfs_mac in a stack slot of 5 words. */
+_Static_assert(sizeof(struct cfs_mac) <= 5 * 8, "cosmofs_buf.cee's stack slot");
 
 /* The digest of the C (cosmofs_buf.c, 2026-11-07), which the CeeSafe port gives. */
 #define BUF_DIGEST 0x42be94733b86cd16ull
