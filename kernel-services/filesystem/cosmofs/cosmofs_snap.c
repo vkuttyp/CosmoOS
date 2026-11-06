@@ -1632,7 +1632,8 @@ int cfs_snapshot_deadlists_filter(struct cfs *fs, bool (*live)(void *arg, uint64
                     rc = -ENOMEM;
                     break;
                 }
-                memcpy(blks, d->blk, (size_t)n * sizeof(*blks));
+                if (n)
+                    memcpy(blks, d->blk, (size_t)n * sizeof(*blks));   /* not with NULL, even for nothing */
                 cfs_buf_put(fs, db);
                 for (uint64_t k = 0; k < n && rc == 0; k++) {
                     if (live(arg, blks[k]))
