@@ -186,6 +186,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel-services/filesystem/cosmofs/cosmofs_commit_floor.c \
 	kernel-services/filesystem/cosmofs/cosmofs_format.c \
 	kernel-services/filesystem/cosmofs/cosmofs_corrupt.c \
+	kernel-services/filesystem/cosmofs/cosmofs_hooks.c \
 	kernel-services/filesystem/cosmofs/cosmofs_buf_floor.c \
 	kernel-services/filesystem/cosmofs/cosmofs_snap.c \
 	kernel-services/filesystem/cosmofs/cosmofs_snap_floor.c \
