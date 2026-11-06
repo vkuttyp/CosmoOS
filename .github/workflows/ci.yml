@@ -1476,7 +1476,7 @@ jobs:
   guide-macos:
     name: user guide commands (macos, ${{ matrix.arch }})
     if: github.event_name == 'push'
-    runs-on: macos-14
+    runs-on: macos-15
     needs: release-set
     strategy:
       fail-fast: false

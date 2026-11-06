@@ -230,7 +230,7 @@ jobs:
 
   guide-macos:
     name: guide (macos, ${{ matrix.arch }})
-    runs-on: macos-14
+    runs-on: macos-15
     needs: build
     strategy:
       fail-fast: false
