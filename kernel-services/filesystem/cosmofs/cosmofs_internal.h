@@ -501,7 +501,7 @@ int cfs_members_store(struct cfs *fs);
 void cfs_members_free(struct cfs *fs);
 /* Format-time: the label that lets a mount find this member again. */
 int cfs_label_write(struct spool *pool, const struct cfs_mac *mac, unsigned vdev, unsigned copy, uint64_t generation,
-                    const uint8_t uuid[16], uint64_t nblocks);
+                    const uint8_t *uuid, uint64_t nblocks);   /* uuid: 16 bytes */
 /* Stamp every attached copy's label with this generation, just before
  * the root that generation publishes. */
 int cfs_labels_update(struct cfs *fs);

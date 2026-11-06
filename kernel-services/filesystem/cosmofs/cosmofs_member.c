@@ -62,7 +62,7 @@ static bool label_sealed(const struct cfs_mac *mac, const uint8_t *block)
 }
 
 int cfs_label_write(struct spool *pool, const struct cfs_mac *mac, unsigned vdev, unsigned copy, uint64_t generation,
-                    const uint8_t uuid[16], uint64_t nblocks)
+                    const uint8_t *uuid, uint64_t nblocks)
 {
     uint8_t *block = kmalloc(CFS_BLOCK, KMEM_ZERO);
     if (block == NULL)
