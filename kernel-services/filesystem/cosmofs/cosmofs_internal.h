@@ -354,6 +354,22 @@ int cfs_super_slots(struct blkdev *bd, struct cfs_super *a, int *ra, struct cfs_
 bool cfs_mount_failure(const struct blkdev *bd, unsigned *stage, int *rc);
 int cfs_buf_new(struct cfs *fs, uint32_t kind, struct cfs_buf **out);   /* fresh zeroed block, dirty */
 void cfs_buf_mark_dirty(struct cfs *fs, struct cfs_buf *b);
+/* cosmofs_buf.c's parts the rest of the filesystem uses: a header's seal in
+ * the open transaction's generation, a superblock's, a cached buffer by
+ * address, a new one put in the cache, and a dirty buffer given back clean
+ * (a rollback's: its block is being given back too). */
+void cfs_mhdr_seal(struct cfs *fs, uint8_t *block, uint32_t kind, uint64_t blkno);
+void cfs_super_seal(const struct cfs_mac *mac, uint8_t *block);
+struct cfs_buf *cfs_buf_find(struct cfs *fs, uint64_t blkno);
+struct cfs_buf *cfs_buf_alloc(struct cfs *fs, uint64_t blkno);
+void cfs_buf_mark_clean(struct cfs *fs, struct cfs_buf *b);
+/* cosmofs_core.c: the open transaction is no longer empty -- its age starts,
+ * and a writeback thread with it. */
+void cfs_note_dirty(struct cfs *fs);
+/* Bit `i` of a byte map. */
+static inline bool cfs_bit_test(const uint8_t *map, uint64_t i) { return (map[i >> 3] >> (i & 7)) & 1; }
+static inline void cfs_bit_set(uint8_t *map, uint64_t i) { map[i >> 3] |= (uint8_t)(1u << (i & 7)); }
+static inline void cfs_bit_clear(uint8_t *map, uint64_t i) { map[i >> 3] &= (uint8_t)~(1u << (i & 7)); }
 /* Dirty in the open transaction: in memory only (the scrub's question). */
 bool cfs_buf_is_dirty(struct cfs *fs, uint64_t blkno);
 
