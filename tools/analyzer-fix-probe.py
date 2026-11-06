@@ -42,6 +42,7 @@ CASES = {
 # without saying anything: only the old mode still shows the defect.
 MOVED = {
     "cosmofs-freelog": "kernel-services/filesystem/cosmofs/cosmofs_commit.c",
+    "cosmofs-corrupt": "kernel-services/filesystem/cosmofs/cosmofs_corrupt.c",
 }
 
 
