@@ -28,7 +28,7 @@ struct sha512_ctx {
 
 void sha512_init(struct sha512_ctx *ctx);
 void sha512_update(struct sha512_ctx *ctx, const void *data, size_t len);
-void sha512_final(struct sha512_ctx *ctx, uint8_t out[SHA512_DIGEST_SIZE]);
+void sha512_final(struct sha512_ctx *ctx, uint8_t *out);   /* SHA512_DIGEST_SIZE bytes */
 void sha512(const void *data, size_t len, uint8_t out[SHA512_DIGEST_SIZE]);
 
 #define ED25519_PUBLIC_KEY_SIZE 32

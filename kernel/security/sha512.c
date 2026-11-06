@@ -135,7 +135,7 @@ void sha512_update(struct sha512_ctx *ctx, const void *data, size_t len)
     }
 }
 
-void sha512_final(struct sha512_ctx *ctx, uint8_t out[SHA512_DIGEST_SIZE])
+void sha512_final(struct sha512_ctx *ctx, uint8_t *out)
 {
     uint64_t bits_lo = ctx->count << 3;
     uint64_t bits_hi = ctx->count >> 61;

@@ -1414,7 +1414,9 @@ is good.
 
 The constitution (section 52) asks for an explicit answer to seven
 questions rather than a copy of somebody else's semantics. Here they
-are, in the order the code implements them.
+are, in the order the code implements them. The keys, the key blocks,
+the key table and the key operations are `cosmofs_crypt.cee` (roadmap
+2.0 SA7).
 
 ### The layer: a pool, keyed per file
 

@@ -148,7 +148,8 @@ HOST_CFSSCRUB_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/cos
 	kernel-services/filesystem/cosmofs/cosmofs_scrub_floor.c kernel/ceesafe/ceesafe_rt_core.c \
 	tests/host/ceesafe_panic.c tests/host/test_cfsscrub.c
 # cosmofs's keys with the real ciphers and hashes: the pool, the buffers, the transaction and the random source are the test's.
-HOST_CFSCRYPT_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/cosmofs_crypt.c kernel/security/chacha20.c \
+HOST_CFSCRYPT_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/cosmofs_crypt.c \
+	kernel-services/filesystem/cosmofs/cosmofs_crypt_floor.c kernel/security/chacha20.c \
 	kernel/security/sha512.c kernel/security/blake2b.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c \
 	tests/host/test_cfscrypt.c
 HOST_CFSPARSE_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/cfsparse.c kernel/core/crc32c.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_cfsparse.c

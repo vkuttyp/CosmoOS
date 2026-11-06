@@ -1,6 +1,6 @@
 /*
- * test_cfscrypt.c - cosmofs's keys (kernel-services/filesystem/cosmofs/cosmofs_crypt.c) on the host: roadmap 2.0 SA7.
- * A digest recorded from the C over seeded rounds, with the real ChaCha20-Poly1305, SHA-512 and BLAKE2b
+ * test_cfscrypt.c - cosmofs's keys (kernel-services/filesystem/cosmofs/cosmofs_crypt.cee) on the host: roadmap 2.0
+ * SA7. A digest recorded from the C over seeded rounds, with the real ChaCha20-Poly1305, SHA-512 and BLAKE2b
  * (kernel/security) and a pool, buffers, a transaction and a random source the test owns: file keys and nonces, the
  * seeding wait, version-1 key blocks written, unwrapped with right and wrong keys, loaded and rotated, the MAC key,
  * version-2 key blocks, the key table (installed, taken, held, released, unloaded, full), and every /dev/fsctl key
@@ -10,9 +10,11 @@
 
 #include "harness.h"
 
+#include <kernel/blake2b.h>
 #include <kernel/blk.h>
 #include <kernel/chacha20.h>
 #include <kernel/cosmofs.h>
+#include <kernel/crypto.h>
 #include <kernel/errno.h>
 #include <kernel/kmalloc.h>
 #include <kernel/log.h>
@@ -28,6 +30,29 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* The values the CeeSafe port writes as its own constants, and the offsets and stack slots it relies on. */
+_Static_assert(ENOENT == 2 && EIO == 5 && ENOMEM == 12 && EINTR == 4 && EAGAIN == 11 && EBUSY == 16 && EXDEV == 18 &&
+                   EINVAL == 22 && ENOSPC == 28 && EROFS == 30 && ENOKEY == 126 && EKEYREJECTED == 129,
+               "cosmofs_crypt's errno.h values");
+_Static_assert(KMEM_ZERO == 1 && RANDOM_KEYGEN_WAIT_NS == 5000000000ull && MOUNT_RDONLY == 1 && COSMOFS_KEY_INFO == 0 &&
+                   COSMOFS_KEY_LOAD == 1 && COSMOFS_KEY_UNLOAD == 2 && COSMOFS_KEY_SLOT == 3 &&
+                   COSMO_FSCTL_KEY_F_ENCRYPTED == 1 && COSMO_FSCTL_KEY_F_UNLOCKED == 2 && COSMO_FSCTL_KEY_F_MAC == 4,
+               "cosmofs_crypt's kmalloc.h, random.h, vfs.h, cosmofs.h and fsctl.h values");
+_Static_assert(CFS_BLOCK == 4096 && CFS_MHDR_SIZE == 32 && CFS_MHDR_MAGIC == 0x4d534643u && CFS_KIND_KEYS == 12 &&
+                   CFS_KDF_SHA512 == 1 && CFS_KEY_SLOTS == 8 && CFS_KEYSLOT_EMPTY == 0 && CFS_DVA_VDEV_SHIFT == 56 &&
+                   CHACHA20_KEY_SIZE == 32 && CHACHA20_NONCE_SIZE == 12 && SHA512_DIGEST_SIZE == 64 &&
+                   CFS_LABEL_MAX == 16 && sizeof(((struct cfs *)0)->pool_name) == 17,
+               "cosmofs_crypt's cosmofs_format.h and cipher values");
+_Static_assert(offsetof(struct cfs_mhdr, magic) == 0 && offsetof(struct cfs_mhdr, kind) == 4 &&
+                   offsetof(struct cfs_mhdr, blkno) == 16 && offsetof(struct cfs_keys2, slot) == 40 &&
+                   offsetof(struct cosmo_fsctl_keyinfo, slot) == 56 && sizeof(enum cosmofs_key_op) == 4,
+               "cosmofs_crypt.cee reads a header, a key block's slots and a record's slots at these offsets");
+/* cosmofs_crypt.cee keeps these in stack slots of words: a SHA-512 state 26, a BLAKE2b state 28, a superblock 21, a
+ * MAC key 5. */
+_Static_assert(sizeof(struct sha512_ctx) <= 26 * 8 && sizeof(struct blake2b) <= 28 * 8 &&
+                   sizeof(struct cfs_super) <= 21 * 8 && sizeof(struct cfs_mac) <= 5 * 8,
+               "cosmofs_crypt.cee's stack slots");
 
 /* The digest of the C (cosmofs_crypt.c, 2026-11-06), which the CeeSafe port gives. */
 #define CRYPT_DIGEST 0x98e1087b49e6224cull

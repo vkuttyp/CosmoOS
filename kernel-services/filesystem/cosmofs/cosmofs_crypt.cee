@@ -1,0 +1,893 @@
+// cosmofs_crypt.cee - Keys, and what a block's nonce is made of (docs/kernel-services/filesystem/cosmofs/design.md,
+// "Format version 7"), in CeeSafe: roadmap 2.0 SA7. tests/host/test_cfscrypt.c holds it to the digest of the C it
+// replaced.
+//
+// Three keys, each with one job. The user's key never encrypts a file: it derives a wrapping key, which encrypts the
+// master key, which derives a key per file. That is what makes rotation cheap -- rewrap one block -- and what keeps a
+// per-block nonce small enough to fit beside the tag.
+//
+// struct cfs, the key blocks, the superblock, the hash states and the /dev/fsctl records stay C (cosmofs_internal.h,
+// cosmofs_format.h, uapi/cosmo/fsctl.h). What the C kept on the stack is kept in zeroed slots of words, checked against
+// their C sizes (tests/host/test_cfscrypt.c): a CeeSafe local cannot hold C state. cosmofs_crypt_floor.c makes the one
+// call whose prototype CeeSafe cannot write (cfs_mac_ok, whose domain is a C char).
+
+@header("kernel/blk.h", "kernel/vfs.h", "kernel/storage.h", "kernel/random.h", "kernel/chacha20.h", "kernel/crypto.h",
+    "kernel/blake2b.h", "kernel/cosmofs.h", "uapi/cosmo/fsctl.h", "cosmofs_internal.h")
+extern "C" {
+    struct blkdev {
+        name: [u8; 16];
+    }
+    struct mount {
+        flags: u32;
+        fs_priv: *mut void;
+    }
+    struct spool {
+        nmembers: u32;
+    }
+    struct cfs_mac {
+        on: bool;
+        key: [u8; 32];
+    }
+    struct cfs_super {
+        magic: [u8; 8];
+        version: u32;
+        generation: u64;
+        uuid: [u8; 16];
+        key_root: u64;
+        label: [u8; 16];
+    }
+    struct cfs {
+        pool: *mut spool;
+        sb: cfs_super;
+        lock: mutex;
+        rdonly: bool;
+        have_key: bool;
+        master_key: [u8; 32];
+        mac: cfs_mac;
+        pool_name: [u8; 17];
+    }
+    struct cfs_buf {
+        blkno: u64;
+        data: *mut u8;
+    }
+    struct cfs_keys {
+        version: u32;
+        kdf: u32;
+        salt: [u8; 16];
+        wrapped: [u8; 32];
+        tag: [u8; 16];
+    }
+    struct cfs_keyslot {
+        kind: u32;
+    }
+    struct cfs_keys2 {
+        version: u32;
+        nslots: u32;
+        uuid: [u8; 16];
+    }
+    struct cosmo_keyslot {
+        kind: u32;
+    }
+    struct cosmo_fsctl_keyinfo {
+        flags: u32;
+        format: u32;
+        uuid: [u8; 16];
+        label: [u8; 16];
+        generation: u64;
+        nslots: u32;
+    }
+    struct cosmofs_key_req {
+        op: u32; // enum cosmofs_key_op: clang and gcc give an enum without negative values unsigned int
+        slot: u32;
+        key: *u8;
+        rec: *cosmo_keyslot;
+        info: *mut cosmo_fsctl_keyinfo;
+    }
+    struct sha512_ctx;
+    struct blake2b;
+
+    fn sha512_init(ctx: *mut sha512_ctx);
+    fn sha512_update(ctx: *mut sha512_ctx, data: *void, len: usize);
+    fn sha512_final(ctx: *mut sha512_ctx, out: *mut u8);
+    fn blake2b_init_key(s: *mut blake2b, outlen: usize, key: *void, keylen: usize);
+    fn blake2b_update(s: *mut blake2b, data: *void, n: usize);
+    fn blake2b_final(s: *mut blake2b, out: *mut u8);
+    fn chacha20_xor(key: *u8, counter: u32, nonce: *u8, input: *void, out: *mut void, len: usize);
+    fn chacha20_seal(key: *u8, nonce: *u8, aad: *void, aad_len: usize, data: *mut void, len: usize, tag: *mut u8);
+    fn chacha20_open(key: *u8, nonce: *u8, aad: *void, aad_len: usize, data: *mut void, len: usize, tag: *u8) -> bool;
+    fn random_get_bytes(buf: *mut void, len: usize);
+    fn random_wait_ready(timeout_ns: u64) -> i32;
+    fn pool_open(bd: *mut blkdev, out: *mut *mut spool) -> i32;
+    fn pool_close(p: *mut spool);
+    fn pool_read(p: *mut spool, dva: u64, buf: *mut void) -> i32;
+    fn pool_write(p: *mut spool, dva: u64, buf: *void) -> i32;
+    fn cfs_mhdr_seal_raw(mac: *cfs_mac, block: *mut void, kind: u32, dva: u64, generation: u64);
+    fn cfs_mhdr_ok(mac: *cfs_mac, block: *void, dva: u64, kind: u32) -> bool;
+    fn cfs_super_peek(p: *mut spool, out: *mut cfs_super) -> i32;
+    fn cfs_keyslot_valid(index: u32, s: *cfs_keyslot) -> bool;
+    fn cfs_buf_get(fs: *mut cfs, blkno: u64, kind: u32, out: *mut *mut cfs_buf) -> i32;
+    fn cfs_buf_cow(fs: *mut cfs, bp: *mut *mut cfs_buf, parent_slot: *mut u64) -> i32;
+    fn cfs_buf_mark_dirty(fs: *mut cfs, b: *mut cfs_buf);
+    fn cfs_buf_put(fs: *mut cfs, b: *mut cfs_buf);
+    fn cfs_commit(fs: *mut cfs) -> i32;
+    /// cosmofs_crypt_floor.c: cfs_mac_ok(m, CFS_MAC_SUPER, block, offsetof(struct cfs_super, crc)), whose domain is a
+    /// C char.
+    fn cfs_crypt_floor_super_ok(m: *cfs_mac, block: *u8) -> bool;
+    fn memcpy(dst: *mut void, src: *void, n: usize) -> *mut void;
+    fn memset(p: *mut void, c: i32, n: usize) -> *mut void;
+    fn memcmp(a: *void, b: *void, n: usize) -> i32;
+    fn strlen(s: *CChar) -> usize;
+}
+
+// ---- errno.h, kmalloc.h, random.h, vfs.h, cosmofs.h, fsctl.h and cosmofs_format.h values (asserted in
+// tests/host/test_cfscrypt.c) ----
+
+const ENOENT: i32 = 2;
+const EIO: i32 = 5;
+const ENOMEM: i32 = 12;
+const EINTR: i32 = 4;
+const EAGAIN: i32 = 11;
+const EBUSY: i32 = 16;
+const EXDEV: i32 = 18;
+const EINVAL: i32 = 22;
+const ENOSPC: i32 = 28;
+const EROFS: i32 = 30;
+const ENOKEY: i32 = 126;
+const EKEYREJECTED: i32 = 129;
+const KMEM_ZERO: u32 = 1;
+const RANDOM_KEYGEN_WAIT_NS: u64 = 5000000000;
+const MOUNT_RDONLY: u32 = 1;
+const COSMOFS_KEY_INFO: u32 = 0;
+const COSMOFS_KEY_LOAD: u32 = 1;
+const COSMOFS_KEY_UNLOAD: u32 = 2;
+const COSMOFS_KEY_SLOT: u32 = 3;
+const COSMO_FSCTL_KEY_F_ENCRYPTED: u32 = 1;
+const COSMO_FSCTL_KEY_F_UNLOCKED: u32 = 2;
+const COSMO_FSCTL_KEY_F_MAC: u32 = 4;
+const CFS_BLOCK: usize = 4096;
+const CFS_MHDR_SIZE: usize = 32;
+const CFS_MHDR_MAGIC: u32 = 0x4d534643;
+const CFS_KIND_KEYS: u32 = 12;
+const CFS_KDF_SHA512: u32 = 1;
+const CFS_KEY_SLOTS: u32 = 8;
+const CFS_KEYSLOT_EMPTY: u32 = 0;
+const CFS_DVA_VDEV_SHIFT: u64 = 56;
+const KEY_SIZE: usize = 32; // CHACHA20_KEY_SIZE
+const NONCE_SIZE: usize = 12; // CHACHA20_NONCE_SIZE
+const DIGEST_SIZE: usize = 64; // SHA512_DIGEST_SIZE
+/// Where a metadata header's magic, kind and block number are (struct cfs_mhdr), and where a key block's slots begin
+/// (struct cfs_keys2).
+const MHDR_MAGIC: usize = 0;
+const MHDR_KIND: usize = 4;
+const MHDR_BLKNO: usize = 16;
+const KEYS2_SLOTS: usize = 40;
+
+/// The stack slots C state is kept in, in words (checked against the C sizes).
+const SHA512_WORDS: usize = 26;
+const BLAKE2B_WORDS: usize = 28;
+const SUPER_WORDS: usize = 21;
+const MAC_WORDS: usize = 5;
+
+// ---- The C state, through its addresses ----
+
+/// Safety: `fs` is a mounted filesystem's state.
+unsafe fn fsOf(fs: *mut cfs) -> borrow mut(static) cfs => Ptr.toBorrowMut(fs);
+
+/// Safety: `s` is a superblock.
+unsafe fn superOf(s: *cfs_super) -> borrow(static) cfs_super => Ptr.toBorrow(s);
+
+/// True when the C types fit the stack slots this file keeps them in (the test asserts it; a build where they do not
+/// refuses rather than overrun a slot).
+fn slotsFit() -> bool =>
+    layoutOf<sha512_ctx>().size <= SHA512_WORDS * 8 && layoutOf<blake2b>().size <= BLAKE2B_WORDS * 8 &&
+        layoutOf<cfs_super>().size <= SUPER_WORDS * 8 && layoutOf<cfs_mac>().size <= MAC_WORDS * 8;
+
+/// `n` bytes wiped.
+/// Safety: `p` is `n` writable bytes.
+unsafe fn wipe(p: *mut u8, n: usize) { memset(p as *mut void, 0, n); }
+
+/// cosmofs_format.h's cfs_super_is_mac.
+fn isMac(sb: borrow cfs_super) -> bool => sb.version >= 14 && sb.key_root != 0;
+
+/// A DVA's member.
+fn vdevOf(dva: u64) -> u64 => dva >> CFS_DVA_VDEV_SHIFT;
+
+/// A block's 32-bit word at `at`.
+/// Safety: `block` is CFS_BLOCK readable bytes.
+unsafe fn u32At(block: *u8, at: usize) -> u32 => ByteOrder.readU32LE(Slice.fromRaw(block, CFS_BLOCK), at);
+
+/// Safety: as u32At.
+unsafe fn u64At(block: *u8, at: usize) -> u64 => ByteOrder.readU64LE(Slice.fromRaw(block, CFS_BLOCK), at);
+
+/// A C string, appended.
+/// Safety: `s` is a C string.
+unsafe fn cText(line: borrow mut TextWriter, s: *CChar) { line.bytes(Slice.fromRaw(s as *u8, strlen(s))); }
+
+// ---- Keys ----
+
+/// The wrapping key: SHA-512 over the salt and the user's key, truncated.
+///
+/// Deliberately not a password KDF -- there is no work factor here, and none is claimed. What arrives through the
+/// unlock channel is a key, not a passphrase; stretching a passphrase into one is the job of whatever feeds that
+/// channel, and this says so rather than pretending 512 bits of SHA make a weak secret strong.
+/// Safety: `salt` is 16 bytes, `userKey` `len`, `out` 32 writable.
+unsafe fn wrappingKey(salt: *u8, userKey: *void, len: usize, out: *mut u8) {
+    var slot = [0u64; 26];
+    let ctx = borrow mut slot as *mut [u64; 26] as *mut sha512_ctx;
+    var digest = [0u8; 64];
+    sha512_init(ctx);
+    sha512_update(ctx, salt as *void, 16);
+    sha512_update(ctx, userKey, len);
+    sha512_final(ctx, borrow mut digest as *mut [u8; 64] as *mut u8);
+    memcpy(out as *mut void, borrow digest as *[u8; 64] as *void, KEY_SIZE);
+    wipe(borrow mut digest as *mut [u8; 64] as *mut u8, DIGEST_SIZE);
+    wipe(ctx as *mut u8, layoutOf<sha512_ctx>().size);
+}
+
+/// The nonce that wraps the master key: fixed, because the wrapping key is itself derived from a salt that is fresh
+/// for every wrap.
+fn wrapNonce() -> [u8; 12] {
+    var nonce = [0u8; 12];
+    nonce[0] = 0x6B; // 'k'
+    nonce[1] = 0x65; // 'e'
+    nonce[2] = 0x79; // 'y'
+    return nonce;
+}
+
+/// The master key sealed under `userKey` into a version-1 key block's payload: a fresh salt, then the wrap.
+/// Safety: `k` is a version-1 key block's payload, `master` 32 bytes, `userKey` `len`.
+unsafe fn seal(k: *mut cfs_keys, master: *u8, userKey: *void, len: usize) {
+    let keys = Ptr.toBorrowMut(k);
+    keys.version = 1;
+    keys.kdf = CFS_KDF_SHA512;
+    random_get_bytes(borrow mut keys.salt as *mut [u8; 16] as *mut void, 16);
+    memcpy(borrow mut keys.wrapped as *mut [u8; 32] as *mut void, master as *void, KEY_SIZE);
+    var wk = [0u8; 32];
+    let nonce = wrapNonce();
+    wrappingKey(borrow keys.salt as *[u8; 16] as *u8, userKey, len, borrow mut wk as *mut [u8; 32] as *mut u8);
+    chacha20_seal(
+        borrow wk as *[u8; 32] as *u8,
+        borrow nonce as *[u8; 12] as *u8,
+        0 as *void,
+        0,
+        borrow mut keys.wrapped as *mut [u8; 32] as *mut void,
+        KEY_SIZE,
+        borrow mut keys.tag as *mut [u8; 16] as *mut u8,
+    );
+    wipe(borrow mut wk as *mut [u8; 32] as *mut u8, KEY_SIZE);
+}
+
+/// cosmofs_internal.h's cfs_file_key: a file's key. The master key is the ChaCha20 key and the inode number is the
+/// nonce, so every file gets an independent stream from one secret, and a block's nonce then only has to be unique
+/// within its own file.
+/// Safety: `fs` is a filesystem's state, `out` 32 writable bytes.
+@export("cfs_file_key")
+unsafe fn fileKey(fs: *cfs, ino: u64, out: *mut u8) {
+    var nonce = [0u8; 12];
+    for (i in 0..8) {
+        nonce[i] = truncate<u8>(ino >> truncate<u32>(8 * i));
+    }
+    var zeros = [0u8; 32];
+    chacha20_xor(
+        borrow Ptr.toBorrow(fs).master_key as *[u8; 32] as *u8,
+        0,
+        borrow nonce as *[u8; 12] as *u8,
+        borrow zeros as *[u8; 32] as *void,
+        out as *mut void,
+        KEY_SIZE,
+    );
+    wipe(borrow mut zeros as *mut [u8; 32] as *mut u8, KEY_SIZE);
+}
+
+/// cosmofs_internal.h's cfs_block_nonce. A block's nonce is drawn at random when the block is written, and stored
+/// beside its tag.
+///
+/// It was derived from the block number and the generation that wrote it, on the argument that copy-on-write writes a
+/// block once per generation. That argument is wrong, and Greptile found where: the older-root fallback at mount
+/// resumes from a *previous* superblock, so a generation is used again while the ciphertext the first attempt wrote is
+/// still on the disk. A second write of the same block in the reused generation would then repeat a (key, nonce) pair
+/// -- and for a stream cipher that hands an attacker the xor of the two plaintexts.
+///
+/// Deriving it from something else the filesystem controls only moves the question. Ninety-six random bits per block
+/// do not need the filesystem to promise anything: with a key per file, a file would have to reach some 2^48 blocks
+/// before a repeat is worth thinking about, and it can hold 2^32.
+/// Safety: `nonce` is 12 writable bytes.
+@export("cfs_block_nonce")
+unsafe fn blockNonce(nonce: *mut u8) { random_get_bytes(nonce as *mut void, NONCE_SIZE); }
+
+/// cosmofs_internal.h's cfs_need_seeded. Key material, salts and block nonces come from a seeded pool only
+/// (docs/kernel/security/design.md §6, invariant S18). Wait a bounded time for seeding; refuse with -EAGAIN, before
+/// anything is written, when the pool is still unseeded. Loading a key passes through here too: a loaded key is what
+/// lets cfs_block_nonce draw.
+/// Safety: `what` is a C string.
+@export("cfs_need_seeded")
+unsafe fn needSeeded(what: *CChar) -> i32 {
+    let rc = random_wait_ready(RANDOM_KEYGEN_WAIT_NS);
+    if (rc == 0) {
+        return 0;
+    }
+    var buffer = [0u8; 160];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("cosmofs: cannot ");
+    cText(mut line, what);
+    line.text(": the entropy pool is not seeded (waited ");
+    line.decimal(RANDOM_KEYGEN_WAIT_NS / 1000000000);
+    line.text(" s)");
+    KernelLog.send(LogLevel.Warn, line);
+    return if (rc == -EINTR) -EINTR else -EAGAIN;
+}
+
+// ---- The key block ----
+
+/// cosmofs_internal.h's cfs_keys_write: a version-1 key block, written.
+/// Safety: `pool` is an open pool, `master` 32 bytes, `userKey` `userLen`.
+@export("cfs_keys_write")
+unsafe fn keysWrite(pool: *mut spool, dva: u64, generation: u64, master: *u8, userKey: *void, userLen: usize) -> i32 {
+    let block = kmalloc(CFS_BLOCK, KMEM_ZERO) as *mut u8;
+    if (block.isNull()) {
+        return -ENOMEM;
+    }
+    seal(block.add(CFS_MHDR_SIZE) as *mut cfs_keys, master, userKey, userLen);
+    cfs_mhdr_seal_raw(0 as *cfs_mac, block as *mut void, CFS_KIND_KEYS, dva, generation);
+    let rc = pool_write(pool, dva, block as *void);
+    wipe(block, CFS_BLOCK);
+    kfree(block as *mut void);
+    return rc;
+}
+
+/// cosmofs_internal.h's cfs_keys_unwrap: the master key, unwrapped with the user's. -EKEYREJECTED when the tag does
+/// not match, which is the whole reason there is a tag: a wrong key must be told so, not handed a filesystem of noise.
+/// Safety: `k` is a version-1 key block's payload, `userKey` `userLen` bytes, `master` 32 writable.
+@export("cfs_keys_unwrap")
+unsafe fn keysUnwrap(k: *cfs_keys, userKey: *void, userLen: usize, master: *mut u8) -> i32 {
+    let keys = Ptr.toBorrow(k);
+    if (keys.version != 1 || keys.kdf != CFS_KDF_SHA512) {
+        return -EINVAL;
+    }
+    var wk = [0u8; 32];
+    let nonce = wrapNonce();
+    wrappingKey(borrow keys.salt as *[u8; 16] as *u8, userKey, userLen, borrow mut wk as *mut [u8; 32] as *mut u8);
+    var buf = [0u8; 32];
+    memcpy(borrow mut buf as *mut [u8; 32] as *mut void, borrow keys.wrapped as *[u8; 32] as *void, KEY_SIZE);
+    let ok = chacha20_open(
+        borrow wk as *[u8; 32] as *u8,
+        borrow nonce as *[u8; 12] as *u8,
+        0 as *void,
+        0,
+        borrow mut buf as *mut [u8; 32] as *mut void,
+        KEY_SIZE,
+        borrow keys.tag as *[u8; 16] as *u8,
+    );
+    wipe(borrow mut wk as *mut [u8; 32] as *mut u8, KEY_SIZE);
+    if (!ok) {
+        wipe(borrow mut buf as *mut [u8; 32] as *mut u8, KEY_SIZE);
+        return -EKEYREJECTED;
+    }
+    memcpy(master as *mut void, borrow buf as *[u8; 32] as *void, KEY_SIZE);
+    wipe(borrow mut buf as *mut [u8; 32] as *mut u8, KEY_SIZE);
+    return 0;
+}
+
+/// cosmofs_internal.h's cfs_keys_load: the key block read and unwrapped.
+/// Safety: `fs` is a mounted filesystem's state, `userKey` `userLen` bytes.
+@export("cfs_keys_load")
+unsafe fn keysLoad(fs: *mut cfs, userKey: *void, userLen: usize) -> i32 {
+    var rc = needSeeded("load a key\0".ptr as *CChar);
+    if (rc != 0) {
+        return rc;
+    }
+    let block = kmalloc(CFS_BLOCK, 0) as *mut u8;
+    if (block.isNull()) {
+        return -ENOMEM;
+    }
+    let f = fsOf(fs);
+    let keyRoot = f.sb.key_root;
+    rc = pool_read(f.pool, keyRoot, block as *mut void);
+    if (rc == 0 && !cfs_mhdr_ok(borrow f.mac as *cfs_mac, block as *void, keyRoot, CFS_KIND_KEYS)) {
+        rc = -EIO;
+    }
+    if (rc == 0) {
+        rc = keysUnwrap(
+            block.add(CFS_MHDR_SIZE) as *cfs_keys,
+            userKey,
+            userLen,
+            borrow mut f.master_key as *mut [u8; 32] as *mut u8,
+        );
+    }
+    if (rc == 0) {
+        let g = fsOf(fs);
+        g.have_key = true;
+    }
+    wipe(block, CFS_BLOCK);
+    kfree(block as *mut void);
+    return rc;
+}
+
+/// cosmofs_internal.h's cfs_keys_rotate. Rotation: a new salt for the same master key. No file is rewritten, because
+/// the user's key never encrypted one -- which is the point of having a master key at all.
+/// Safety: `fs` is a mounted filesystem's state, its lock held; `newKey` `newLen` bytes.
+@export("cfs_keys_rotate")
+unsafe fn keysRotate(fs: *mut cfs, newKey: *void, newLen: usize) -> i32 {
+    if (!fsOf(fs).have_key) {
+        return -ENOKEY;
+    }
+    var b = 0 as *mut cfs_buf;
+    var rc = cfs_buf_get(fs, fsOf(fs).sb.key_root, CFS_KIND_KEYS, borrow mut b as *mut *mut cfs_buf);
+    if (rc != 0) {
+        return rc;
+    }
+    rc = cfs_buf_cow(fs, borrow mut b as *mut *mut cfs_buf, borrow mut fsOf(fs).sb.key_root as *mut u64);
+    if (rc != 0) {
+        cfs_buf_put(fs, b);
+        return rc;
+    }
+    let k = Ptr.toBorrow(b as *cfs_buf).data.add(CFS_MHDR_SIZE) as *mut cfs_keys;
+    seal(k, borrow fsOf(fs).master_key as *[u8; 32] as *u8, newKey, newLen);
+    cfs_buf_mark_dirty(fs, b);
+    cfs_buf_put(fs, b);
+    return 0;
+}
+
+// ---- Version 14: the MAC key, the key block's slots, the key table ----
+
+/// cosmofs_internal.h's cfs_mac_derive: the metadata MAC's key, from the master: BLAKE2b keyed by the master over a
+/// fixed string, so it is independent of every file key.
+/// Safety: `master` is 32 bytes, `out` a MAC key.
+@export("cfs_mac_derive")
+unsafe fn macDerive(master: *u8, out: *mut cfs_mac) {
+    let what = "cosmofs metadata MAC v1";
+    var slot = [0u64; 28];
+    let s = borrow mut slot as *mut [u64; 28] as *mut blake2b;
+    blake2b_init_key(s, KEY_SIZE, master as *void, KEY_SIZE);
+    blake2b_update(s, what.ptr as *void, what.length);
+    let m = Ptr.toBorrowMut(out);
+    blake2b_final(s, borrow mut m.key as *mut [u8; 32] as *mut u8);
+    m.on = true;
+}
+
+/// cosmofs_internal.h's cfs_keys2_write: a version-2 key block -- the pool's uuid and the slots -- written.
+/// Safety: `pool` is an open pool, `mac` null or a MAC key, `uuid` 16 bytes, `slots` CFS_KEY_SLOTS slots.
+@export("cfs_keys2_write")
+unsafe fn keys2Write(pool: *mut spool, mac: *cfs_mac, dva: u64, generation: u64, uuid: *u8, slots: *cfs_keyslot) -> i32 {
+    let block = kmalloc(CFS_BLOCK, KMEM_ZERO) as *mut u8;
+    if (block.isNull()) {
+        return -ENOMEM;
+    }
+    let k = Ptr.toBorrowMut(block.add(CFS_MHDR_SIZE) as *mut cfs_keys2);
+    k.version = 2;
+    k.nslots = CFS_KEY_SLOTS;
+    memcpy(borrow mut k.uuid as *mut [u8; 16] as *mut void, uuid as *void, 16);
+    memcpy(
+        block.add(CFS_MHDR_SIZE + KEYS2_SLOTS) as *mut void,
+        slots as *void,
+        (CFS_KEY_SLOTS as usize) * layoutOf<cfs_keyslot>().size,
+    );
+    cfs_mhdr_seal_raw(mac, block as *mut void, CFS_KIND_KEYS, dva, generation);
+    let rc = pool_write(pool, dva, block as *void);
+    kfree(block as *mut void);
+    return rc;
+}
+
+/// The key table (design.md, "The key handle"): the pools whose master key user space has handed over, by uuid. A
+/// mount copies its entry and holds it; the last holder's unmount wipes it. A maintenance mount (the check on an
+/// unmounted device) reads it and holds nothing, so the check at boot does not drop the key the root's mount is about
+/// to need. Entry `i`'s uuid, master and MAC key are bytes 16i, 32i and 32i of their arrays.
+const KEYTAB: usize = 8;
+
+static mut g_keytab_lock: spinlock_t = SPINLOCK_INIT("cosmofs-keys\0".ptr as *CChar);
+static mut g_used: [bool; 8] = [false; 8];
+static mut g_holders: [u32; 8] = [0; 8]; // live mounts of the pool
+static mut g_mounted: [bool; 8] = [false; 8]; // a mount took it: its last unmount drops it
+static mut g_uuid: [u8; 128] = [0; 128];
+static mut g_master: [u8; 256] = [0; 256];
+static mut g_mac_on: [bool; 8] = [false; 8];
+static mut g_mac_key: [u8; 256] = [0; 256];
+
+/// Safety: the caller holds g_keytab_lock or is the table's only user.
+unsafe fn lockTab() { spin_lock(borrow mut g_keytab_lock as *mut spinlock_t); }
+
+/// Safety: the caller holds g_keytab_lock.
+unsafe fn unlockTab() { spin_unlock(borrow mut g_keytab_lock as *mut spinlock_t); }
+
+/// Safety: `i` is below KEYTAB.
+unsafe fn uuidAt(i: usize) -> *mut u8 => (borrow mut g_uuid as *mut [u8; 128] as *mut u8).add(i * 16);
+
+/// Safety: as uuidAt.
+unsafe fn masterAt(i: usize) -> *mut u8 => (borrow mut g_master as *mut [u8; 256] as *mut u8).add(i * KEY_SIZE);
+
+/// Safety: as uuidAt.
+unsafe fn macKeyAt(i: usize) -> *mut u8 => (borrow mut g_mac_key as *mut [u8; 256] as *mut u8).add(i * KEY_SIZE);
+
+/// The entry of pool `uuid`, or KEYTAB when there is none; the zero uuid names no pool.
+/// Safety: `uuid` is 16 bytes; the caller holds g_keytab_lock.
+unsafe fn keytabFind(uuid: *u8) -> usize {
+    let zero = [0u8; 16];
+    if (memcmp(uuid as *void, borrow zero as *[u8; 16] as *void, 16) == 0) {
+        return KEYTAB;
+    }
+    for (i in 0..KEYTAB) {
+        if (g_used[i] && memcmp(uuidAt(i) as *void, uuid as *void, 16) == 0) {
+            return i;
+        }
+    }
+    return KEYTAB;
+}
+
+/// Safety: as keytabFind; `i` below KEYTAB.
+unsafe fn keytabWipe(i: usize) {
+    g_used[i] = false;
+    g_holders[i] = 0;
+    g_mounted[i] = false;
+    wipe(uuidAt(i), 16);
+    wipe(masterAt(i), KEY_SIZE);
+    g_mac_on[i] = false;
+    wipe(macKeyAt(i), KEY_SIZE);
+}
+
+/// cosmofs_internal.h's cfs_keytab_mac: pool `uuid`'s MAC key.
+/// Safety: `uuid` is 16 bytes, `mac` a MAC key.
+@export("cfs_keytab_mac")
+unsafe fn keytabMac(uuid: *u8, mac: *mut cfs_mac) -> i32 {
+    lockTab();
+    let i = keytabFind(uuid);
+    if (i < KEYTAB) {
+        let m = Ptr.toBorrowMut(mac);
+        m.on = g_mac_on[i];
+        memcpy(borrow mut m.key as *mut [u8; 32] as *mut void, macKeyAt(i) as *void, KEY_SIZE);
+    }
+    unlockTab();
+    return if (i < KEYTAB) 0 else -ENOKEY;
+}
+
+/// cosmofs_internal.h's cfs_keytab_take: the master key for a mount, and the mount's hold on the entry.
+/// Safety: `uuid` is 16 bytes, `master` 32 writable.
+@export("cfs_keytab_take")
+unsafe fn keytabTake(uuid: *u8, hold: bool, master: *mut u8) -> i32 {
+    lockTab();
+    let i = keytabFind(uuid);
+    if (i < KEYTAB) {
+        memcpy(master as *mut void, masterAt(i) as *void, KEY_SIZE);
+        if (hold) {
+            g_holders[i] = g_holders[i].wrappingAdd(1);
+            g_mounted[i] = true;
+        }
+    }
+    unlockTab();
+    return if (i < KEYTAB) 0 else -ENOKEY;
+}
+
+/// cosmofs_internal.h's cfs_keytab_release: a mount's hold let go; the last one of a mounted pool wipes the entry.
+/// Safety: `uuid` is 16 bytes.
+@export("cfs_keytab_release")
+unsafe fn keytabRelease(uuid: *u8) {
+    lockTab();
+    let i = keytabFind(uuid);
+    if (i < KEYTAB && g_holders[i] > 0) {
+        g_holders[i] -= 1;
+        if (g_holders[i] == 0 && g_mounted[i]) {
+            keytabWipe(i);
+        }
+    }
+    unlockTab();
+}
+
+/// cosmofs_internal.h's cfs_keytab_install: keep `master` for pool `uuid`. The caller has checked it.
+/// Safety: `uuid` is 16 bytes, `master` 32.
+@export("cfs_keytab_install")
+unsafe fn keytabInstall(uuid: *u8, master: *u8) -> i32 {
+    lockTab();
+    var i = keytabFind(uuid);
+    var rc = 0;
+    if (i == KEYTAB) {
+        for (j in 0..KEYTAB) {
+            if (i == KEYTAB && !g_used[j]) {
+                i = j;
+            }
+        }
+        if (i == KEYTAB) {
+            rc = -ENOSPC;
+        } else {
+            let at = i;
+            g_used[at] = true;
+            memcpy(uuidAt(at) as *mut void, uuid as *void, 16);
+            memcpy(masterAt(at) as *mut void, master as *void, KEY_SIZE);
+            var slot = [0u64; 5];
+            let m = borrow mut slot as *mut [u64; 5] as *mut cfs_mac;
+            macDerive(master, m);
+            g_mac_on[at] = Ptr.toBorrow(m as *cfs_mac).on;
+            memcpy(macKeyAt(at) as *mut void, borrow Ptr.toBorrow(m as *cfs_mac).key as *[u8; 32] as *void, KEY_SIZE);
+            wipe(m as *mut u8, layoutOf<cfs_mac>().size);
+        }
+    } else if (memcmp(masterAt(i) as *void, master as *void, KEY_SIZE) != 0) {
+        rc = -EKEYREJECTED; // a different key for a pool already unlocked: impossible for a real one
+    }
+    unlockTab();
+    return rc;
+}
+
+/// cosmofs_internal.h's cfs_keytab_unload: the entry for `uuid` dropped, if no mount holds it.
+/// Safety: `uuid` is 16 bytes.
+@export("cfs_keytab_unload")
+unsafe fn keytabUnload(uuid: *u8) -> i32 {
+    lockTab();
+    let i = keytabFind(uuid);
+    let rc = if (i == KEYTAB) -ENOKEY else if (g_holders[i] != 0) -EBUSY else 0;
+    if (rc == 0) {
+        keytabWipe(i);
+    }
+    unlockTab();
+    return rc;
+}
+
+/// cosmofs_internal.h's cfs_keytab_has.
+/// Safety: `uuid` is 16 bytes.
+@export("cfs_keytab_has")
+unsafe fn keytabHas(uuid: *u8) -> bool {
+    lockTab();
+    let has = keytabFind(uuid) < KEYTAB;
+    unlockTab();
+    return has;
+}
+
+// ---- The key operations (/dev/fsctl KEY_*; design.md, "The key handle") ----
+
+/// Equal keys, compared in constant time.
+/// Safety: both are 32 bytes.
+unsafe fn keyEqual(a: *u8, b: *u8) -> bool {
+    var diff: u8 = 0;
+    for (i in 0..KEY_SIZE) {
+        diff = diff | (a.add(i).read() ^ b.add(i).read());
+    }
+    return diff == 0;
+}
+
+/// Safety: `sb` is a superblock, `info` a key record.
+unsafe fn infoFromSuper(sb: *cfs_super, info: *mut cosmo_fsctl_keyinfo) {
+    memset(info as *mut void, 0, layoutOf<cosmo_fsctl_keyinfo>().size);
+    let s = superOf(sb);
+    let r = Ptr.toBorrowMut(info);
+    r.format = s.version;
+    memcpy(borrow mut r.uuid as *mut [u8; 16] as *mut void, borrow s.uuid as *[u8; 16] as *void, 16);
+    memcpy(borrow mut r.label as *mut [u8; 16] as *mut void, borrow s.label as *[u8; 16] as *void, 16);
+    r.generation = s.generation;
+    if (s.version >= 7 && s.key_root != 0) {
+        r.flags = r.flags | COSMO_FSCTL_KEY_F_ENCRYPTED;
+    }
+    if (isMac(s)) {
+        r.flags = r.flags | COSMO_FSCTL_KEY_F_MAC;
+    }
+    if (keytabHas(borrow s.uuid as *[u8; 16] as *u8)) {
+        r.flags = r.flags | COSMO_FSCTL_KEY_F_UNLOCKED;
+    }
+}
+
+/// The record's slots, from a version-2 key block's payload.
+/// Safety: `payload` is a key block's payload, `info` a key record.
+unsafe fn infoSlots(payload: *u8, info: *mut cosmo_fsctl_keyinfo) {
+    let r = Ptr.toBorrowMut(info);
+    r.nslots = CFS_KEY_SLOTS;
+    // The record's slots follow `nslots` and its pad: at the offset the uapi gives them (asserted in the test).
+    memcpy(
+        (info as *mut u8).add(INFO_SLOTS) as *mut void,
+        payload.add(KEYS2_SLOTS) as *void,
+        (CFS_KEY_SLOTS as usize) * layoutOf<cosmo_keyslot>().size,
+    );
+}
+
+/// Where a key record's slots begin (struct cosmo_fsctl_keyinfo).
+const INFO_SLOTS: usize = 56;
+
+/// The device half: the pool is not mounted (or is, through another device; the key table does not care), and is
+/// named by `bd`. Its key block is read from member 0, which is where every pool this kernel makes keeps it: a pool
+/// whose key block moved to another member says -EXDEV.
+/// Safety: `bd` is a block device, `req` a request.
+unsafe fn keyctlDev(bd: *mut blkdev, req: *mut cosmofs_key_req) -> i32 {
+    var p = 0 as *mut spool;
+    var rc = pool_open(bd, borrow mut p as *mut *mut spool);
+    if (rc != 0) {
+        return rc;
+    }
+    var sbSlot = [0u64; 21];
+    let sb = borrow mut sbSlot as *mut [u64; 21] as *mut cfs_super;
+    let block = kmalloc(CFS_BLOCK, 0) as *mut u8;
+    rc = if (block.isNull()) -ENOMEM else cfs_super_peek(p, sb);
+    if (rc == -ENOENT) {
+        rc = -EINVAL; // not a cosmofs at all
+    }
+    let mac = rc == 0 && isMac(superOf(sb as *cfs_super));
+    let r = Ptr.toBorrow(req as *cosmofs_key_req);
+    let name = borrow Ptr.toBorrow(bd as *blkdev).name as *[u8; 16] as *CChar;
+    let uuid = borrow superOf(sb as *cfs_super).uuid as *[u8; 16] as *u8;
+    if (rc == 0 && r.op == COSMOFS_KEY_INFO) {
+        infoFromSuper(sb as *cfs_super, r.info);
+        let keyRoot = superOf(sb as *cfs_super).key_root;
+        if (mac && vdevOf(keyRoot) != 0) {
+            rc = -EXDEV;
+        } else if (mac) {
+            rc = pool_read(p, keyRoot, block as *mut void);
+            if (rc == 0) {
+                // Unverified, as the superblock was: a slot authenticates itself when it is opened, against this uuid.
+                let payload = block.add(CFS_MHDR_SIZE);
+                if (u32At(block as *u8, MHDR_MAGIC) != CFS_MHDR_MAGIC || u32At(block as *u8, MHDR_KIND) != CFS_KIND_KEYS ||
+                    u64At(block as *u8, MHDR_BLKNO) != keyRoot ||
+                    Ptr.toBorrow(payload as *cfs_keys2).version != 2 ||
+                    memcmp(borrow Ptr.toBorrow(payload as *cfs_keys2).uuid as *[u8; 16] as *void, uuid as *void, 16) != 0) {
+                    rc = -EIO;
+                } else {
+                    infoSlots(payload as *u8, r.info);
+                }
+            }
+        }
+    } else if (rc == 0 && r.op == COSMOFS_KEY_LOAD) {
+        rc = if (mac) 0 else -EINVAL; // only a version-14 pool takes its key this way
+        var macSlot = [0u64; 5];
+        let m = borrow mut macSlot as *mut [u64; 5] as *mut cfs_mac;
+        macDerive(r.key, m);
+        // The key must open the pool before it is kept: a superblock slot of this uuid that verifies under it, and
+        // the key block it names.
+        var superOk = false;
+        var keyRoot: u64 = 0;
+        let generation = superOf(sb as *cfs_super).generation;
+        for (slot in 0u64..2) {
+            if (rc != 0) {
+                break;
+            }
+            if (pool_read(p, slot, block as *mut void) != 0) {
+                continue;
+            }
+            let s = superOf(block as *cfs_super);
+            if (memcmp(borrow s.magic as *[u8; 8] as *void, "COSMOFS1".ptr as *void, 8) == 0 && isMac(s) &&
+                memcmp(borrow s.uuid as *[u8; 16] as *void, uuid as *void, 16) == 0 &&
+                cfs_crypt_floor_super_ok(m as *cfs_mac, block as *u8) && (!superOk || s.generation == generation)) {
+                superOk = true;
+                keyRoot = s.key_root;
+            }
+        }
+        var buffer = [0u8; 160];
+        if (rc == 0 && !superOk) {
+            rc = -EKEYREJECTED;
+            var line = TextWriter.create(mut buffer[..]);
+            line.text("cosmofs: ");
+            cText(mut line, name);
+            line.text(": that key does not open the pool");
+            KernelLog.send(LogLevel.Warn, line);
+        }
+        if (rc == 0 && vdevOf(keyRoot) != 0) {
+            rc = -EXDEV;
+        }
+        if (rc == 0) {
+            rc = pool_read(p, keyRoot, block as *mut void);
+        }
+        if (rc == 0) {
+            let k = Ptr.toBorrow(block.add(CFS_MHDR_SIZE) as *cfs_keys2);
+            if (!cfs_mhdr_ok(m as *cfs_mac, block as *void, keyRoot, CFS_KIND_KEYS) || k.version != 2 ||
+                memcmp(borrow k.uuid as *[u8; 16] as *void, uuid as *void, 16) != 0) {
+                var line = TextWriter.create(mut buffer[..]);
+                line.text("cosmofs: ");
+                cText(mut line, name);
+                line.text(": the key block does not authenticate; the pool is not unlocked");
+                KernelLog.send(LogLevel.Error, line);
+                rc = -EIO;
+            }
+        }
+        wipe(m as *mut u8, layoutOf<cfs_mac>().size);
+        if (rc == 0) {
+            rc = keytabInstall(uuid, r.key);
+        }
+        if (rc == 0) {
+            var line = TextWriter.create(mut buffer[..]);
+            line.text("cosmofs: ");
+            cText(mut line, name);
+            line.text(": unlocked");
+            KernelLog.send(LogLevel.Info, line);
+        }
+    } else if (rc == 0 && r.op == COSMOFS_KEY_UNLOAD) {
+        rc = keytabUnload(uuid);
+    } else if (rc == 0) {
+        rc = -EINVAL;
+    }
+    if (!block.isNull()) {
+        wipe(block, CFS_BLOCK);
+        kfree(block as *mut void);
+    }
+    pool_close(p);
+    return rc;
+}
+
+/// The mount half: its slots, and changing one.
+/// Safety: `mnt` is a mount, `req` a request.
+unsafe fn keyctlMount(mnt: *mut mount, req: *mut cosmofs_key_req) -> i32 {
+    let fs = Ptr.toBorrow(mnt as *mount).fs_priv as *mut cfs;
+    if (fs.isNull()) {
+        return -EINVAL;
+    }
+    let r = Ptr.toBorrow(req as *cosmofs_key_req);
+    if (r.op == COSMOFS_KEY_SLOT) {
+        if (!fsOf(fs).mac.on) {
+            return -EINVAL;
+        }
+        if ((Ptr.toBorrow(mnt as *mount).flags & MOUNT_RDONLY) != 0 || fsOf(fs).rdonly) {
+            return -EROFS;
+        }
+        if (r.slot >= CFS_KEY_SLOTS) {
+            return -EINVAL;
+        }
+        if (!cfs_keyslot_valid(r.slot, r.rec as *cfs_keyslot)) {
+            return -EINVAL;
+        }
+    }
+    let lock = borrow mut fsOf(fs).lock as *mut mutex;
+    mutex_lock(lock);
+    var rc = 0;
+    if (r.op == COSMOFS_KEY_SLOT && !keyEqual(r.key, borrow fsOf(fs).master_key as *[u8; 32] as *u8)) {
+        rc = -EKEYREJECTED; // only a holder of a working passphrase changes the slots
+    }
+    if (rc == 0 && r.op == COSMOFS_KEY_INFO) {
+        infoFromSuper(borrow fsOf(fs).sb as *cfs_super, r.info);
+        if (!fsOf(fs).mac.on) {
+            mutex_unlock(lock);
+            return 0;
+        }
+    } else if (rc == 0 && r.op != COSMOFS_KEY_SLOT) {
+        rc = -EINVAL;
+    }
+    var b = 0 as *mut cfs_buf;
+    if (rc == 0) {
+        rc = cfs_buf_get(fs, fsOf(fs).sb.key_root, CFS_KIND_KEYS, borrow mut b as *mut *mut cfs_buf);
+    }
+    if (rc == 0 && r.op == COSMOFS_KEY_INFO) {
+        infoSlots(Ptr.toBorrow(b as *cfs_buf).data.add(CFS_MHDR_SIZE) as *u8, r.info);
+        cfs_buf_put(fs, b);
+    } else if (rc == 0) {
+        let slots = Ptr.toBorrow(b as *cfs_buf).data.add(CFS_MHDR_SIZE + KEYS2_SLOTS);
+        let size = layoutOf<cfs_keyslot>().size;
+        var left: u32 = 0;
+        for (i in 0u32..CFS_KEY_SLOTS) {
+            if (i != r.slot && Ptr.toBorrow(slots.add((i as usize) * size) as *cfs_keyslot).kind != CFS_KEYSLOT_EMPTY) {
+                left += 1;
+            }
+        }
+        let clearing = Ptr.toBorrow(r.rec).kind == CFS_KEYSLOT_EMPTY;
+        if (clearing && left == 0) {
+            rc = -EBUSY; // the last way in
+            cfs_buf_put(fs, b);
+        } else {
+            rc = cfs_buf_cow(fs, borrow mut b as *mut *mut cfs_buf, borrow mut fsOf(fs).sb.key_root as *mut u64);
+            if (rc == 0) {
+                let moved = Ptr.toBorrow(b as *cfs_buf).data.add(CFS_MHDR_SIZE + KEYS2_SLOTS);
+                memcpy(moved.add((r.slot as usize) * size) as *mut void, r.rec as *void, size);
+                cfs_buf_mark_dirty(fs, b);
+            }
+            cfs_buf_put(fs, b);
+            // Durable before the answer: a slot written is one a reboot can use, and a slot cleared is one nobody can.
+            if (rc == 0) {
+                rc = cfs_commit(fs);
+            }
+            if (rc == 0) {
+                var buffer = [0u8; 128];
+                var line = TextWriter.create(mut buffer[..]);
+                line.text("cosmofs: ");
+                cText(mut line, borrow fsOf(fs).pool_name as *[u8; 17] as *CChar);
+                line.text(": key slot ");
+                line.decimal(r.slot as u64);
+                line.text(if (clearing) " cleared" else " written");
+                KernelLog.send(LogLevel.Info, line);
+            }
+        }
+    }
+    mutex_unlock(lock);
+    return rc;
+}
+
+/// kernel/cosmofs.h's cosmofs_keyctl: a key operation on a device or on a mount, exactly one of them.
+/// Safety: `bd` null or a block device, `mnt` null or a mount, `req` a request.
+@export("cosmofs_keyctl")
+unsafe fn keyctl(bd: *mut blkdev, mnt: *mut mount, req: *mut cosmofs_key_req) -> i32 {
+    if (bd.isNull() == mnt.isNull() || !slotsFit()) {
+        return -EINVAL;
+    }
+    if (!bd.isNull()) {
+        return if (Ptr.toBorrow(req as *cosmofs_key_req).op == COSMOFS_KEY_SLOT) -EINVAL else keyctlDev(bd, req);
+    }
+    return keyctlMount(mnt, req);
+}

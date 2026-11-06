@@ -599,9 +599,11 @@ void cfs_mac_tag(const struct cfs_mac *m, char domain, const uint8_t *block, siz
 bool cfs_mac_ok(const struct cfs_mac *m, char domain, const uint8_t *block, size_t off);
 void cfs_mac_seal(const struct cfs_mac *m, char domain, uint8_t *block, size_t off);
 
-/* Encryption (cosmofs_crypt.c; design.md, "Format version 7"). */
-void cfs_file_key(const struct cfs *fs, uint64_t ino, uint8_t out[CHACHA20_KEY_SIZE]);
-void cfs_block_nonce(uint8_t nonce[CHACHA20_NONCE_SIZE]);
+/* Encryption (cosmofs_crypt.cee; design.md, "Format version 7"). Keys are
+ * CHACHA20_KEY_SIZE bytes, nonces CHACHA20_NONCE_SIZE and uuids 16, passed
+ * as pointers: the generated declarations are (gcc's -Warray-parameter). */
+void cfs_file_key(const struct cfs *fs, uint64_t ino, uint8_t *out);
+void cfs_block_nonce(uint8_t *nonce);
 /* Where a block belongs, authenticated with it but never stored: the
  * reader supplies what it believes the position to be, so a block moved
  * to another offset of the same file fails its tag. */
@@ -609,10 +611,9 @@ struct cfs_block_aad {
     uint64_t ino;
     uint64_t lblk;
 };
-int cfs_keys_write(struct spool *pool, uint64_t dva, uint64_t generation, const uint8_t master[CHACHA20_KEY_SIZE],
-                   const void *user_key, size_t user_len);
-int cfs_keys_unwrap(const struct cfs_keys *k, const void *user_key, size_t user_len,
-                    uint8_t master[CHACHA20_KEY_SIZE]);
+int cfs_keys_write(struct spool *pool, uint64_t dva, uint64_t generation, const uint8_t *master, const void *user_key,
+                   size_t user_len);
+int cfs_keys_unwrap(const struct cfs_keys *k, const void *user_key, size_t user_len, uint8_t *master);
 int cfs_need_seeded(const char *what);
 int cfs_keys_load(struct cfs *fs, const void *user_key, size_t user_len);
 int cfs_keys_rotate(struct cfs *fs, const void *new_key, size_t new_len);
@@ -634,17 +635,17 @@ struct cfs_format_keys {
 };
 int cosmofs_format_keyed(struct blkdev **bd, unsigned n, const char *label, const struct cfs_format_keys *fk);
 
-/* Version 14 (cosmofs_crypt.c; design.md, "The key hierarchy", "The key handle"). */
-void cfs_mac_derive(const uint8_t master[CHACHA20_KEY_SIZE], struct cfs_mac *out);
+/* Version 14 (cosmofs_crypt.cee; design.md, "The key hierarchy", "The key handle"). */
+void cfs_mac_derive(const uint8_t *master, struct cfs_mac *out);
 bool cfs_keyslot_valid(unsigned index, const struct cfs_keyslot *s);
 int cfs_keys2_write(struct spool *pool, const struct cfs_mac *mac, uint64_t dva, uint64_t generation,
-                    const uint8_t uuid[16], const struct cfs_keyslot slots[CFS_KEY_SLOTS]);
-int cfs_keytab_mac(const uint8_t uuid[16], struct cfs_mac *mac);
-int cfs_keytab_take(const uint8_t uuid[16], bool hold, uint8_t master[CHACHA20_KEY_SIZE]);
-void cfs_keytab_release(const uint8_t uuid[16]);
-int cfs_keytab_install(const uint8_t uuid[16], const uint8_t master[CHACHA20_KEY_SIZE]);
-int cfs_keytab_unload(const uint8_t uuid[16]);
-bool cfs_keytab_has(const uint8_t uuid[16]);
+                    const uint8_t *uuid, const struct cfs_keyslot *slots);
+int cfs_keytab_mac(const uint8_t *uuid, struct cfs_mac *mac);
+int cfs_keytab_take(const uint8_t *uuid, bool hold, uint8_t *master);
+void cfs_keytab_release(const uint8_t *uuid);
+int cfs_keytab_install(const uint8_t *uuid, const uint8_t *master);
+int cfs_keytab_unload(const uint8_t *uuid);
+bool cfs_keytab_has(const uint8_t *uuid);
 
 int cfs_alloc_block(struct cfs *fs, uint64_t *out);                    /* one metadata block */
 /* Up to `want` consecutive data blocks at or after `hint` (0: the hint of

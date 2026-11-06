@@ -291,7 +291,7 @@ class Pool:
             struct.pack_into("<I", b, 24, block_crc(b, 24))
         self.write(blk, b)
 
-    # an encrypted file's blocks (format 7; cosmofs_crypt.c, cosmofs.c seal_block)
+    # an encrypted file's blocks (format 7; cosmofs_crypt.cee, cosmofs.c seal_block)
     def file_key(self, ino):
         return cosmofs_key.chacha20_xor(self.master, 0, struct.pack("<Q", ino) + bytes(4), bytes(32))
 

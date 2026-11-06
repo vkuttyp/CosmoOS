@@ -72,8 +72,7 @@ static void chacha20_block(const uint8_t key[CHACHA20_KEY_SIZE], uint32_t counte
         store32le(out + 4 * i, x[i] + s[i]);
 }
 
-void chacha20_xor(const uint8_t key[CHACHA20_KEY_SIZE], uint32_t counter, const uint8_t nonce[CHACHA20_NONCE_SIZE],
-                  const void *in, void *out, size_t len)
+void chacha20_xor(const uint8_t *key, uint32_t counter, const uint8_t *nonce, const void *in, void *out, size_t len)
 {
     const uint8_t *ip = in;
     uint8_t *op = out;
@@ -323,15 +322,15 @@ static void tag_of(const uint8_t key[CHACHA20_KEY_SIZE], const uint8_t nonce[CHA
     memset(otk, 0, sizeof(otk));
 }
 
-void chacha20_seal(const uint8_t key[CHACHA20_KEY_SIZE], const uint8_t nonce[CHACHA20_NONCE_SIZE], const void *aad,
-                   size_t aad_len, void *data, size_t len, uint8_t tag[POLY1305_TAG_SIZE])
+void chacha20_seal(const uint8_t *key, const uint8_t *nonce, const void *aad, size_t aad_len, void *data, size_t len,
+                   uint8_t *tag)
 {
     chacha20_xor(key, 1, nonce, data, data, len);
     tag_of(key, nonce, aad, aad_len, data, len, tag);
 }
 
-bool chacha20_open(const uint8_t key[CHACHA20_KEY_SIZE], const uint8_t nonce[CHACHA20_NONCE_SIZE], const void *aad,
-                   size_t aad_len, void *data, size_t len, const uint8_t tag[POLY1305_TAG_SIZE])
+bool chacha20_open(const uint8_t *key, const uint8_t *nonce, const void *aad, size_t aad_len, void *data, size_t len,
+                   const uint8_t *tag)
 {
     uint8_t want[POLY1305_TAG_SIZE];
     tag_of(key, nonce, aad, aad_len, data, len, want);

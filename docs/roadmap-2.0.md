@@ -1282,6 +1282,19 @@ branch). The pacing state, the set of blocks seen, the entries, inodes
 and extents are stack slots of words checked against their C sizes;
 `cosmofs_scrub_floor.c` keeps `g_cosmofs_scrub_rate`, the sysctl's
 variable, which CeeSafe cannot export.
+`cosmofs_crypt.cee`, the keys: `tests/host/test_cfscrypt.c` runs the
+real ChaCha20-Poly1305, SHA-512 and BLAKE2b under a pool, buffers, a
+transaction and a random source it owns -- file keys and nonces, the
+seeding wait, version-1 key blocks written, unwrapped, loaded and
+rotated, the MAC key, version-2 key blocks, the key table to full, and
+every /dev/fsctl key operation on a device and a mount
+(0x98e1087b49e6224c, clang and gcc; every line, every branch but one
+that cannot be taken). The key table is static arrays under its
+spinlock; the hash states, the superblock and the MAC key are stack
+slots of words checked against their C sizes; `cosmofs_crypt_floor.c`
+makes the one call CeeSafe cannot declare (`cfs_mac_ok`'s `char`
+domain). The cipher, hash and key prototypes take pointers, as the
+generated declarations do.
 
 Size: about 4.5x.
 

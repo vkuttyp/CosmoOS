@@ -23,9 +23,9 @@
 #define POLY1305_TAG_SIZE   16u
 
 /* XOR `len` bytes of `in` with the keystream for (key, counter, nonce)
- * into `out`; in and out may be the same pointer. */
-void chacha20_xor(const uint8_t key[CHACHA20_KEY_SIZE], uint32_t counter, const uint8_t nonce[CHACHA20_NONCE_SIZE],
-                  const void *in, void *out, size_t len);
+ * into `out`; in and out may be the same pointer. Keys, nonces and tags
+ * are pointers, as CeeSafe declares them (gcc's -Warray-parameter). */
+void chacha20_xor(const uint8_t *key, uint32_t counter, const uint8_t *nonce, const void *in, void *out, size_t len);
 
 /* One-time authenticator over `len` bytes with a 32-byte key that must
  * never be reused for another message (RFC 8439 §2.5). */
@@ -48,11 +48,11 @@ bool poly1305_verify(const uint8_t a[POLY1305_TAG_SIZE], const uint8_t b[POLY130
  * displacing content. It is not stored -- the reader supplies what it
  * believes the position to be, and a lie makes the tag fail.
  */
-void chacha20_seal(const uint8_t key[CHACHA20_KEY_SIZE], const uint8_t nonce[CHACHA20_NONCE_SIZE], const void *aad,
-                   size_t aad_len, void *data, size_t len, uint8_t tag[POLY1305_TAG_SIZE]);
+void chacha20_seal(const uint8_t *key, const uint8_t *nonce, const void *aad, size_t aad_len, void *data, size_t len,
+                   uint8_t *tag);
 /* The reverse: check the tag first and decrypt only if it matches.
  * False leaves `data` untouched. */
-bool chacha20_open(const uint8_t key[CHACHA20_KEY_SIZE], const uint8_t nonce[CHACHA20_NONCE_SIZE], const void *aad,
-                   size_t aad_len, void *data, size_t len, const uint8_t tag[POLY1305_TAG_SIZE]);
+bool chacha20_open(const uint8_t *key, const uint8_t *nonce, const void *aad, size_t aad_len, void *data, size_t len,
+                   const uint8_t *tag);
 
 #endif /* KERNEL_CHACHA20_H */
