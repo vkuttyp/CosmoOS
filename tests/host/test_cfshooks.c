@@ -1,10 +1,10 @@
 /*
- * test_cfshooks.c - cosmofs's stats, key operations and test hooks (kernel-services/filesystem/cosmofs/cosmofs_hooks.c)
- * on the host: roadmap 2.0 SA7. A digest recorded from the C over every hook, on mounts with and without a
- * filesystem behind them, of every version, one member or several with their copies online or not, encrypted or not,
- * with the key or without, read-only or not -- while the orphan reservation, the key loads and rotations, inode reads,
- * block maps and deadlist walks answer what the test says. Every argument, return, figure and field a hook sets is in
- * the digest; the lock is let go every time.
+ * test_cfshooks.c - cosmofs's stats, key operations and test hooks
+ * (kernel-services/filesystem/cosmofs/cosmofs_hooks.cee and its floor) on the host: roadmap 2.0 SA7. A digest recorded
+ * from the C over every hook, on mounts with and without a filesystem behind them, of every version, one member or
+ * several with their copies online or not, encrypted or not, with the key or without, read-only or not -- while the
+ * orphan reservation, the key loads and rotations, inode reads, block maps and deadlist walks answer what the test
+ * says. Every argument, return, figure and field a hook sets is in the digest; the lock is let go every time.
  */
 
 #include "harness.h"
@@ -21,6 +21,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* The values the CeeSafe port writes as its own constants. */
+_Static_assert(ENOENT == 2 && EINVAL == 22 && EROFS == 30 && ENOTSUP == 95 && EOPNOTSUPP == ENOTSUP &&
+                   CFS_DVA_VDEV_SHIFT == 56 && CFS_DVA(3, 0) == 3ull << 56,
+               "cosmofs_hooks's errno.h and cosmofs_format.h values");
+/* cosmofs_hooks.cee keeps an inode in a stack slot of 32 words. */
+_Static_assert(sizeof(struct cfs_inode) <= 32 * 8, "cosmofs_hooks.cee's stack slot");
 
 /* The digest of the C (cosmofs_hooks.c, 2026-11-07), which the CeeSafe port gives. */
 #define HOOKS_DIGEST 0x677b20b102df3691ull

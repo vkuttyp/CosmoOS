@@ -53,7 +53,7 @@ FUZZ_COSMOFS_SRCS := tests/fuzz/fuzz_cosmofs.c tests/fuzz/shim_fs.c \
 	kernel-services/filesystem/cosmofs/cosmofs_alloc.c kernel-services/filesystem/cosmofs/cosmofs_commit.c \
 	kernel-services/filesystem/cosmofs/cosmofs_commit_floor.c \
 	kernel-services/filesystem/cosmofs/cosmofs_format.c kernel-services/filesystem/cosmofs/cosmofs_corrupt.c \
-	kernel-services/filesystem/cosmofs/cosmofs_hooks.c \
+	kernel-services/filesystem/cosmofs/cosmofs_hooks.c kernel-services/filesystem/cosmofs/cosmofs_hooks_floor.c \
 	kernel-services/filesystem/cosmofs/cosmofs_snap.c kernel-services/filesystem/cosmofs/cosmofs_snap_floor.c \
 	kernel-services/filesystem/cosmofs/cosmofs_reach.c \
 	kernel-services/filesystem/cosmofs/cosmofs_rollback.c kernel-services/filesystem/cosmofs/cosmofs_rollback_floor.c \

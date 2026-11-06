@@ -1418,6 +1418,13 @@ loop or run into noise, while the inode, allocator, directory, buffer
 and kmalloc calls fail (0x8e1237dd995b9aa1, clang and gcc; every line
 and branch that can be reached). `cfs_dirent_free_run` and
 `cfs_dirent_put`, inline in `cosmofs_format.h`, are written out in it.
+`cosmofs_hooks.cee`, the sixth, a mount's figures, the key operations on
+a mounted pool and the test hooks, moved out of `cosmofs_core.c`:
+`tests/host/test_cfshooks.c` runs every hook on mounts with and without
+a filesystem, of every version, mirrored or not, encrypted or not
+(0x677b20b102df3691, clang and gcc; every line and branch).
+`cosmofs_hooks_floor.c` keeps the three hooks whose fields only a debug
+or self-test build's struct cfs has.
 
 Size: about 4.5x.
 

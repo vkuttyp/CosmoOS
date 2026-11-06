@@ -187,6 +187,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel-services/filesystem/cosmofs/cosmofs_format.c \
 	kernel-services/filesystem/cosmofs/cosmofs_corrupt.c \
 	kernel-services/filesystem/cosmofs/cosmofs_hooks.c \
+	kernel-services/filesystem/cosmofs/cosmofs_hooks_floor.c \
 	kernel-services/filesystem/cosmofs/cosmofs_buf_floor.c \
 	kernel-services/filesystem/cosmofs/cosmofs_snap.c \
 	kernel-services/filesystem/cosmofs/cosmofs_snap_floor.c \
@@ -369,7 +370,7 @@ $(OUT)/kernel-services/network/nettest_bench.o $(OUT)/kernel-services/network/ne
 $(OUT)/kernel-services/network/nettest_harness.o $(OUT)/kernel-services/network/nettest_harness.analyzed: EXTRA_CFLAGS += -I$(ROOT)/kernel-services/network
 $(OUT)/kernel-services/network/nettest_frame.o $(OUT)/kernel-services/network/nettest_frame.analyzed: EXTRA_CFLAGS += -I$(ROOT)/kernel-services/network
 
-# kernel-services/filesystem/cosmofs/cfsparse.c, cosmofs_reach.c, cosmofs_clone.c, cosmofs_rollback.c, cosmofs_scrub.c, cosmofs_crypt.c, cosmofs_resilver.c, cosmofs_member.c, cosmofs_check.c, cosmofs_snap.c, cosmofs_buf.c, cosmofs_alloc.c, cosmofs_commit.c, cosmofs_format.c and cosmofs_corrupt.c are generated from their .cee into out/cee (scripts/cee-gen.py), away
+# kernel-services/filesystem/cosmofs/cfsparse.c, cosmofs_reach.c, cosmofs_clone.c, cosmofs_rollback.c, cosmofs_scrub.c, cosmofs_crypt.c, cosmofs_resilver.c, cosmofs_member.c, cosmofs_check.c, cosmofs_snap.c, cosmofs_buf.c, cosmofs_alloc.c, cosmofs_commit.c, cosmofs_format.c, cosmofs_corrupt.c and cosmofs_hooks.c are generated from their .cee into out/cee (scripts/cee-gen.py), away
 # from the cosmofs_internal.h they include by name: their objects, and their analyses, look in the cosmofs directory too.
 $(OUT)/kernel-services/filesystem/cosmofs/cfsparse.o $(OUT)/kernel-services/filesystem/cosmofs/cfsparse.analyzed: \
 	EXTRA_CFLAGS += -I$(ROOT)/kernel-services/filesystem/cosmofs
@@ -400,4 +401,6 @@ $(OUT)/kernel-services/filesystem/cosmofs/cosmofs_commit.o $(OUT)/kernel-service
 $(OUT)/kernel-services/filesystem/cosmofs/cosmofs_format.o $(OUT)/kernel-services/filesystem/cosmofs/cosmofs_format.analyzed: \
 	EXTRA_CFLAGS += -I$(ROOT)/kernel-services/filesystem/cosmofs
 $(OUT)/kernel-services/filesystem/cosmofs/cosmofs_corrupt.o $(OUT)/kernel-services/filesystem/cosmofs/cosmofs_corrupt.analyzed: \
+	EXTRA_CFLAGS += -I$(ROOT)/kernel-services/filesystem/cosmofs
+$(OUT)/kernel-services/filesystem/cosmofs/cosmofs_hooks.o $(OUT)/kernel-services/filesystem/cosmofs/cosmofs_hooks.analyzed: \
 	EXTRA_CFLAGS += -I$(ROOT)/kernel-services/filesystem/cosmofs

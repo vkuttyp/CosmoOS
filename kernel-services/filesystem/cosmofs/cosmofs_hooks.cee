@@ -1,0 +1,395 @@
+// cosmofs_hooks.cee - A mount's figures, the key operations on a mounted pool and the test hooks, in CeeSafe: roadmap
+// 2.0 SA7. tests/host/test_cfshooks.c holds it to the digest of the C it replaced.
+//
+// struct cfs, the mount and the figures stay C (cosmofs_internal.h, kernel/vfs.h, kernel/cosmofs.h). The three hooks
+// whose fields a build configuration decides are in cosmofs_hooks_floor.c: CeeSafe cannot name a field that only some
+// builds have.
+
+@header("kernel/vfs.h", "kernel/mutex.h", "kernel/storage.h", "kernel/cosmofs.h", "cosmofs_internal.h")
+extern "C" {
+    struct mount {
+        fs_priv: *mut void;
+    }
+    struct spool {
+        nmembers: u32;
+    }
+    struct cfs_mac {
+        on: bool;
+    }
+    struct cfs_super {
+        version: u32;
+        generation: u64;
+        total_blocks: u64;
+        inode_count: u64;
+        snap_root: u64;
+        free_root: u64;
+        orphan_root: u64;
+    }
+    struct cfs_memstate {
+        free_blocks: u64;
+    }
+    struct cfs {
+        pool: *mut spool;
+        sb: cfs_super;
+        free_blocks: u64;
+        mem: *mut cfs_memstate;
+        nmembers: u32;
+        nr_pending: u32;
+        nr_exempt: u32;
+        nr_orphans: u32;
+        nr_dirty: u32;
+        reserve: u64;
+        lock: mutex;
+        discard_on_unmount: bool;
+        test_fail_freelog: bool;
+        test_fail_snapfill: bool;
+        test_fail_orphan: bool;
+        snap_walks: u64;
+        snap_verdicts: u64;
+        commits: u64;
+        csum_failures: u64;
+        repairs: u64;
+        encrypted: bool;
+        have_key: bool;
+        mac: cfs_mac;
+        rdonly: bool;
+        wb_enabled: bool;
+        wb_interval_ms: u32;
+        wb_commits: u64;
+        mount_dirty_notes: u64;
+        wb_early: u64;
+    }
+    struct cfs_inode {
+        ino: u64;
+    }
+    struct cosmofs_stats {
+        generation: u64;
+        free_blocks: u64;
+        total_blocks: u64;
+        inode_count: u64;
+        dirty_buffers: u32;
+        pending_frees: u32;
+        reserve_blocks: u64;
+        commits: u64;
+        wb_commits: u64;
+        csum_failures: u64;
+        members: u32;
+        devices: u32;
+        repairs: u64;
+        degraded: u64;
+        version: u32;
+        free_root: u64;
+        orphan_root: u64;
+        pending_orphans: u32;
+    }
+
+    fn cfs_orphan_reserve(fs: *mut cfs) -> bool;
+    fn cfs_orphan_add(fs: *mut cfs, ino: u64);
+    fn cfs_keys_load(fs: *mut cfs, key: *void, len: usize) -> i32;
+    fn cfs_keys_rotate(fs: *mut cfs, key: *void, len: usize) -> i32;
+    fn cfs_inode_read(fs: *mut cfs, ino: u64, out: *mut cfs_inode) -> i32;
+    fn cfs_map(fs: *mut cfs, inode: *cfs_inode, lblk: u64, pblk: *mut u64) -> i32;
+    fn cfs_snapshot_deadlist_len(fs: *mut cfs, of: u64) -> u64;
+    fn cfs_snapshot_deadlist_dups(fs: *mut cfs, examined: *mut u64, first: *mut u64) -> u64;
+    fn cfs_copies_out(fs: *mut cfs) -> u32;
+    fn pool_copies(p: *spool, dva: u64) -> u32;
+    fn pool_copy_online(p: *spool, vdev: u32, c: u32) -> bool;
+}
+
+// ---- errno.h and cosmofs_format.h values (asserted in tests/host/test_cfshooks.c) ----
+
+const ENOENT: i32 = 2;
+const EINVAL: i32 = 22;
+const EROFS: i32 = 30;
+const ENOTSUP: i32 = 95; // and EOPNOTSUPP, its alias
+const CFS_DVA_VDEV_SHIFT: u32 = 56;
+
+/// The filesystem behind a mount, or null.
+/// Safety: `mnt` is a mount.
+unsafe fn fsOf(mnt: *mut mount) -> *mut cfs => Ptr.toBorrow(mnt as *mount).fs_priv as *mut cfs;
+
+/// Safety: `fs` is a mounted filesystem.
+unsafe fn lockOf(fs: *mut cfs) -> *mut mutex => borrow mut Ptr.toBorrowMut(fs).lock as *mut mutex;
+
+/// A mount's figures, read together under its lock.
+/// Safety: `mnt` is a mount; `out` writable.
+@export("cosmofs_stats")
+unsafe fn stats(mnt: *mut mount, out: *mut cosmofs_stats) -> i32 {
+    let fs = fsOf(mnt);
+    if (fs.isNull()) {
+        return -EINVAL;
+    }
+    mutex_lock(lockOf(fs));
+    let f = Ptr.toBorrow(fs as *cfs);
+    let o = Ptr.toBorrowMut(out);
+    o.generation = f.sb.generation;
+    o.free_blocks = f.free_blocks;
+    o.total_blocks = f.sb.total_blocks;
+    o.inode_count = f.sb.inode_count;
+    o.version = f.sb.version;
+    o.free_root = if (f.sb.version >= 9) f.sb.free_root else 0;
+    o.orphan_root = if (f.sb.version >= 10) f.sb.orphan_root else 0;
+    o.pending_orphans = f.nr_orphans;
+    o.dirty_buffers = f.nr_dirty;
+    o.pending_frees = f.nr_pending.wrappingAdd(f.nr_exempt);
+    o.reserve_blocks = f.reserve;
+    o.commits = f.commits;
+    o.wb_commits = f.wb_commits;
+    o.csum_failures = f.csum_failures;
+    o.members = f.nmembers;
+    o.devices = 0;
+    for (v in 0u32..f.nmembers) {
+        // The copies asked for each time round, as the C's loop condition did.
+        var c: u32 = 0;
+        while (c < pool_copies(f.pool as *spool, (v as u64) << CFS_DVA_VDEV_SHIFT)) {
+            if (pool_copy_online(f.pool as *spool, v, c)) {
+                o.devices = o.devices.wrappingAdd(1);
+            }
+            c += 1;
+        }
+    }
+    o.repairs = f.repairs;
+    o.degraded = cfs_copies_out(fs) as u64;
+    mutex_unlock(lockOf(fs));
+    return 0;
+}
+
+/// Safety: `mnt` is a mount.
+@export("cosmofs_test_fail_freelog")
+unsafe fn testFailFreelog(mnt: *mut mount, on: bool) {
+    let fs = fsOf(mnt);
+    if (!fs.isNull()) {
+        let f = Ptr.toBorrowMut(fs);
+        f.test_fail_freelog = on;
+    }
+}
+
+/// Safety: `mnt` is a mount.
+@export("cosmofs_test_fail_snapfill")
+unsafe fn testFailSnapfill(mnt: *mut mount, on: bool) {
+    let fs = fsOf(mnt);
+    if (!fs.isNull()) {
+        let f = Ptr.toBorrowMut(fs);
+        f.test_fail_snapfill = on;
+    }
+}
+
+/// Put an inode into the orphan set by hand, so that the next commit writes a record naming an inode that is still
+/// linked. Nothing else can build that image: it is what a record whose checksum is good and whose contents are wrong
+/// looks like, and the replay must refuse to act on it rather than delete a file somebody is using.
+/// Safety: `mnt` is a mount.
+@export("cosmofs_test_orphan_add")
+unsafe fn testOrphanAdd(mnt: *mut mount, ino: u64) {
+    let fs = fsOf(mnt);
+    if (fs.isNull()) {
+        return;
+    }
+    mutex_lock(lockOf(fs));
+    if (cfs_orphan_reserve(fs)) {
+        cfs_orphan_add(fs, ino);
+    }
+    mutex_unlock(lockOf(fs));
+}
+
+/// Safety: `mnt` is a mount.
+@export("cosmofs_test_fail_orphan")
+unsafe fn testFailOrphan(mnt: *mut mount, on: bool) {
+    let fs = fsOf(mnt);
+    if (!fs.isNull()) {
+        let f = Ptr.toBorrowMut(fs);
+        f.test_fail_orphan = on;
+    }
+}
+
+/// Safety: `mnt` is a mount.
+@export("cosmofs_test_snap_walks")
+unsafe fn testSnapWalks(mnt: *mut mount) -> u64 {
+    let fs = fsOf(mnt);
+    return if (fs.isNull()) 0 else Ptr.toBorrow(fs as *cfs).snap_walks;
+}
+
+/// Safety: `mnt` is a mount.
+@export("cosmofs_test_snap_verdicts")
+unsafe fn testSnapVerdicts(mnt: *mut mount) -> u64 {
+    let fs = fsOf(mnt);
+    return if (fs.isNull()) 0 else Ptr.toBorrow(fs as *cfs).snap_verdicts;
+}
+
+/// Safety: `mnt` is a mount.
+@export("cosmofs_test_discard_on_unmount")
+unsafe fn testDiscardOnUnmount(mnt: *mut mount, discard: bool) {
+    let fs = fsOf(mnt);
+    if (!fs.isNull()) {
+        let f = Ptr.toBorrowMut(fs);
+        f.discard_on_unmount = discard;
+    }
+}
+
+/// Supply the key for a mount, as the unlock channel would.
+/// Safety: `mnt` is a mount; `key` null or `len` readable bytes.
+@export("cosmofs_test_unlock")
+unsafe fn testUnlock(mnt: *mut mount, key: *void, len: usize) -> i32 {
+    let fs = fsOf(mnt);
+    if (fs.isNull()) {
+        return -EINVAL;
+    }
+    if (!Ptr.toBorrow(fs as *cfs).encrypted) {
+        return -ENOTSUP;
+    }
+    mutex_lock(lockOf(fs));
+    let rc = if (Ptr.toBorrow(fs as *cfs).have_key) 0 else cfs_keys_load(fs, key, len);
+    mutex_unlock(lockOf(fs));
+    return rc;
+}
+
+/// Wrap a version-1 encrypted pool's master key with a new user key.
+/// Safety: `mnt` is a mount; `key` null or `len` readable bytes.
+@export("cosmofs_rekey")
+unsafe fn rekey(mnt: *mut mount, key: *void, len: usize) -> i32 {
+    let fs = fsOf(mnt);
+    if (fs.isNull()) {
+        return -EINVAL;
+    }
+    let f = Ptr.toBorrow(fs as *cfs);
+    if (!f.encrypted) {
+        return -ENOTSUP;
+    }
+    if (f.mac.on) {
+        return -ENOTSUP; // version 14: slots, through COSMOFS_KEY_SLOT, not a version-1 rewrap
+    }
+    if (f.rdonly) {
+        return -EROFS;
+    }
+    mutex_lock(lockOf(fs));
+    let rc = cfs_keys_rotate(fs, key, len);
+    mutex_unlock(lockOf(fs));
+    return rc;
+}
+
+/// Where logical block `lblk` of inode `ino` lives.
+/// Safety: `mnt` is a mount; `dva` writable.
+@export("cosmofs_test_block_of")
+unsafe fn testBlockOf(mnt: *mut mount, ino: u64, lblk: u64, dva: *mut u64) -> i32 {
+    let fs = fsOf(mnt);
+    if (fs.isNull()) {
+        return -EINVAL;
+    }
+    mutex_lock(lockOf(fs));
+    var slot = [0u64; 32];
+    let inp = borrow mut slot as *mut [u64; 32] as *mut cfs_inode;
+    var rc = cfs_inode_read(fs, ino, inp);
+    if (rc == 0) {
+        var pblk: u64 = 0;
+        rc = cfs_map(fs, inp as *cfs_inode, lblk, borrow mut pblk as *mut u64);
+        if (rc == 1) {
+            dva.write(pblk);
+            rc = 0;
+        } else if (rc == 0) {
+            rc = -ENOENT; // a hole
+        }
+    }
+    mutex_unlock(lockOf(fs));
+    return rc;
+}
+
+/// Safety: `mnt` is a mount.
+@export("cosmofs_test_deadlist_len")
+unsafe fn testDeadlistLen(mnt: *mut mount, of: u64) -> u64 {
+    let fs = fsOf(mnt);
+    if (fs.isNull()) {
+        return 0;
+    }
+    mutex_lock(lockOf(fs));
+    let n = cfs_snapshot_deadlist_len(fs, of);
+    mutex_unlock(lockOf(fs));
+    return n;
+}
+
+/// Safety: `mnt` is a mount; `examined` and `first` null or writable.
+@export("cosmofs_test_deadlist_dups")
+unsafe fn testDeadlistDups(mnt: *mut mount, examined: *mut u64, first: *mut u64) -> u64 {
+    if (!examined.isNull()) {
+        examined.write(0);
+    }
+    if (!first.isNull()) {
+        first.write(0);
+    }
+    let fs = fsOf(mnt);
+    if (fs.isNull()) {
+        return 0;
+    }
+    mutex_lock(lockOf(fs));
+    let n = cfs_snapshot_deadlist_dups(fs, examined, first);
+    mutex_unlock(lockOf(fs));
+    return n;
+}
+
+/// Safety: `mnt` is a mount.
+@export("cosmofs_test_snap_root")
+unsafe fn testSnapRoot(mnt: *mut mount) -> u64 {
+    let fs = fsOf(mnt);
+    if (fs.isNull()) {
+        return 0;
+    }
+    mutex_lock(lockOf(fs));
+    let r = Ptr.toBorrow(fs as *cfs).sb.snap_root;
+    mutex_unlock(lockOf(fs));
+    return r;
+}
+
+/// Safety: `mnt` is a mount.
+@export("cosmofs_test_member_free")
+unsafe fn testMemberFree(mnt: *mut mount, vdev: u32) -> u64 {
+    let fs = fsOf(mnt);
+    if (fs.isNull() || vdev >= Ptr.toBorrow(fs as *cfs).nmembers) {
+        return 0xFFFFFFFFFFFFFFFF;
+    }
+    mutex_lock(lockOf(fs));
+    let n = Ptr.toBorrow(Ptr.toBorrow(fs as *cfs).mem.add(vdev as usize) as *cfs_memstate).free_blocks;
+    mutex_unlock(lockOf(fs));
+    return n;
+}
+
+/// What the mount's own replay did: how many dirty marks it made, and how many of those happened with a writeback
+/// thread already running. The second must be zero (no autonomous committer before the mount is live); the first must
+/// not be, or the test asking is asking nothing.
+/// Safety: `mnt` is a mount; `dirtyNotes` and `early` null or writable.
+@export("cosmofs_test_mount_writeback")
+unsafe fn testMountWriteback(mnt: *mut mount, dirtyNotes: *mut u64, early: *mut u64) {
+    let fs = fsOf(mnt);
+    if (!dirtyNotes.isNull()) {
+        dirtyNotes.write(if (fs.isNull()) 0 else Ptr.toBorrow(fs as *cfs).mount_dirty_notes);
+    }
+    if (!early.isNull()) {
+        early.write(if (fs.isNull()) 0 else Ptr.toBorrow(fs as *cfs).wb_early);
+    }
+}
+
+/// The pool under a mount, for the copy-state self-tests to read (roadmap 1.2 B3). Read with writeback off: nothing
+/// else moves it then.
+/// Safety: `mnt` is a mount.
+@export("cosmofs_test_pool")
+unsafe fn testPool(mnt: *mut mount) -> *mut spool {
+    let fs = fsOf(mnt);
+    return if (fs.isNull()) 0 as *mut spool else Ptr.toBorrow(fs as *cfs).pool;
+}
+
+/// Safety: `mnt` is a mount.
+@export("cosmofs_test_set_writeback")
+unsafe fn testSetWriteback(mnt: *mut mount, on: bool) {
+    let fs = fsOf(mnt);
+    if (!fs.isNull()) {
+        let f = Ptr.toBorrowMut(fs);
+        f.wb_enabled = on;
+    }
+}
+
+/// Safety: `mnt` is a mount.
+@export("cosmofs_test_set_writeback_interval")
+unsafe fn testSetWritebackInterval(mnt: *mut mount, ms: u32) {
+    let fs = fsOf(mnt);
+    if (!fs.isNull()) {
+        let f = Ptr.toBorrowMut(fs);
+        f.wb_interval_ms = ms;
+    }
+}
