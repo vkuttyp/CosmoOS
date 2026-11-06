@@ -366,6 +366,13 @@ void cfs_buf_mark_clean(struct cfs *fs, struct cfs_buf *b);
 /* cosmofs_core.c: the open transaction is no longer empty -- its age starts,
  * and a writeback thread with it. */
 void cfs_note_dirty(struct cfs *fs);
+/* cosmofs_commit.c's parts the mount and the format use: the root write
+ * into a slot, the replay of the free and orphan records a mount finds, and
+ * the commit that says whether it published a root. */
+int cfs_super_write(struct cfs *fs, unsigned slot, unsigned flags);
+int cfs_freelog_replay(struct cfs *fs);
+int cfs_orphan_replay(struct cfs *fs);
+int cfs_commit_ex(struct cfs *fs, bool *published);
 /* Bit `i` of a byte map. */
 static inline bool cfs_bit_test(const uint8_t *map, uint64_t i) { return (map[i >> 3] >> (i & 7)) & 1; }
 static inline void cfs_bit_set(uint8_t *map, uint64_t i) { map[i >> 3] |= (uint8_t)(1u << (i & 7)); }

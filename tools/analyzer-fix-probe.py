@@ -35,6 +35,12 @@ CASES = {
                          "core.UndefinedBinaryOperatorResult", {"x86_64": 0, "aarch64": 1}),
     "kill-current": ("kernel/syscall/native.c", "kill_one", "core.NullDereference", 1),
 }
+# Where a case's function is now, when it has moved since the baseline: roadmap 2.0 SA7 took cosmofs_core.c apart. The
+# old mode analyzes the baseline's file, where the defect was; the fixed mode analyzes the function where it now lives,
+# or the fixed mode would pass on a file that no longer has the function.
+MOVED = {
+    "cosmofs-freelog": "kernel-services/filesystem/cosmofs/cosmofs_commit.c",
+}
 
 
 def main():
@@ -57,7 +63,8 @@ def main():
                 old = subprocess.check_output(["git", "-C", str(ROOT), "show", BASELINE + ":" + source])
                 (tree / source).write_bytes(old)
             out = tree / "out/probe"
-            report = out / Path(source).with_suffix(".analyzed")
+            analyzed = source if args.old else MOVED.get(args.case, source)
+            report = out / Path(analyzed).with_suffix(".analyzed")
             make = "gmake" if sys.platform == "darwin" else "make"
             with (work / "build.log").open("w") as log:
                 rc = subprocess.run([make, "-C", str(tree), "ARCH=" + args.arch,
