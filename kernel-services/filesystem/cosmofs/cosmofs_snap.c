@@ -691,7 +691,7 @@ uint64_t cfs_snapshot_deadlist_len(struct cfs *fs, uint64_t of)
  * the second time after the allocator has handed it to something else.
  *
  * `cosmofs_check` cannot state this: it claims a deadlist's entries as
- * non-live (cosmofs_check.c), so the duplicate-claim finding never
+ * non-live (cosmofs_check.cee), so the duplicate-claim finding never
  * fires on them. So the crash suite asks here instead, per prefix.
  *
  * `*examined` is how many entries were looked at. A caller needs it:

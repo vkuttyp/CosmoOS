@@ -15,8 +15,9 @@ through the FI_COSMOFS_EXTENT_NOMEM/FBIG seam and reads every block the
 open inode maps (cosmofs_test_verify_file). With the fix every block
 verifies; without it the first case, plain blocks over plain blocks,
 fails `bad == 0`. --old reverse-applies the fix commit (its cosmofs
-sources, the whole commit and nothing else) in a throwaway worktree,
-keeping the seam and the self-test. The check runs in a debug
+sources, the whole commit and nothing else; the check's two lines by
+their text in cosmofs_check.cee) in a throwaway worktree, keeping the
+seam and the self-test. The check runs in a debug
 `make test` on either architecture.
 
 Logs stay under out/cosmofs-extent-fail-probe/<arch>-<mode>. Exit 0 when
@@ -33,7 +34,14 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 SUBJECT = "cosmofs: a failed mutation leaves every mapped block under its own checksum"
 SOURCES = ["kernel-services/filesystem/cosmofs/" + f for f in
-           ("cosmofs.c", "cosmofs_core.c", "cosmofs_check.c", "cosmofs_snap.c", "cosmofs_internal.h")]
+           ("cosmofs.c", "cosmofs_core.c", "cosmofs_snap.c", "cosmofs_internal.h")]
+# The fix's two lines in cosmofs_check.c, which is CeeSafe now (cosmofs_check.cee, roadmap 2.0 SA7): its diff no longer
+# applies, so the check's part is taken out of the port by its text.
+CHECK = "kernel-services/filesystem/cosmofs/cosmofs_check.cee"
+CHECK_RULE = (" else {\n"
+              "                    cfs_fail(fs, rc); // the frees are queued and the slot still names them (CF17)\n"
+              "                }\n")
+CHECK_OLD = "\n"
 OK = re.compile(r"^SELFTEST: cosmofs-extent-fail\s+\.\.\. ok ", re.M)
 FAILED = re.compile(r"^SELFTEST: cosmofs-extent-fail\s+\.\.\. FAIL: check failed: bad == 0 at line \d+", re.M)
 
@@ -67,6 +75,11 @@ def main():
             if not patch:
                 sys.exit(f"commit {sha[:8]} does not change {SOURCES}")
             subprocess.run(["git", "-C", str(tree), "apply", "-R"], input=patch, check=True)
+            src = tree / CHECK
+            body = src.read_text()
+            if body.count(CHECK_RULE) != 1:
+                sys.exit(f"{CHECK}: the fixed text is not there exactly once; the probe is stale")
+            src.write_text(body.replace(CHECK_RULE, CHECK_OLD))
         make = "gmake" if sys.platform == "darwin" else "make"
         out = tree / "out" / "dbg"
         args = [make, "-C", str(tree), "-j8", f"ARCH={a.arch}", f"OUT={out}",

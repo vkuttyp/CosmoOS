@@ -1174,7 +1174,7 @@ passing (`cosmofs-scrub-open`).
 ### The structural check
 
 The scrub asks whether every block is still what was written. The check
-(`cosmofs_check`, `cosmofs_check.c`) asks whether the blocks add up:
+(`cosmofs_check`, `cosmofs_check.cee`) asks whether the blocks add up:
 whether what the structures claim agrees with the allocator, whether an
 inode's link count matches the entries that name it, and whether
 anything is reachable from nowhere.

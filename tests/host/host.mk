@@ -162,6 +162,7 @@ HOST_CFSMEMBER_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/co
 	tests/host/ceesafe_panic.c tests/host/test_cfsmember.c
 # cosmofs's structural check with the real entry decoders: the blocks, the trees, the lists, the mount and the device are the test's.
 HOST_CFSCHECK_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/cosmofs_check.c \
+	kernel-services/filesystem/cosmofs/cosmofs_check_floor.c \
 	kernel-services/filesystem/cosmofs/cfsparse.c kernel/core/crc32c.c kernel/ceesafe/ceesafe_rt_core.c \
 	tests/host/ceesafe_panic.c tests/host/test_cfscheck.c
 HOST_CFSPARSE_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/cfsparse.c kernel/core/crc32c.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_cfsparse.c

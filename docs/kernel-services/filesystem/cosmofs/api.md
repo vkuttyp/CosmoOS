@@ -276,7 +276,7 @@ return `-EIO` without walking when the open transaction is abandoned.
   each authentication tag. On a read-only mount nothing is repaired.
 
 #### `int cosmofs_check(struct mount *mnt, struct cosmofs_check_report *out, unsigned flags)`
-- Purpose: the structural check (`cosmofs_check.c`; `design.md`, "The
+- Purpose: the structural check (`cosmofs_check.cee`; `design.md`, "The
   structural check"). Walks the live tree, every snapshot, the allocation
   maps and the inode map, and compares what is reached with what the
   bitmaps and superblock say.

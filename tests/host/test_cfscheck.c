@@ -1,5 +1,5 @@
 /*
- * test_cfscheck.c - cosmofs's structural check (kernel-services/filesystem/cosmofs/cosmofs_check.c) on the host:
+ * test_cfscheck.c - cosmofs's structural check (kernel-services/filesystem/cosmofs/cosmofs_check.cee) on the host:
  * roadmap 2.0 SA7. A digest recorded from the C over seeded filesystems the test builds and owns, on one member or
  * two: an inode map of one or two levels with slots that do and do not name themselves, files whose runs are in
  * order, out of order, overlapping and compressed, extent chains (one in a loop), checksum trees of one and two
@@ -31,6 +31,50 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* The values the CeeSafe port writes as its own constants. */
+_Static_assert(ENOENT == 2 && EIO == 5 && ENOMEM == 12 && EBUSY == 16 && EINVAL == 22 && EROFS == 30 &&
+                   ENOKEY == 126 && COSMOFS_CHECK_REPAIR == 1 && COSMOFS_CHECK_OFFLINE == 2 &&
+                   COSMOFS_CHECK_BOOT == 4 && CFS_CHECK_NAMES == 8 && MOUNT_RDONLY == 1 && BLKDEV_NAME_MAX == 16 &&
+                   POOL_MAX_COPIES == 4,
+               "cosmofs_check's errno.h, cosmofs.h, vfs.h, blk.h and storage.h values");
+_Static_assert(COSMO_FSCTL_DEV_F_CHECKED == 1u << 0 && COSMO_FSCTL_DEV_F_SUPER_NONE == 1u << 1 &&
+                   COSMO_FSCTL_DEV_F_SUPER_DISAGREE == 1u << 2 && COSMO_FSCTL_DEV_F_MOUNT_FAILED == 1u << 3 &&
+                   COSMO_FSCTL_DEV_F_FELL_BACK == 1u << 4 && COSMO_FSCTL_DEV_F_ROLLBACK_PENDING == 1u << 5 &&
+                   COSMO_FSCTL_DEV_F_ROLLBACK_HELD == 1u << 6 && COSMO_FSCTL_DEV_F_ROLLBACK_APPLIED == 1u << 7 &&
+                   COSMO_FSCTL_DEV_F_ROLLBACK_REFUSED == 1u << 8 && COSMO_FSCTL_DEV_F_COMMITTED == 1u << 9 &&
+                   COSMO_FSCTL_DEV_F_BOOT_REFUSED == 1u << 10 && COSMO_FSCTL_DEV_F_LOCKED == 1u << 11 &&
+                   COSMO_FSCTL_STAGE_NONE == 0,
+               "cosmofs_check's fsctl.h values");
+_Static_assert(CFS_DVA_NONE == 0xFFFFFFFFFFFFFFFFull && CFS_DVA_VDEV_SHIFT == 56 &&
+                   CFS_DVA_BLK_MASK == 0x00FFFFFFFFFFFFFFull && CFS_BLOCK == 4096 && CFS_MHDR_SIZE == 32 &&
+                   CFS_PTRS_PER_BLOCK == 508 && CFS_INODES_PER_BLOCK == 15 && CFS_INODE_SIZE == 256 &&
+                   CFS_EXTENTS_PER_BLOCK == 253 && CFS_MAX_EXTENTS == 4096 && CFS_DIRECT == 10 &&
+                   CFS_DIRENTS_PER_BLOCK == 64 && sizeof(struct cfs_dirent) == 64 && CFS_NAME_MAX_LONG == 255 &&
+                   CFS_MEMBERS_PER_BLOCK == 63 && sizeof(struct cfs_member) == 64 && CFS_DEAD_PER_BLOCK == 506 &&
+                   CFS_ROOT_INO == 1 && CFS_TYPE_DIR == 2 && CFS_MODE_TYPE(2u << 12) == 2 &&
+                   CFS_ROLLBACK_PENDING == 1 && CFS_EXT_COMPRESSED == 0x80000000u && CFS_EXT_PSIZE_SHIFT == 16 &&
+                   CFS_EXT_PSIZE_MASK == 0xFF && CFS_EXT_COUNT_MASK == 0xFFFF,
+               "cosmofs_check's cosmofs_format.h values");
+_Static_assert(CFS_KIND_IMAP1 == 1 && CFS_KIND_IMAP0 == 2 && CFS_KIND_INODES == 3 && CFS_KIND_ALLOCIDX == 4 &&
+                   CFS_KIND_EXTENTS == 6 && CFS_KIND_CSUMIDX == 7 && CFS_KIND_DEADLIST == 10 &&
+                   CFS_KIND_MEMBERS == 11 && CFS_KIND_FREELOG == 13 && CFS_KIND_ORPHAN == 14 &&
+                   CFS_KIND_COPYSTATE == 17 && CFS_KIND_CSUMIDX2 == 18,
+               "cosmofs_check's block kinds");
+_Static_assert(offsetof(struct cfs_mhdr, kind) == 4 && offsetof(struct cfs_extent_block, next) == 0 &&
+                   offsetof(struct cfs_extent_block, ext) == 8 && sizeof(struct cfs_extent) == 16 &&
+                   offsetof(struct cfs_extent, count) == 8 && offsetof(struct cfs_extent, lblk) == 12 &&
+                   offsetof(struct cfs_dead_block, next) == 0 && offsetof(struct cfs_dead_block, count) == 8 &&
+                   offsetof(struct cfs_dead_block, blk) == 16 && offsetof(struct cfs_snap_block2, max_id) == 8 &&
+                   offsetof(struct cfs_member_block, count) == 0 && offsetof(struct cfs_member_block, m) == 8 &&
+                   offsetof(struct cfs_member, alloc_root) == 32 && offsetof(struct cfs_member, state_root) == 56 &&
+                   offsetof(struct cfs_dirent, ino) == 0 && offsetof(struct cfs_dirent, type) == 8,
+               "cosmofs_check.cee reads these structures at these offsets");
+/* cosmofs_check.cee keeps these in stack slots of words: a bit map 2, an inode 32, a snapshot entry 16, a rollback
+ * record 32. */
+_Static_assert(sizeof(struct cfs_bits) <= 2 * 8 && sizeof(struct cfs_inode) <= 32 * 8 &&
+                   sizeof(struct cfs_snapshot) <= 16 * 8 && sizeof(struct cfs_rollback) <= 32 * 8,
+               "cosmofs_check.cee's stack slots");
 
 /* The digest of the C (cosmofs_check.c, 2026-11-06), which the CeeSafe port gives. */
 #define CHECK_DIGEST 0xe84d1de85355a449ull

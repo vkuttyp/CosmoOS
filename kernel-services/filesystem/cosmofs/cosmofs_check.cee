@@ -1,0 +1,2008 @@
+// cosmofs_check.cee - Do the blocks add up? (docs/audit/next-subsystem-fsck.md;
+// docs/kernel-services/filesystem/cosmofs/design.md, "The structural check"), in CeeSafe: roadmap 2.0 SA7.
+// tests/host/test_cfscheck.c holds it to the digest of the C it replaced.
+//
+// The scrub answers whether every block the filesystem can name is still the block that was written. This answers the
+// other question: whether what the structures claim agrees with what the allocator believes, whether an inode's link
+// count matches the entries that name it, and whether anything is reachable from nowhere.
+//
+// Two maps, and the difference between them is the whole design. `seen` is a union over everything -- the live
+// generation and every snapshot -- and is what the allocation bitmap is compared against, because a block a snapshot
+// holds is not free. `live` is the live generation's own claims, and is the only map in which a second claim means
+// corruption: a snapshot sharing a block with the live tree is the normal case and must never be reported.
+//
+// struct cfs, the reports, the bit maps, the snapshot entries, the inodes and the rollback record stay C
+// (cosmofs_internal.h, cosmofs_format.h, kernel/cosmofs.h). What the C kept on the stack is kept in zeroed slots of
+// words, checked against their C sizes (tests/host/test_cfscheck.c): a CeeSafe local cannot hold C state. The pages
+// the maps are made of come through cosmofs_check_floor.c, because kernel/page.h's conversions are inline functions.
+
+@header("kernel/blk.h", "kernel/vfs.h", "kernel/storage.h", "kernel/timer.h", "kernel/kmalloc.h", "kernel/string.h",
+    "kernel/cosmofs.h", "cosmofs_internal.h")
+extern "C" {
+    struct blkdev {
+        name: [u8; 16];
+    }
+    struct fs_type {
+        name: *CChar;
+    }
+    struct mount {
+        fs_priv: *mut void;
+    }
+    struct pool_copy {
+        dev: *mut blkdev;
+    }
+    struct spool_member {
+        copy: [pool_copy; 4];
+        ncopies: u32;
+    }
+    struct spool {
+        m: *mut spool_member;
+        nmembers: u32;
+    }
+    struct cfs_super {
+        version: u32;
+        block_size: u32;
+        total_blocks: u64;
+        generation: u64;
+        imap_root: u64;
+        next_ino: u64;
+        inode_count: u64;
+        free_blocks: u64;
+        snap_root: u64;
+        members: u64;
+        uuid: [u8; 16];
+        key_root: u64;
+        rollback_root: u64;
+        free_root: u64;
+        orphan_root: u64;
+        label: [u8; 16];
+    }
+    struct cfs_memstate {
+        first_usable: u64;
+        alloc_root: u64;
+        state_root: u64;
+    }
+    struct cfs {
+        pool: *mut spool;
+        sb: cfs_super;
+        nblocks: u64;
+        free_blocks: u64;
+        mem: *mut cfs_memstate;
+        nmembers: u32;
+        pending_free: *mut u64;
+        nr_pending: u32;
+        pending_exempt: *mut u64;
+        nr_exempt: u32;
+        lock: mutex;
+        failed: i32;
+        rdonly: bool;
+        replay_freed: u32;
+        replay_orphans: u32;
+        rollback_switched: bool;
+        rollback_error: i32;
+        fell_back: bool;
+        snap_count: u32;
+    }
+    struct cfs_buf {
+        blkno: u64;
+        data: *mut u8;
+    }
+    struct cfs_bits {
+        chunk: *mut *mut u8;
+        nchunks: u32;
+    }
+    struct cfs_extent {
+        start: u64;
+        count: u32;
+        lblk: u32;
+    }
+    struct cfs_inode {
+        mode: u32;
+        nlink: u32;
+        size: u64;
+        ino: u64;
+        direct: [cfs_extent; 10];
+        indirect: u64;
+        csum_root: u64;
+    }
+    struct cfs_snapshot {
+        alloc_root: u64;
+        deadlist: u64;
+        id: u64;
+        uuid: [u8; 16];
+        name: [u8; 32];
+    }
+    struct cfs_rollback {
+        state: u32;
+        target_uuid: [u8; 16];
+        safety_uuid: [u8; 16];
+    }
+    struct cfs_dirent {
+        ino: u64;
+    }
+    struct cosmofs_check_class {
+        count: u64;
+        repaired: u64;
+        name: [u64; 8];
+        named: u32;
+    }
+    struct cosmofs_check_report {
+        alloc_not_seen: cosmofs_check_class;
+        seen_not_alloc: cosmofs_check_class;
+        dup: cosmofs_check_class;
+        nlink_wrong: cosmofs_check_class;
+        orphan: cosmofs_check_class;
+        dangling_entry: cosmofs_check_class;
+        dir_bad: cosmofs_check_class;
+        extent_order: cosmofs_check_class;
+        extent_overlap: cosmofs_check_class;
+        dir_dup_name: cosmofs_check_class;
+        counter_wrong: cosmofs_check_class;
+        chain_cycle: cosmofs_check_class;
+        unreadable: cosmofs_check_class;
+        snap_identity: cosmofs_check_class;
+        rollback_record: cosmofs_check_class;
+        hold: cosmofs_check_class;
+        blocks_seen: u64;
+        inodes_seen: u64;
+        dirs_seen: u64;
+        snapshots_seen: u64;
+        csum_two_level: u64;
+        counted_free: u64;
+        counted_inodes: u64;
+        bytes_allocated: u64;
+        partial: bool;
+        clean: bool;
+        repair_refused: bool;
+        boot_refused: bool;
+        elapsed_ns: u64;
+    }
+    struct cosmofs_dev_report {
+        flags: u32;
+        mount_error: i32;
+        mount_stage: u32;
+        rollback_error: i32;
+        format: u32;
+        replayed_orphans: u32;
+        generation: u64;
+        slot_generation: [u64; 2];
+        replayed_frees: u64;
+        rollback_target: [u8; 32];
+    }
+
+    fn cfs_buf_get(fs: *mut cfs, blkno: u64, kind: u32, out: *mut *mut cfs_buf) -> i32;
+    fn cfs_buf_put(fs: *mut cfs, b: *mut cfs_buf);
+    fn cfs_dva_lin(fs: *cfs, dva: u64) -> u64;
+    fn cfs_lin_dva(fs: *cfs, lin: u64) -> u64;
+    fn cfs_bitmap_test(fs: *cfs, lin: u64) -> bool;
+    fn cfs_bitmap_claim(fs: *mut cfs, lin: u64);
+    fn cfs_free_block_deferred(fs: *mut cfs, blk: u64);
+    fn cfs_snaplist_kind(fs: *cfs) -> u32;
+    fn cfs_snaplist_slots(fs: *cfs) -> u32;
+    fn cfs_snaplist_next(b: *cfs_buf) -> u64;
+    fn cfs_snaplist_get(fs: *cfs, b: *cfs_buf, i: u32, out: *mut cfs_snapshot) -> bool;
+    fn cfs_tree_roots(fs: *mut cfs, s: *cfs_snapshot, imap_root: *mut u64, next_ino: *mut u64);
+    fn cfs_rollback_read(fs: *mut cfs, out: *mut cfs_rollback) -> i32;
+    fn cfs_rollback_drop(fs: *mut cfs) -> i32;
+    fn cfs_snapshot_lookup_uuid(fs: *mut cfs, uuid: *u8, out: *mut cfs_snapshot) -> i32;
+    fn cfs_snapshot_fix_identity(fs: *mut cfs, fixed: *mut u32) -> i32;
+    fn cfs_inode_read(fs: *mut cfs, ino: u64, out: *mut cfs_inode) -> i32;
+    fn cfs_inode_read_raw(fs: *mut cfs, ino: u64, out: *mut cfs_inode) -> i32;
+    fn cfs_inode_write(fs: *mut cfs, ino: u64, inode: *cfs_inode) -> i32;
+    fn cfs_truncate_blocks(fs: *mut cfs, inode: *mut cfs_inode, keep_blocks: u64) -> i32;
+    fn cfs_fail(fs: *mut cfs, rc: i32);
+    fn cfs_orphan_named(fs: *cfs, ino: u64) -> bool;
+    fn cfs_dir_read_block_at(fs: *mut cfs, dir: *cfs_inode, lblk: u64, buf: *mut u8) -> i32;
+    fn cfs_dirent_check(blk: *cfs_dirent, s: u32, version: u32) -> u32;
+    fn cfs_dirent_name(blk: *cfs_dirent, s: u32, out: *mut CChar) -> u32;
+    fn cfs_dirent_name_eq(blk: *cfs_dirent, s: u32, name: *CChar, len: u32) -> i32;
+    fn cfs_super_slots(bd: *mut blkdev, a: *mut cfs_super, ra: *mut i32, b: *mut cfs_super, rb: *mut i32) -> i32;
+    fn cfs_mount_failure(bd: *blkdev, stage: *mut u32, rc: *mut i32) -> bool;
+    fn vfs_find_fs(name: *CChar) -> *mut fs_type;
+    fn vfs_mount_detached(fs: *mut fs_type, bdev: *mut blkdev, flags: u32, out: *mut *mut mount) -> i32;
+    fn vfs_mount_detached_release(mnt: *mut mount, commit: bool) -> i32;
+    fn vfs_bdev_mounted_except(bd: *blkdev, other: *mount) -> bool;
+    fn clock_now_ns() -> u64;
+    fn clock_since_ns(stamp: u64) -> u64;
+    fn kzalloc(size: usize) -> *mut void;
+    fn memcpy(dst: *mut void, src: *void, n: usize) -> *mut void;
+    fn memset(p: *mut void, c: i32, n: usize) -> *mut void;
+    fn memcmp(a: *void, b: *void, n: usize) -> i32;
+    fn strlen(s: *CChar) -> usize;
+    fn strlcpy(dst: *mut CChar, src: *CChar, size: usize) -> usize;
+    /// cosmofs_check_floor.c: a zeroed page by its direct-map address, or null; and that page back.
+    fn cfs_check_floor_page() -> *mut u8;
+    fn cfs_check_floor_unpage(va: *mut u8);
+}
+
+// ---- errno.h, kernel/cosmofs.h, uapi/cosmo/fsctl.h, kernel/vfs.h and cosmofs_format.h values (asserted in
+// tests/host/test_cfscheck.c) ----
+
+const ENOENT: i32 = 2;
+const EIO: i32 = 5;
+const ENOMEM: i32 = 12;
+const EBUSY: i32 = 16;
+const EINVAL: i32 = 22;
+const EROFS: i32 = 30;
+const ENOKEY: i32 = 126;
+const COSMOFS_CHECK_REPAIR: u32 = 1;
+const COSMOFS_CHECK_OFFLINE: u32 = 2;
+const COSMOFS_CHECK_BOOT: u32 = 4;
+const CFS_CHECK_NAMES: u32 = 8;
+const MOUNT_RDONLY: u32 = 1;
+const DEV_F_CHECKED: u32 = 1 << 0;
+const DEV_F_SUPER_NONE: u32 = 1 << 1;
+const DEV_F_SUPER_DISAGREE: u32 = 1 << 2;
+const DEV_F_MOUNT_FAILED: u32 = 1 << 3;
+const DEV_F_FELL_BACK: u32 = 1 << 4;
+const DEV_F_ROLLBACK_PENDING: u32 = 1 << 5;
+const DEV_F_ROLLBACK_HELD: u32 = 1 << 6;
+const DEV_F_ROLLBACK_APPLIED: u32 = 1 << 7;
+const DEV_F_ROLLBACK_REFUSED: u32 = 1 << 8;
+const DEV_F_COMMITTED: u32 = 1 << 9;
+const DEV_F_BOOT_REFUSED: u32 = 1 << 10;
+const DEV_F_LOCKED: u32 = 1 << 11;
+const FSCTL_STAGE_NONE: u32 = 0;
+const CFS_DVA_NONE: u64 = 0xFFFFFFFFFFFFFFFF;
+const CFS_DVA_VDEV_SHIFT: u32 = 56;
+const CFS_DVA_BLK_MASK: u64 = 0x00FFFFFFFFFFFFFF;
+const CFS_BLOCK: usize = 4096;
+const CFS_MHDR_SIZE: usize = 32;
+const CFS_PTRS_PER_BLOCK: usize = 508;
+const CFS_INODES_PER_BLOCK: usize = 15;
+const CFS_INODE_SIZE: usize = 256;
+const CFS_EXTENTS_PER_BLOCK: u32 = 253;
+const CFS_MAX_EXTENTS: u32 = 4096;
+const CFS_DIRECT: usize = 10;
+const CFS_DIRENTS_PER_BLOCK: u32 = 64;
+const CFS_DIRENT_SIZE: usize = 64;
+const CFS_NAME_MAX_LONG: usize = 255;
+const CFS_MEMBERS_PER_BLOCK: u32 = 63;
+const CFS_MEMBER_SIZE: usize = 64;
+const CFS_DEAD_PER_BLOCK: u32 = 506;
+const CFS_ROOT_INO: u64 = 1;
+const CFS_TYPE_DIR: u32 = 2;
+const CFS_ROLLBACK_PENDING: u32 = 1;
+const CFS_EXT_COMPRESSED: u32 = 0x80000000;
+const CFS_EXT_PSIZE_SHIFT: u32 = 16;
+const CFS_EXT_PSIZE_MASK: u32 = 0xFF;
+const CFS_EXT_COUNT_MASK: u32 = 0xFFFF;
+const CFS_KIND_IMAP1: u32 = 1;
+const CFS_KIND_IMAP0: u32 = 2;
+const CFS_KIND_INODES: u32 = 3;
+const CFS_KIND_ALLOCIDX: u32 = 4;
+const CFS_KIND_EXTENTS: u32 = 6;
+const CFS_KIND_CSUMIDX: u32 = 7;
+const CFS_KIND_DEADLIST: u32 = 10;
+const CFS_KIND_MEMBERS: u32 = 11;
+const CFS_KIND_FREELOG: u32 = 13;
+const CFS_KIND_ORPHAN: u32 = 14;
+const CFS_KIND_COPYSTATE: u32 = 17;
+const CFS_KIND_CSUMIDX2: u32 = 18;
+/// Where things are in a block (struct cfs_mhdr's kind; the payloads of struct cfs_extent_block, cfs_dead_block,
+/// cfs_snap_block2 and cfs_member_block; struct cfs_extent, cfs_member and cfs_dirent): checked by the test.
+const MHDR_KIND: usize = 4;
+const CHAIN_NEXT: usize = 0;
+const EXTENT_BLOCK_EXT: usize = 8;
+const EXTENT_SIZE: usize = 16;
+const EXTENT_COUNT: usize = 8;
+const EXTENT_LBLK: usize = 12;
+const DEAD_COUNT: usize = 8;
+const DEAD_BLK: usize = 16;
+const SNAP_MAX_ID: usize = 8;
+const MEMBERS_COUNT: usize = 0;
+const MEMBERS_M: usize = 8;
+const MEMBER_ALLOC_ROOT: usize = 32;
+const MEMBER_STATE_ROOT: usize = 56;
+const DIRENT_TYPE: usize = 8;
+
+/// One page of bits covers this many blocks; the maps are arrays of those pages, because a filesystem large enough
+/// to matter needs more bits than KMALLOC_MAX_SIZE (4 MiB) can hold in one piece.
+const BITS_PER_CHUNK: u64 = 32768; // CFS_BLOCK * 8
+/// The counted link counts, chunked the same way: one 32-bit count per inode number the map can reach.
+const COUNTS_PER_CHUNK: u64 = 1024; // CFS_BLOCK / sizeof(uint32_t)
+/// No metadata chain in a sound filesystem is this long; one that is has a cycle, and the walk says so rather than
+/// following it forever.
+const CFS_CHECK_MAX_CHAIN: u32 = 4096;
+/// A directory tree deeper than this is a cycle the reachability map did not catch, or a filesystem no path could name
+/// anyway (VFS_MAX_COMPONENTS).
+const CFS_CHECK_MAX_DEPTH: u32 = 64;
+/// 4 KiB, so a directory of a hundred names collides a few per cent of the time and pays a re-scan for it. Sized once
+/// for the whole pass.
+const CFS_CHECK_NAMEBITS: u32 = 32768;
+const CFS_CHECK_NAMEBYTES: usize = 4096;
+/// How many bitmap hits one directory may confirm. Each confirmation re-reads every earlier block of that directory,
+/// so an unbounded count is quadratic in the directory's size while `fs->lock` is held. On a sound filesystem a hit is
+/// a hash collision and is rare -- 256 of them in one directory means either a corruption worth reporting or a
+/// directory this strategy is wrong for, and in both cases the honest answer is `partial`.
+const CFS_CHECK_MAX_DUP_CONFIRMS: u32 = 256;
+
+/// The stack slots C state is kept in, in words (checked against the C sizes).
+const BITS_WORDS: usize = 2;
+const INODE_WORDS: usize = 32;
+const SNAP_WORDS: usize = 16;
+const ROLLBACK_WORDS: usize = 32;
+
+// ---- The C state, through its addresses ----
+
+/// Safety: `fs` is a mounted filesystem's state.
+unsafe fn fsOf(fs: *mut cfs) -> borrow mut(static) cfs => Ptr.toBorrowMut(fs);
+
+/// Safety: `r` is a report.
+unsafe fn repOf(r: *mut cosmofs_check_report) -> borrow mut(static) cosmofs_check_report => Ptr.toBorrowMut(r);
+
+/// Safety: `m` is a bit map.
+unsafe fn bitsOf(m: *mut cfs_bits) -> borrow mut(static) cfs_bits => Ptr.toBorrowMut(m);
+
+/// Safety: `i` is an inode.
+unsafe fn inodeOf(i: *cfs_inode) -> borrow(static) cfs_inode => Ptr.toBorrow(i);
+
+/// True when the C types fit the stack slots this file keeps them in (the test asserts it; a build where they do not
+/// refuses to check rather than overrun a slot).
+fn slotsFit() -> bool =>
+    layoutOf<cfs_bits>().size <= BITS_WORDS * 8 && layoutOf<cfs_inode>().size <= INODE_WORDS * 8 &&
+        layoutOf<cfs_snapshot>().size <= SNAP_WORDS * 8 && layoutOf<cfs_rollback>().size <= ROLLBACK_WORDS * 8;
+
+/// A held buffer's block.
+/// Safety: `b` is a buffer cfs_buf_get handed out and not yet put.
+unsafe fn blockOf(b: *mut cfs_buf) -> Slice<static, u8> =>
+    Slice.fromRaw(Ptr.toBorrow(b as *cfs_buf).data as *u8, CFS_BLOCK);
+
+/// Word `at` (a byte offset) of a block's payload.
+/// Safety: as blockOf.
+unsafe fn payloadU64(b: *mut cfs_buf, at: usize) -> u64 => ByteOrder.readU64LE(blockOf(b), CFS_MHDR_SIZE + at);
+
+/// Blocks of `size` bytes, rounded up (wrapping, as the C did).
+fn blocksOf(size: u64) -> u64 => size.wrappingAdd((CFS_BLOCK - 1) as u64) / (CFS_BLOCK as u64);
+
+fn dvaOf(vdev: u32, blk: u64) -> u64 => ((vdev as u64) << CFS_DVA_VDEV_SHIFT) | (blk & CFS_DVA_BLK_MASK);
+
+/// cosmofs_format.h's cfs_ext_count and cfs_ext_psize, from a run's count word.
+fn extCount(count: u32) -> u32 => if ((count & CFS_EXT_COMPRESSED) != 0) count & CFS_EXT_COUNT_MASK else count;
+
+fn extPsize(count: u32) -> u32 =>
+    if ((count & CFS_EXT_COMPRESSED) != 0) ((count >> CFS_EXT_PSIZE_SHIFT) & CFS_EXT_PSIZE_MASK) + 1 else count;
+
+/// The bytes of a C string field, up to its terminator.
+/// Safety: `s` holds a terminated string.
+unsafe fn cText(line: borrow mut TextWriter, s: *CChar) { line.bytes(Slice.fromRaw(s as *u8, strlen(s))); }
+
+/// Safety: `bd` is a block device.
+unsafe fn devName(bd: *blkdev) -> *CChar => borrow Ptr.toBorrow(bd).name as *[u8; 16] as *CChar;
+
+// ---- The bit maps (cosmofs_internal.h; the scrub's set of blocks seen is one too) ----
+
+/// Safety: `m` is a bit map, allocated by bitsAlloc or zeroed.
+@export("cfs_bits_free")
+unsafe fn bitsFree(m: *mut cfs_bits) {
+    let b = bitsOf(m);
+    if (!b.chunk.isNull()) {
+        for (i in 0u32..b.nchunks) {
+            let c = b.chunk.add(i as usize).read();
+            if (!c.isNull()) {
+                cfs_check_floor_unpage(c);
+            }
+        }
+        kfree(b.chunk as *mut void);
+    }
+    b.chunk = 0 as *mut *mut u8;
+    b.nchunks = 0;
+}
+
+/// Safety: `m` is a bit map's storage.
+@export("cfs_bits_alloc")
+unsafe fn bitsAlloc(m: *mut cfs_bits, bits: u64) -> i32 {
+    let b = bitsOf(m);
+    b.nchunks = truncate<u32>(bits.wrappingAdd(BITS_PER_CHUNK - 1) / BITS_PER_CHUNK);
+    if (b.nchunks == 0) {
+        b.nchunks = 1;
+    }
+    b.chunk = kzalloc(b.nchunks as usize * 8) as *mut *mut u8;
+    if (b.chunk.isNull()) {
+        return -ENOMEM;
+    }
+    for (i in 0u32..b.nchunks) {
+        let pg = cfs_check_floor_page();
+        if (pg.isNull()) {
+            bitsFree(m);
+            return -ENOMEM;
+        }
+        b.chunk.add(i as usize).write(pg);
+    }
+    return 0;
+}
+
+/// Safety: `m` is an allocated bit map.
+@export("cfs_bits_test")
+unsafe fn bitsTest(m: *cfs_bits, bit: u64) -> bool {
+    let b = Ptr.toBorrow(m);
+    let c = bit / BITS_PER_CHUNK;
+    if (c >= b.nchunks as u64) {
+        return false;
+    }
+    let i = bit % BITS_PER_CHUNK;
+    let byte = b.chunk.add(c as usize).read().add((i / 8) as usize).read();
+    return (byte & (1u8 << truncate<u8>(i % 8))) != 0;
+}
+
+/// Returns true if the bit was already set.
+/// Safety: as bitsTest.
+@export("cfs_bits_set")
+unsafe fn bitsSet(m: *mut cfs_bits, bit: u64) -> bool {
+    let b = bitsOf(m);
+    let c = bit / BITS_PER_CHUNK;
+    if (c >= b.nchunks as u64) {
+        return false;
+    }
+    let i = bit % BITS_PER_CHUNK;
+    let mask = 1u8 << truncate<u8>(i % 8);
+    let at = b.chunk.add(c as usize).read().add((i / 8) as usize);
+    let had = (at.read() & mask) != 0;
+    at.write(at.read() | mask);
+    return had;
+}
+
+/// The counts, one 32-bit count per inode number, in pages.
+struct Counts {
+    chunk: *mut *mut u8;
+    nchunks: u32;
+}
+
+/// Safety: `c.chunk` is null or `c.nchunks` pointers, each a page or null.
+unsafe fn countsFree(c: borrow mut Counts) {
+    if (!c.chunk.isNull()) {
+        for (i in 0u32..c.nchunks) {
+            let p = c.chunk.add(i as usize).read();
+            if (!p.isNull()) {
+                cfs_check_floor_unpage(p);
+            }
+        }
+        kfree(c.chunk as *mut void);
+    }
+    c.chunk = 0 as *mut *mut u8;
+    c.nchunks = 0;
+}
+
+/// Safety: `c` is empty.
+unsafe fn countsAlloc(c: borrow mut Counts, n: u64) -> i32 {
+    c.nchunks = truncate<u32>(n.wrappingAdd(COUNTS_PER_CHUNK - 1) / COUNTS_PER_CHUNK);
+    if (c.nchunks == 0) {
+        c.nchunks = 1;
+    }
+    c.chunk = kzalloc(c.nchunks as usize * 8) as *mut *mut u8;
+    if (c.chunk.isNull()) {
+        return -ENOMEM;
+    }
+    for (i in 0u32..c.nchunks) {
+        let pg = cfs_check_floor_page();
+        if (pg.isNull()) {
+            countsFree(mut c);
+            return -ENOMEM;
+        }
+        c.chunk.add(i as usize).write(pg);
+    }
+    return 0;
+}
+
+/// Count `i`'s page and its place there, or null past the map.
+/// Safety: `c` is allocated.
+unsafe fn countAt(c: borrow Counts, i: u64) -> *mut u8 {
+    let k = i / COUNTS_PER_CHUNK;
+    if (k >= c.nchunks as u64) {
+        return 0 as *mut u8;
+    }
+    return c.chunk.add(k as usize).read().add(((i % COUNTS_PER_CHUNK) * 4) as usize);
+}
+
+/// Safety: as countAt.
+unsafe fn countsGet(c: borrow Counts, i: u64) -> u32 {
+    let at = countAt(c, i);
+    return if (at.isNull()) 0 else ByteOrder.readU32LE(Slice.fromRaw(at as *u8, 4), 0);
+}
+
+/// Safety: as countAt.
+unsafe fn countsAdd(c: borrow Counts, i: u64, n: u32) {
+    let at = countAt(c, i);
+    if (!at.isNull()) {
+        let v = ByteOrder.readU32LE(Slice.fromRaw(at as *u8, 4), 0);
+        ByteOrder.writeU32LE(SliceMut.fromRaw(at, 4), 0, v.wrappingAdd(n));
+    }
+}
+
+// ---- The walk's state ----
+
+struct Check {
+    fs: *mut cfs;
+    rep: *mut cosmofs_check_report;
+    seen: *mut cfs_bits;  // claimed by anything, live or snapshot
+    live: *mut cfs_bits;  // claimed by the live generation
+    reach: *mut cfs_bits; // inode numbers reachable from the root
+    alive: *mut cfs_bits; // inode numbers the map holds, whatever their nlink
+    links: Counts;        // directory entries naming each inode
+    nlink: Counts;        // what each inode says its link count is
+    // Duplicate names, the one invariant here that is about strings. A set of names would be unbounded in the size of
+    // the largest directory; this is a fixed bitmap, hashed into once per entry and CLEARED per directory, so the pass
+    // keeps the fixed-budget property it already has. A set bit means "maybe seen", and the only thing a hit buys is a
+    // re-scan of the directory -- which is where the answer actually comes from. A false positive costs a re-scan,
+    // never a wrong finding (docs/audit/next-subsystem-fsck-unchecked.md).
+    nameSeen: *mut u8;
+    // The two block buffers the names pass needs, allocated up front with the maps rather than per call. A mid-walk
+    // `kmalloc` that failed used to mean "no duplicate here", which is a SILENT loss of coverage in a report that still
+    // said `clean` -- review found it, and the pass's own rule is that it runs out of memory before it starts or not
+    // at all. Neither buffer is used recursively: `checkDupNames` completes before `walkDir` descends.
+    dupBlk: *mut u8;  // the block checkDupNames is scanning
+    dupCmp: *mut u8;  // the earlier block dirNameRepeats re-reads
+    dupName: *mut u8; // a whole name, CFS_NAME_MAX_LONG bytes (version 15)
+    flags: u32;
+    // Which counters the comparison found wrong, so that repair fixes those and only those: the orphan repair changes
+    // `inode_count` itself, and a blind write-back of the counted total afterwards would put the stale number back.
+    freeWrong: bool;
+    inodesWrong: bool;
+    // The uuids walkSnapshots has seen, for the duplicate test; sized up front from the snapshot count, like every
+    // other map here. Beside them the ids: two snapshots must not share an id either (a vnode tag).
+    uuids: *mut u8;
+    ids: *mut u64;
+    nuuids: u32;
+    uuidCap: u32;
+    badRollback: bool; // the record is one checkRollback named
+}
+
+/// FNV-1a over the name's bytes: short strings, no allocation, and the quality only has to be good enough that
+/// collisions are rare -- a collision is a re-scan, not an answer.
+/// Safety: `name` points to `len` bytes.
+unsafe fn nameHash(name: *u8, len: u32) -> u32 {
+    var h: u32 = 2166136261;
+    for (i in 0u32..len) {
+        h = h ^ (name.add(i as usize).read() as u32);
+        h = h.wrappingMul(16777619);
+    }
+    return h % CFS_CHECK_NAMEBITS;
+}
+
+/// The hash, for the one test that needs two names KNOWN to collide. Without this the test would pick a pair by hand,
+/// and a change to `nameHash` would stop them colliding and quietly turn the false-positive assertion into a test of
+/// nothing.
+/// Safety: `name` points to `len` bytes.
+@cfg("CONFIG_DEBUG")
+@export("cosmofs_test_name_hash")
+unsafe fn testNameHash(name: *CChar, len: u32) -> u32 => nameHash(name as *u8, len);
+
+/// The answer is incomplete: something was not read, or not looked at.
+/// Safety: `r` is a report.
+unsafe fn setPartial(r: *mut cosmofs_check_report) {
+    let p = repOf(r);
+    p.partial = true;
+}
+
+fn nameIt(cl: borrow mut cosmofs_check_class, what: u64) {
+    cl.count += 1;
+    if (cl.named < CFS_CHECK_NAMES) {
+        cl.name[cl.named as usize] = what;
+        cl.named += 1;
+    }
+}
+
+/// Claim `dva` for the live generation (live = true) or for a snapshot. A second live claim is the cross-link this
+/// checker exists to find; a snapshot claiming a live block is the normal case and says nothing.
+/// Safety: `ck`'s maps are allocated, its filesystem's lock held.
+unsafe fn claim(ck: borrow mut Check, dva: u64, live: bool) {
+    let lin = cfs_dva_lin(ck.fs as *cfs, dva);
+    if (lin == CFS_DVA_NONE) {
+        nameIt(mut repOf(ck.rep).dir_bad, dva); // a pointer outside the pool
+        return;
+    }
+    bitsSet(ck.seen, lin);
+    if (live && bitsSet(ck.live, lin)) {
+        nameIt(mut repOf(ck.rep).dup, dva);
+    }
+}
+
+/// The buffer of `dva` read as `kind`, or null: then named unreadable, and the answer partial.
+/// Safety: as claim.
+unsafe fn readMeta(ck: borrow mut Check, dva: u64, kind: u32) -> *mut cfs_buf {
+    var b = 0 as *mut cfs_buf;
+    let rc = cfs_buf_get(ck.fs, dva, kind, borrow mut b as *mut *mut cfs_buf);
+    if (rc != 0) {
+        nameIt(mut repOf(ck.rep).unreadable, dva);
+        setPartial(ck.rep);
+        return 0 as *mut cfs_buf;
+    }
+    return b;
+}
+
+// ---- The structures ----
+
+/// The allocation index and its chunks, for one member.
+/// Safety: as claim.
+unsafe fn walkAlloc(ck: borrow mut Check, root: u64, live: bool) {
+    if (root == 0) {
+        return;
+    }
+    claim(mut ck, root, live);
+    let b = readMeta(mut ck, root, CFS_KIND_ALLOCIDX);
+    if (b.isNull()) {
+        return;
+    }
+    for (i in 0..CFS_PTRS_PER_BLOCK) {
+        let slot = payloadU64(b, i * 8);
+        if (slot != 0) {
+            claim(mut ck, slot, live);
+        }
+    }
+    cfs_buf_put(ck.fs, b);
+}
+
+/// One inode's runs as they stream past, so the format's two ordering rules can be checked without a map: "runs are
+/// sorted by lblk and never overlap". One `prev` is enough because the walk visits an inode's runs in their on-disk
+/// order -- direct[] then the chain.
+struct ExtSeq {
+    have: bool;
+    lblk: u32;
+    count: u32;
+    ino: u64;       // what the classes name
+    reported: bool; // one finding per inode, not one per run after the first
+}
+
+/// The two checks, in this order deliberately.
+///
+/// Tested on an unordered pair, EVERY descending pair also looks like an overlap -- so a pair that fails ordering is
+/// reported as extent_order and the overlap test is skipped for it. There is nothing useful to say about the extent of
+/// an overlap between runs that are not in order, and `cosmofs-check-extent-order` requires the two classes to stay
+/// distinct.
+///
+/// The end is computed in 64 bits. `lblk` and `count` are both 32-bit, so `lblk + count` wraps for a run near the
+/// 2^32-block bound, making a real overlap invisible -- the production mapper already promotes this sum
+/// (cosmofs_format.h), and a checker that did not would carry the bug it is looking for.
+/// Safety: as claim.
+unsafe fn checkExtSeq(ck: borrow mut Check, seq: borrow mut ExtSeq, countWord: u32, lblk: u32) {
+    let count = extCount(countWord);
+    if (!seq.have) {
+        seq.have = true;
+        seq.lblk = lblk;
+        seq.count = count;
+        return;
+    }
+    if (!seq.reported) {
+        if (lblk <= seq.lblk) {
+            nameIt(mut repOf(ck.rep).extent_order, seq.ino);
+            seq.reported = true;
+        } else if ((lblk as u64) < (seq.lblk as u64) + (seq.count as u64)) {
+            nameIt(mut repOf(ck.rep).extent_overlap, seq.ino);
+            seq.reported = true;
+        }
+    }
+    seq.lblk = lblk;
+    seq.count = count;
+}
+
+/// Every block one extent names. A physical size of zero is a hole.
+/// Safety: as claim.
+unsafe fn claimExtent(ck: borrow mut Check, start: u64, countWord: u32, lblk: u32, live: bool, seq: borrow mut ExtSeq) {
+    if (extCount(countWord) == 0) {
+        return; // an unused slot is not a run and breaks no order
+    }
+    checkExtSeq(mut ck, mut seq, countWord, lblk);
+    let psize = extPsize(countWord);
+    for (k in 0u32..psize) {
+        claim(mut ck, start.wrappingAdd(k as u64), live);
+    }
+}
+
+/// The chain of extent blocks hanging off an inode: each block is claimed, the extents in it are claimed, and the chain
+/// is bounded. One pass, not two -- an earlier version claimed the chain and then read it again for its extents, which
+/// read every extent block twice and left the second read reporting nothing when it failed.
+/// Safety: as claim.
+unsafe fn walkExtentChain(ck: borrow mut Check, head: u64, live: bool, seq: borrow mut ExtSeq) {
+    var next = head;
+    var guard: u32 = 0;
+    while (next != 0) {
+        let over = guard > CFS_MAX_EXTENTS / CFS_EXTENTS_PER_BLOCK + 2;
+        guard += 1;
+        if (over) {
+            nameIt(mut repOf(ck.rep).chain_cycle, next);
+            return;
+        }
+        claim(mut ck, next, live);
+        let b = readMeta(mut ck, next, CFS_KIND_EXTENTS);
+        if (b.isNull()) {
+            return;
+        }
+        for (i in 0u32..CFS_EXTENTS_PER_BLOCK) {
+            let at = EXTENT_BLOCK_EXT + (i as usize) * EXTENT_SIZE;
+            let start = payloadU64(b, at);
+            let countWord = ByteOrder.readU32LE(blockOf(b), CFS_MHDR_SIZE + at + EXTENT_COUNT);
+            let lblk = ByteOrder.readU32LE(blockOf(b), CFS_MHDR_SIZE + at + EXTENT_LBLK);
+            claimExtent(mut ck, start, countWord, lblk, live, mut seq);
+        }
+        next = payloadU64(b, CHAIN_NEXT);
+        cfs_buf_put(ck.fs, b);
+    }
+}
+
+/// Safety: as claim.
+unsafe fn walkCsumIndex(ck: borrow mut Check, blk: u64, live: bool) {
+    claim(mut ck, blk, live);
+    let idx = readMeta(mut ck, blk, CFS_KIND_CSUMIDX);
+    if (idx.isNull()) {
+        return;
+    }
+    for (i in 0..CFS_PTRS_PER_BLOCK) {
+        let slot = payloadU64(idx, i * 8);
+        if (slot != 0) {
+            claim(mut ck, slot, live);
+        }
+    }
+    cfs_buf_put(ck.fs, idx);
+}
+
+/// A one-level index, or from version 14 a two-level root whose entries are one-level indexes (CFS-10): every block of
+/// either is claimed, so a tree this walk did not follow would show up as allocated and unreached.
+/// Safety: as claim.
+unsafe fn walkCsumTree(ck: borrow mut Check, root: u64, live: bool) {
+    if (root == 0) {
+        return;
+    }
+    let top = readMeta(mut ck, root, 0);
+    if (top.isNull()) {
+        claim(mut ck, root, live);
+        return;
+    }
+    let kind = ByteOrder.readU32LE(blockOf(top), MHDR_KIND);
+    if (kind != CFS_KIND_CSUMIDX2 || fsOf(ck.fs).sb.version < 14) {
+        cfs_buf_put(ck.fs, top);
+        if (kind != CFS_KIND_CSUMIDX) {
+            claim(mut ck, root, live);
+            nameIt(mut repOf(ck.rep).dir_bad, root); // a checksum root that is neither shape
+            return;
+        }
+        walkCsumIndex(mut ck, root, live);
+        return;
+    }
+    claim(mut ck, root, live);
+    // Copied out: walking an index may evict the root's buffer.
+    let bytes = CFS_PTRS_PER_BLOCK * 8;
+    let slots = kmalloc(bytes, 0) as *mut u8;
+    if (!slots.isNull()) {
+        memcpy(slots as *mut void, Ptr.toBorrow(top as *cfs_buf).data.add(CFS_MHDR_SIZE) as *void, bytes);
+    }
+    cfs_buf_put(ck.fs, top);
+    if (slots.isNull()) {
+        setPartial(ck.rep);
+        return;
+    }
+    let rp = repOf(ck.rep);
+    rp.csum_two_level += 1;
+    let copied = Slice.fromRaw(slots as *u8, bytes);
+    for (i in 0..CFS_PTRS_PER_BLOCK) {
+        let slot = ByteOrder.readU64LE(copied, i * 8);
+        if (slot != 0) {
+            walkCsumIndex(mut ck, slot, live);
+        }
+    }
+    kfree(slots as *mut void);
+}
+
+/// One inode's trees and every data block its extents name.
+/// Safety: as claim; `inode` an inode.
+unsafe fn walkInodeBlocks(ck: borrow mut Check, inode: *cfs_inode, live: bool) {
+    let n = inodeOf(inode);
+    // One sequence per inode: direct[] then the chain, which is the order the runs are in on disk.
+    var seq = ExtSeq { have: false, lblk: 0, count: 0, ino: n.ino, reported: false };
+    for (i in 0..CFS_DIRECT) {
+        let e = borrow n.direct[i];
+        claimExtent(mut ck, e.start, e.count, e.lblk, live, mut seq);
+    }
+    walkExtentChain(mut ck, n.indirect, live, mut seq);
+    walkCsumTree(mut ck, n.csum_root, live);
+}
+
+/// Every inode the map names, through one imap tree. `live` says whether the claims belong to the live generation;
+/// `countThem` says whether the inodes are this filesystem's own (a snapshot's inodes are not counted toward
+/// inode_count or nlink).
+///
+/// `nextIno` is the tree's own high-water mark: a snapshot's, for a snapshot. The live one's is not a bound on a
+/// snapshot's inodes once a rollback has made an older tree live (design.md, "Rollback").
+/// Safety: as claim.
+unsafe fn walkImap(ck: borrow mut Check, imapRoot: u64, nextIno: u64, live: bool, countThem: bool) {
+    if (imapRoot == 0) {
+        return;
+    }
+    claim(mut ck, imapRoot, live);
+    let b1 = readMeta(mut ck, imapRoot, CFS_KIND_IMAP1);
+    if (b1.isNull()) {
+        return;
+    }
+    for (i in 0..CFS_PTRS_PER_BLOCK) {
+        let l0 = payloadU64(b1, i * 8);
+        if (l0 == 0) {
+            continue;
+        }
+        claim(mut ck, l0, live);
+        let b0 = readMeta(mut ck, l0, CFS_KIND_IMAP0);
+        if (b0.isNull()) {
+            continue;
+        }
+        for (j in 0..CFS_PTRS_PER_BLOCK) {
+            let ib = payloadU64(b0, j * 8);
+            if (ib == 0) {
+                continue;
+            }
+            claim(mut ck, ib, live);
+            let bi = readMeta(mut ck, ib, CFS_KIND_INODES);
+            if (bi.isNull()) {
+                continue;
+            }
+            for (k in 0..CFS_INODES_PER_BLOCK) {
+                let inode =
+                    Ptr.toBorrow(bi as *cfs_buf).data.add(CFS_MHDR_SIZE + k * CFS_INODE_SIZE) as *cfs_inode;
+                let ino = inodeOf(inode).ino;
+                if (ino == 0) {
+                    continue;
+                }
+                // A slot's own number must be the number its position in the map means (`cfs_inode_block_index`,
+                // `cfs_imap_*`). One that disagrees, or that sits past the high-water mark, is a malformed inode: its
+                // blocks are not claimed from a structure the pass has just called untrustworthy, its accounting would
+                // be dropped or merged by maps sized on `next_ino`, and the answer is marked incomplete rather than
+                // acted on.
+                let expect = ((i * CFS_PTRS_PER_BLOCK + j) * CFS_INODES_PER_BLOCK + k) as u64;
+                if (ino != expect || expect >= nextIno) {
+                    nameIt(mut repOf(ck.rep).dir_bad, expect);
+                    setPartial(ck.rep);
+                    continue;
+                }
+                // Unlike the scrub, an inode with no links is exactly what this pass is looking for: its blocks are
+                // still claimed and no name reaches it.
+                walkInodeBlocks(mut ck, inode, live);
+                if (countThem) {
+                    let rp = repOf(ck.rep);
+                    rp.inodes_seen += 1;
+                    // Recorded here rather than read back later: cfs_inode_read reports a slot with no links as
+                    // absent, which is exactly the orphan this pass exists to find.
+                    bitsSet(ck.alive, ino);
+                    countsAdd(borrow ck.nlink, ino, inodeOf(inode).nlink);
+                }
+            }
+            cfs_buf_put(ck.fs, bi);
+        }
+        cfs_buf_put(ck.fs, b0);
+    }
+    cfs_buf_put(ck.fs, b1);
+}
+
+/// Version 12's identity (design.md, "Format version 12"): every snapshot has a uuid, no two share one, and no id is
+/// above the list head's high-water mark -- the mark is what keeps an id from being handed out twice, so an id above it
+/// is one the next snapshot could repeat. Each offender is named by its id. `uuids` holds the ones seen so far; a list
+/// longer than it was sized for makes the answer partial.
+/// Safety: as claim; `s` a snapshot entry.
+unsafe fn checkIdentity(ck: borrow mut Check, s: *cfs_snapshot, maxId: u64) {
+    let snap = Ptr.toBorrow(s);
+    let uuid = borrow snap.uuid as *[u8; 16] as *u8;
+    var zero = true;
+    for (i in 0..16) {
+        if (snap.uuid[i] != 0) {
+            zero = false;
+        }
+    }
+    var bad = zero || snap.id > maxId;
+    var k: u32 = 0;
+    while (k < ck.nuuids && !bad) {
+        bad = memcmp(ck.uuids.add(k as usize * 16) as *void, uuid as *void, 16) == 0 ||
+            ck.ids.add(k as usize).read() == snap.id;
+        k += 1;
+    }
+    if (bad) {
+        nameIt(mut repOf(ck.rep).snap_identity, snap.id);
+        return;
+    }
+    if (ck.nuuids < ck.uuidCap) {
+        memcpy(ck.uuids.add(ck.nuuids as usize * 16) as *mut void, uuid as *void, 16);
+        ck.ids.add(ck.nuuids as usize).write(snap.id);
+        ck.nuuids += 1;
+    } else {
+        setPartial(ck.rep);
+    }
+}
+
+/// A snapshot's allocation state. From version 4 a snapshot's alloc_root is the *member table* it was taken with, and
+/// each member's own index hangs off that (cosmofs_snap.c, snap_alloc_root); before it, the single member's index
+/// directly. Reading it as an index is how this walk first reported a snapshot's own member table as unreadable.
+/// Safety: as claim.
+unsafe fn walkSnapAlloc(ck: borrow mut Check, allocRoot: u64) {
+    let version = fsOf(ck.fs).sb.version;
+    if (version < 4) {
+        walkAlloc(mut ck, allocRoot, false);
+        return;
+    }
+    if (allocRoot == 0) {
+        return;
+    }
+    claim(mut ck, allocRoot, false);
+    let mb = readMeta(mut ck, allocRoot, CFS_KIND_MEMBERS);
+    if (mb.isNull()) {
+        return;
+    }
+    // A count past the block is the table being wrong, not the snapshot holding nothing: say so, and walk what the
+    // block can hold, or every member's blocks would be reported as leaked instead.
+    var n = truncate<u32>(payloadU64(mb, MEMBERS_COUNT));
+    if (n > CFS_MEMBERS_PER_BLOCK) {
+        nameIt(mut repOf(ck.rep).dir_bad, allocRoot);
+        n = CFS_MEMBERS_PER_BLOCK;
+    }
+    for (v in 0u32..n) {
+        let m = MEMBERS_M + (v as usize) * CFS_MEMBER_SIZE;
+        walkAlloc(mut ck, payloadU64(mb, m + MEMBER_ALLOC_ROOT), false);
+        // The member's copy state as the snapshot was taken (version 13): held until it is deleted.
+        let stateRoot = payloadU64(mb, m + MEMBER_STATE_ROOT);
+        if (version >= 13 && stateRoot != 0) {
+            claim(mut ck, stateRoot, false);
+        }
+    }
+    cfs_buf_put(ck.fs, mb);
+}
+
+/// Safety: as claim.
+unsafe fn walkDeadlist(ck: borrow mut Check, head: u64) {
+    var dl = head;
+    var dguard: u32 = 0;
+    while (dl != 0) {
+        let over = dguard > CFS_CHECK_MAX_CHAIN;
+        dguard += 1;
+        if (over) {
+            nameIt(mut repOf(ck.rep).chain_cycle, dl);
+            break;
+        }
+        claim(mut ck, dl, false);
+        let db = readMeta(mut ck, dl, CFS_KIND_DEADLIST);
+        if (db.isNull()) {
+            break;
+        }
+        let count = payloadU64(db, DEAD_COUNT);
+        var k: u32 = 0;
+        while ((k as u64) < count && k < CFS_DEAD_PER_BLOCK) {
+            claim(mut ck, payloadU64(db, DEAD_BLK + (k as usize) * 8), false);
+            k += 1;
+        }
+        dl = payloadU64(db, CHAIN_NEXT);
+        cfs_buf_put(ck.fs, db);
+    }
+}
+
+/// Safety: as claim.
+unsafe fn walkSnapshots(ck: borrow mut Check) {
+    let fs = ck.fs;
+    let version = fsOf(fs).sb.version;
+    let snapRoot = fsOf(fs).sb.snap_root;
+    var list = snapRoot;
+    var maxId: u64 = 0;
+    var guard: u32 = 0;
+    let slots = cfs_snaplist_slots(fs as *cfs);
+    while (list != 0) {
+        let over = guard > CFS_CHECK_MAX_CHAIN;
+        guard += 1;
+        if (over) {
+            nameIt(mut repOf(ck.rep).chain_cycle, list);
+            return;
+        }
+        claim(mut ck, list, true); // the list itself belongs to the live generation
+        let b = readMeta(mut ck, list, cfs_snaplist_kind(fs as *cfs));
+        if (b.isNull()) {
+            return;
+        }
+        let next = cfs_snaplist_next(b as *cfs_buf);
+        if (version >= 12 && list == snapRoot) {
+            maxId = payloadU64(b, SNAP_MAX_ID);
+        }
+        for (i in 0u32..slots) {
+            var slot = [0u64; 16];
+            let s = borrow mut slot as *mut [u64; 16] as *mut cfs_snapshot;
+            if (!cfs_snaplist_get(fs as *cfs, b as *cfs_buf, i, s) || Ptr.toBorrow(s as *cfs_snapshot).id == 0) {
+                continue;
+            }
+            let rp = repOf(ck.rep);
+            rp.snapshots_seen += 1;
+            if (version >= 12) {
+                checkIdentity(mut ck, s as *cfs_snapshot, maxId);
+            }
+            // A snapshot's trees are seen, never live: it holds blocks the live tree also holds, on purpose.
+            var root: u64 = 0;
+            var nextIno: u64 = 0;
+            cfs_tree_roots(fs, s as *cfs_snapshot, borrow mut root as *mut u64, borrow mut nextIno as *mut u64);
+            // a clone's roots move with the open transaction
+            walkImap(mut ck, root, nextIno, false, false);
+            walkSnapAlloc(mut ck, Ptr.toBorrow(s as *cfs_snapshot).alloc_root);
+            walkDeadlist(mut ck, Ptr.toBorrow(s as *cfs_snapshot).deadlist);
+        }
+        cfs_buf_put(fs, b);
+        list = next;
+    }
+}
+
+/// Version 12's rollback record (design.md, "Rollback"; CF19): the block is live metadata, and what it says must hold
+/// -- a record that checks out, naming snapshots that are on the list: both of a pending record's, a hold's safety
+/// snapshot. One finding per record, named by its block.
+/// Safety: as claim.
+unsafe fn checkRollback(ck: borrow mut Check) {
+    let fs = ck.fs;
+    let root = fsOf(fs).sb.rollback_root;
+    if (fsOf(fs).sb.version < 12 || root == 0) {
+        return;
+    }
+    claim(mut ck, root, true);
+    var slot = [0u64; 32];
+    let r = borrow mut slot as *mut [u64; 32] as *mut cfs_rollback;
+    let rc = cfs_rollback_read(fs, r);
+    if (rc != 0) {
+        nameIt(mut repOf(ck.rep).rollback_record, root);
+        ck.badRollback = true;
+        return;
+    }
+    let rec = Ptr.toBorrow(r as *cfs_rollback);
+    let target = borrow rec.target_uuid as *[u8; 16] as *u8;
+    let safety = borrow rec.safety_uuid as *[u8; 16] as *u8;
+    let none = 0 as *mut cfs_snapshot;
+    // Only a snapshot known to be absent condemns the record: a list that does not read (a cycle, a bad block) is its
+    // own finding, and dropping the record over it would lose a rollback that is sound.
+    if (rec.state == CFS_ROLLBACK_PENDING) {
+        if (cfs_snapshot_lookup_uuid(fs, target, none) == -ENOENT ||
+            cfs_snapshot_lookup_uuid(fs, safety, none) == -ENOENT) {
+            nameIt(mut repOf(ck.rep).rollback_record, root);
+            ck.badRollback = true;
+        }
+    } else if (cfs_snapshot_lookup_uuid(fs, safety, none) == -ENOENT) {
+        nameIt(mut repOf(ck.rep).hold, root);
+        ck.badRollback = true;
+    }
+}
+
+/// The chain of blocks recording what this root freed. The blocks of the chain are live metadata; the blocks it *names*
+/// are free, and the bitmap already says so, so they are not claimed here -- claiming them would make the pass call a
+/// recorded free a block in use.
+///
+/// The orphan record's chain is the same: its blocks are live metadata, and the *inodes* it names are alive too -- they
+/// are inodes the walk reaches through the inode map, whose blocks are still allocated because that is exactly what the
+/// record promises to release. So this claims the chain and nothing else (docs/audit/next-subsystem-orphan.md).
+/// Safety: as claim.
+unsafe fn walkRecord(ck: borrow mut Check, head: u64, kind: u32) {
+    var at = head;
+    var guard: u32 = 0;
+    while (at != 0) {
+        let over = guard > CFS_CHECK_MAX_CHAIN;
+        guard += 1;
+        if (over) {
+            nameIt(mut repOf(ck.rep).chain_cycle, at);
+            return;
+        }
+        claim(mut ck, at, true);
+        let b = readMeta(mut ck, at, kind);
+        if (b.isNull()) {
+            return;
+        }
+        at = payloadU64(b, CHAIN_NEXT);
+        cfs_buf_put(ck.fs, b);
+    }
+}
+
+// ---- The directory tree ----
+
+/// Safety: as claim; `out` an inode's storage.
+unsafe fn inodeExists(ck: borrow Check, ino: u64, out: *mut cfs_inode) -> bool =>
+    ino != 0 && cfs_inode_read(ck.fs, ino, out) == 0;
+
+/// Entry `s` of a directory block.
+fn direntIno(block: Slice<u8>, s: u32) -> u64 => ByteOrder.readU64LE(block, s as usize * CFS_DIRENT_SIZE);
+
+fn direntType(block: Slice<u8>, s: u32) -> u32 => block[s as usize * CFS_DIRENT_SIZE + DIRENT_TYPE] as u32;
+
+/// Does the entry at (`lblk`, `slot`) repeat a name that appears EARLIER in this directory? Only earlier, so a name
+/// that appears twice is reported once per repeat rather than once per copy.
+///
+/// `cur` is the caller's already-read copy of block `lblk`, so the common case of a repeat inside one block costs no
+/// I/O. Earlier blocks are re-read into a scratch buffer; a block that cannot be re-read makes the answer unknown, and
+/// unknown is reported as NOT a duplicate -- an unreadable block is already `unreadable` and `partial`, and inventing a
+/// second finding from it would be guessing.
+/// Safety: as claim; `dir` an inode, `cur` a directory block.
+unsafe fn dirNameRepeats(ck: borrow mut Check, dir: *cfs_inode, cur: *mut u8, lblk: u64, slot: u32) -> bool {
+    let d = cur as *cfs_dirent;
+    let version = fsOf(ck.fs).sb.version;
+    let want = ck.dupName as *CChar; // preallocated, CFS_NAME_MAX_LONG bytes
+    let wantlen = cfs_dirent_name(d, slot, ck.dupName as *mut CChar);
+
+    // Earlier entries of the block already in hand: whole names, each however many slots it takes (design.md, "Format
+    // version 15").
+    var s: u32 = 0;
+    while (s < slot) {
+        let n = cfs_dirent_check(d, s, version);
+        if (n == 0) {
+            s += 1;
+            continue;
+        }
+        if (cfs_dirent_name_eq(d, s, want, wantlen) != 0) {
+            return true;
+        }
+        s += n;
+    }
+    if (lblk == 0) {
+        return false;
+    }
+
+    let scratch = ck.dupCmp; // preallocated: cannot fail here
+    let e = scratch as *cfs_dirent;
+    var found = false;
+    var b: u64 = 0;
+    while (b < lblk && !found) {
+        if (cfs_dir_read_block_at(ck.fs, dir, b, scratch) == 0) {
+            var t: u32 = 0;
+            while (t < CFS_DIRENTS_PER_BLOCK) {
+                let n = cfs_dirent_check(e, t, version);
+                if (n == 0) {
+                    t += 1;
+                    continue;
+                }
+                if (cfs_dirent_name_eq(e, t, want, wantlen) != 0) {
+                    found = true;
+                    break;
+                }
+                t += n;
+            }
+        }
+        b += 1;
+    }
+    return found;
+}
+
+/// One directory's names, hashed into the shared bitmap. A set bit says "maybe"; `dirNameRepeats` says yes or no. The
+/// re-scan is not optional -- without it a hash collision between two different names would be reported as a duplicate
+/// on a sound filesystem, which is the false-positive path `cosmofs-check-dup-name` asserts is quiet.
+/// Safety: as claim; `dir` an inode.
+unsafe fn checkDupNames(ck: borrow mut Check, ino: u64, dir: *cfs_inode) {
+    if (ck.nameSeen.isNull()) {
+        return;
+    }
+    memset(ck.nameSeen as *mut void, 0, CFS_CHECK_NAMEBYTES);
+    let block = ck.dupBlk; // preallocated: cannot fail here
+    let d = block as *cfs_dirent;
+    let version = fsOf(ck.fs).sb.version;
+    // A bound on the confirmations, because each one re-reads every earlier block of this directory: a directory large
+    // enough to collide often would otherwise do quadratic reads while holding `fs->lock`, stalling the filesystem
+    // during a maintenance pass (review found this; the report had named the cost and not bounded it). Past the bound
+    // the answer is INCOMPLETE rather than wrong: `partial` says the pass did not get there, exactly as it does for a
+    // block it could not read.
+    var confirms: u32 = 0;
+    let blocks = blocksOf(inodeOf(dir).size);
+    for (lblk in 0u64..blocks) {
+        if (cfs_dir_read_block_at(ck.fs, dir, lblk, block) != 0) {
+            continue; // already `unreadable` and `partial` in the main pass
+        }
+        var s: u32 = 0;
+        while (s < CFS_DIRENTS_PER_BLOCK) {
+            let n = cfs_dirent_check(d, s, version);
+            if (n == 0) {
+                s += 1;
+                continue; // free, a continuation, or malformed: the main pass's finding
+            }
+            let nlen = cfs_dirent_name(d, s, ck.dupName as *mut CChar);
+            let h = nameHash(ck.dupName as *u8, nlen);
+            let head = s;
+            s += n; // the continuations are this name; the confirm below takes its head
+            let at = ck.nameSeen.add((h >> 3) as usize);
+            let bit = 1u8 << truncate<u8>(h & 7);
+            if ((at.read() & bit) != 0) {
+                if (confirms >= CFS_CHECK_MAX_DUP_CONFIRMS) {
+                    setPartial(ck.rep);
+                    continue; // incomplete, never wrong
+                }
+                confirms += 1;
+                if (dirNameRepeats(mut ck, dir, block, lblk, head)) {
+                    nameIt(mut repOf(ck.rep).dir_dup_name, ino);
+                }
+            } else {
+                at.write(at.read() | bit);
+            }
+        }
+    }
+    // `block` is ck.dupBlk and belongs to the pass, not to this call: freeing it here handed the allocator a buffer the
+    // next directory was about to use, which panicked in the slab.
+}
+
+/// Every entry of one directory, counting references and validating shape. Recursion is bounded by the tree's own
+/// depth; a cycle is caught by the reachability map, which refuses to walk an inode twice.
+/// Safety: as claim; `dir` an inode.
+unsafe fn walkDir(ck: borrow mut Check, ino: u64, dir: *cfs_inode, depth: u32) {
+    if (depth > CFS_CHECK_MAX_DEPTH) {
+        nameIt(mut repOf(ck.rep).chain_cycle, ino);
+        return;
+    }
+    let block = kmalloc(CFS_BLOCK, 0) as *mut u8;
+    if (block.isNull()) {
+        setPartial(ck.rep);
+        return;
+    }
+    let rp = repOf(ck.rep);
+    rp.dirs_seen += 1;
+    // Names first, and in a pass of its own that FINISHES before the loop below can recurse into a subdirectory.
+    //
+    // The design said "a bitmap sized once, reused per directory", and that is true only if a directory is finished
+    // before the next is started -- which `walkDir` does not do: it descends in the middle of its own entry loop, and
+    // the child's memset wipes the parent's sheet. The first build did exactly that and reported nothing, because the
+    // duplicate sat after the subdirectory that had just cleared the bit its twin had set. One bitmap plus recursion
+    // needs a stack of bitmaps or a pass that does not recurse; this is the second, and it keeps the fixed budget
+    // (docs/audit/next-subsystem-fsck-unchecked.md).
+    checkDupNames(mut ck, ino, dir);
+    let version = fsOf(ck.fs).sb.version;
+    let d = block as *cfs_dirent;
+    let entries = Slice.fromRaw(block as *u8, CFS_BLOCK);
+    let blocks = blocksOf(inodeOf(dir).size);
+    for (lblk in 0u64..blocks) {
+        if (cfs_dir_read_block_at(ck.fs, dir, lblk, block) != 0) {
+            nameIt(mut repOf(ck.rep).unreadable, ino);
+            setPartial(ck.rep);
+            continue;
+        }
+        var s: u32 = 0;
+        while (s < CFS_DIRENTS_PER_BLOCK) {
+            if (direntIno(entries, s) == 0) {
+                s += 1;
+                continue;
+            }
+            // The entry's shape before a byte of its name (CF13; design.md, "Format version 15"): a continuation
+            // reached here has no head before it, since a head's run is stepped over below.
+            let n = cfs_dirent_check(d, s, version);
+            if (n == 0) {
+                nameIt(mut repOf(ck.rep).dir_bad, ino);
+                s += 1;
+                continue;
+            }
+            let eIno = direntIno(entries, s); // the head; the loop resumes past its continuations
+            let eType = direntType(entries, s);
+            s += n;
+            var slot = [0u64; 32];
+            let child = borrow mut slot as *mut [u64; 32] as *mut cfs_inode;
+            if (!inodeExists(ck, eIno, child)) {
+                nameIt(mut repOf(ck.rep).dangling_entry, eIno);
+                continue;
+            }
+            if (inodeOf(child as *cfs_inode).mode >> 12 != eType) {
+                nameIt(mut repOf(ck.rep).dir_bad, eIno);
+                continue;
+            }
+            // A directory's link count is three things, and cosmofs stores none of them as entries: the entry in its
+            // parent (here), its own "." (below), and one per subdirectory's ".." (credited to the parent, also
+            // below). A file's is just the entries that name it.
+            countsAdd(borrow ck.links, eIno, 1);
+            if (eType == CFS_TYPE_DIR) {
+                countsAdd(borrow ck.links, eIno, 1); // its own "."
+                countsAdd(borrow ck.links, ino, 1);  // its ".." names this directory
+                if (!bitsSet(ck.reach, eIno)) {
+                    walkDir(mut ck, eIno, child as *cfs_inode, depth + 1);
+                } else {
+                    nameIt(mut repOf(ck.rep).dir_bad, eIno); // a directory with two parents
+                }
+            } else {
+                bitsSet(ck.reach, eIno);
+            }
+        }
+    }
+    kfree(block as *mut void);
+}
+
+// ---- The comparison ----
+
+/// The entries naming `ino`, with the root's two: it is its own parent, and nothing names it.
+/// Safety: as countAt.
+unsafe fn namedBy(ck: borrow Check, ino: u64) -> u32 {
+    let named = countsGet(borrow ck.links, ino);
+    return if (ino == CFS_ROOT_INO) named.wrappingAdd(2) else named;
+}
+
+/// Safety: as claim.
+unsafe fn compare(ck: borrow mut Check) {
+    let fs = ck.fs;
+    let r = repOf(ck.rep);
+    var countedFree: u64 = 0;
+
+    for (lin in 0u64..fsOf(fs).nblocks) {
+        let dva = cfs_lin_dva(fs as *cfs, lin);
+        if (dva == CFS_DVA_NONE) {
+            continue; // padding between members
+        }
+        let allocated = cfs_bitmap_test(fs as *cfs, lin);
+        let seen = bitsTest(ck.seen as *cfs_bits, lin);
+        if (allocated && !seen) {
+            nameIt(mut r.alloc_not_seen, dva);
+        } else if (!allocated && seen) {
+            nameIt(mut r.seen_not_alloc, dva);
+        }
+        if (!allocated) {
+            countedFree += 1;
+        }
+        if (seen) {
+            r.blocks_seen += 1;
+        }
+    }
+
+    // Link counts and orphans, over the inodes the map itself holds.
+    var countedInodes: u64 = 0;
+    var ino = CFS_ROOT_INO;
+    while (ino <= fsOf(fs).sb.next_ino) {
+        if (!bitsTest(ck.alive as *cfs_bits, ino)) {
+            ino += 1;
+            continue; // no such inode: nothing to say
+        }
+        // Every slot the map holds, orphans included. The superblock's count follows the slot and not the name: it is
+        // decremented where the slot is zeroed, when the last handle on an unlinked inode goes (`cosmofs.c`, the evict
+        // path), not at the unlink. Counting links here instead would call every crash-stranded orphan a wrong total
+        // as well, and report one fault as two.
+        countedInodes += 1;
+        let named = namedBy(ck, ino);
+        if (named == 0) {
+            // An inode the orphan record names is a promise this root has made, not a fault: the next mount does what
+            // cfs_evict would have done. Reporting it would make every correctly recorded pending deletion a finding
+            // (docs/audit/next-subsystem-orphan.md). An inode with no name that the record does *not* name is still a
+            // real finding, and after that unit a rarer one -- it means the record was lost or never written.
+            if (!cfs_orphan_named(fs as *cfs, ino)) {
+                nameIt(mut r.orphan, ino);
+            }
+        } else if (countsGet(borrow ck.nlink, ino) != named) {
+            nameIt(mut r.nlink_wrong, ino);
+        }
+        ino += 1;
+    }
+
+    // One finding per counter that disagrees, named by what the walk counted, so a report of two is two wrong totals
+    // and not one twice.
+    ck.freeWrong = countedFree != fsOf(fs).free_blocks;
+    ck.inodesWrong = countedInodes != fsOf(fs).sb.inode_count;
+    if (ck.freeWrong) {
+        nameIt(mut r.counter_wrong, countedFree);
+    }
+    if (ck.inodesWrong) {
+        nameIt(mut r.counter_wrong, countedInodes);
+    }
+    r.counted_free = countedFree;
+    r.counted_inodes = countedInodes;
+}
+
+// ---- Repair ----
+
+/// Whether the walk's reachability is worth acting on. Every repair this pass performs is an argument from absence: a
+/// block nothing claimed, an inode no name reached, a link count no entry supported. If the walk could not read a
+/// block, or met an entry it had to skip, then "nothing reaches this" may only mean "this pass did not get there" --
+/// and freeing those blocks destroys a live file.
+///
+/// `cosmofs-check-partial` is the proof: one unreadable directory block turns every file named inside it into an orphan
+/// whose blocks look leaked. A `dir_bad` entry does the same without being unreadable, because the walk skips the entry
+/// and the inode it named loses its only name; so does a `dangling_entry`, which is an entry whose inode number was
+/// overwritten, leaving the inode it used to name unreferenced.
+///
+/// So repair runs only on an answer the walk is sure of, and says when it did not.
+fn reachabilityIsSound(r: borrow cosmofs_check_report) -> bool =>
+    !r.partial && r.unreadable.count == 0 && r.dir_bad.count == 0 && r.dangling_entry.count == 0 &&
+        r.chain_cycle.count == 0;
+
+/// What a boot repairs without asking (design.md, "fsck at boot"): the classes whose repair is bookkeeping -- a leak, a
+/// total, a stale rollback record or hold, a snapshot's identity -- and the two a crash leaves, orphans and link
+/// counts. Anything else found, and a boot repairs nothing: the pool is refused, by name, to an operator.
+fn outsideBoot(r: borrow cosmofs_check_report) -> bool =>
+    r.seen_not_alloc.count != 0 || r.dup.count != 0 || r.dangling_entry.count != 0 || r.dir_bad.count != 0 ||
+        r.extent_order.count != 0 || r.extent_overlap.count != 0 || r.dir_dup_name.count != 0 ||
+        r.chain_cycle.count != 0 || r.unreadable.count != 0 || r.partial;
+
+/// Safety: as claim.
+unsafe fn repair(ck: borrow mut Check) -> i32 {
+    let fs = ck.fs;
+    let rep = ck.rep;
+    let r = repOf(rep);
+    var rc: i32 = 0;
+
+    if (!reachabilityIsSound(r)) {
+        r.repair_refused = true;
+        return 0; // not an error: a refusal, and the report says why
+    }
+    if ((ck.flags & COSMOFS_CHECK_BOOT) != 0 && outsideBoot(r)) {
+        r.repair_refused = true;
+        r.boot_refused = true;
+        return 0;
+    }
+
+    // A block something reaches and the bitmap calls free: mark it allocated -- but only offline (cosmofs_check_dev),
+    // where nothing else can be allocating. On a mounted filesystem the allocator may already have handed the block to
+    // a writer, and setting its bit then would hide a cross-link rather than repair a leak. The walk counted these
+    // blocks free; the count follows the bits, so the totals' repair below writes what is now true.
+    if ((ck.flags & COSMOFS_CHECK_OFFLINE) != 0 && r.seen_not_alloc.count != 0) {
+        for (lin in 0u64..fsOf(fs).nblocks) {
+            if (cfs_lin_dva(fs as *cfs, lin) == CFS_DVA_NONE || !bitsTest(ck.seen as *cfs_bits, lin) ||
+                cfs_bitmap_test(fs as *cfs, lin)) {
+                continue;
+            }
+            cfs_bitmap_claim(fs, lin);
+            r.seen_not_alloc.repaired += 1;
+            if (r.counted_free > 0) {
+                r.counted_free -= 1;
+            }
+        }
+    }
+
+    // A block nothing reaches: give it back.
+    if (r.alloc_not_seen.count != 0) {
+        var lin: u64 = 0;
+        while (lin < fsOf(fs).nblocks && rc == 0) {
+            let dva = cfs_lin_dva(fs as *cfs, lin);
+            if (dva != CFS_DVA_NONE && !bitsTest(ck.seen as *cfs_bits, lin) && cfs_bitmap_test(fs as *cfs, lin)) {
+                cfs_free_block_deferred(fs, dva);
+                r.alloc_not_seen.repaired += 1;
+            }
+            lin += 1;
+        }
+    }
+
+    // An inode no name reaches: free what it holds and clear the slot. Over the maps and not the report's names, which
+    // stop at CFS_CHECK_NAMES: a filesystem with nine orphans must not be left with one, and the eight names are a
+    // diagnosis for a reader, not a work list.
+    var ino = CFS_ROOT_INO;
+    while (ino <= fsOf(fs).sb.next_ino && rc == 0) {
+        if (bitsTest(ck.alive as *cfs_bits, ino) && namedBy(ck, ino) == 0) {
+            var slot = [0u64; 32];
+            let inode = borrow mut slot as *mut [u64; 32] as *mut cfs_inode;
+            // raw: an orphan has no links, which the ordinary read calls absent
+            if (cfs_inode_read_raw(fs, ino, inode) == 0) {
+                // From here a failure is not skippable and `rc` carries it out of the loop, which is why this pass
+                // stops on one: cfs_truncate_blocks frees every extent into pending_free before storing the shortened
+                // list, so a failure leaves the blocks queued free while the inode still names them, and a commit would
+                // publish that (docs/audit/next-subsystem-orphan.md, where the same shape was found in the replay).
+                rc = cfs_truncate_blocks(fs, inode, 0);
+                if (rc == 0) {
+                    // Every field, the number included: a slot whose `ino` still matches reads as an inode, and the
+                    // next pass would report the same orphan again.
+                    var zeroSlot = [0u64; 32];
+                    let zero = borrow mut zeroSlot as *mut [u64; 32] as *mut cfs_inode;
+                    rc = cfs_inode_write(fs, ino, zero as *cfs_inode);
+                }
+                if (rc == 0) {
+                    let f = fsOf(fs);
+                    if (f.sb.inode_count > 0) {
+                        f.sb.inode_count -= 1;
+                    }
+                    r.orphan.repaired += 1;
+                } else {
+                    cfs_fail(fs, rc); // the frees are queued and the slot still names them (CF17)
+                }
+            }
+        }
+        ino += 1;
+    }
+
+    // A link count the directory entries disagree with: the entries win. Over the maps, for the same reason as the
+    // orphans above.
+    ino = CFS_ROOT_INO;
+    while (ino <= fsOf(fs).sb.next_ino && rc == 0) {
+        if (bitsTest(ck.alive as *cfs_bits, ino)) {
+            let named = namedBy(ck, ino);
+            // no name at all is an orphan, repaired above
+            if (named != 0 && countsGet(borrow ck.nlink, ino) != named) {
+                var slot = [0u64; 32];
+                let inode = borrow mut slot as *mut [u64; 32] as *mut cfs_inode;
+                if (cfs_inode_read(fs, ino, inode) == 0) {
+                    let w = Ptr.toBorrowMut(inode);
+                    w.nlink = named;
+                    rc = cfs_inode_write(fs, ino, inode as *cfs_inode);
+                    if (rc == 0) {
+                        r.nlink_wrong.repaired += 1;
+                    }
+                }
+            }
+        }
+        ino += 1;
+    }
+
+    // A rollback record that does not check out, or names a snapshot that is gone, is dropped: the mount would refuse
+    // it anyway, and a record nothing can apply only keeps a snapshot from being deleted.
+    if (rc == 0 && ck.badRollback) {
+        rc = cfs_rollback_drop(fs);
+        if (rc == 0) {
+            if (r.rollback_record.count != 0) {
+                r.rollback_record.repaired += 1;
+            } else {
+                r.hold.repaired += 1;
+            }
+        }
+    }
+
+    // The totals, and only the ones the comparison disagreed with. The repairs above move both counters themselves --
+    // freeing a leaked block raises the free count, clearing an orphan lowers the inode count -- so "write back what
+    // the walk counted" would undo the repair that just ran. One repair per counter that was wrong when it was read,
+    // so `repaired` can be compared with `count`.
+    if (rc == 0 && ck.freeWrong) {
+        let counted = r.counted_free;
+        let f = fsOf(fs);
+        f.free_blocks = counted;
+        f.sb.free_blocks = counted;
+        r.counter_wrong.repaired += 1;
+    }
+    if (rc == 0 && ck.inodesWrong) {
+        let f = fsOf(fs);
+        f.sb.inode_count = r.counted_inodes;
+        r.counter_wrong.repaired += 1;
+    }
+    // A snapshot with no uuid, a shared uuid or a shared id gets a fresh one, and the high-water mark rises to the
+    // highest id: each has one right answer and none is an argument from absence. After the totals, because it copies
+    // the list, which allocates -- the free count written back above is the walk's, from before that.
+    if (rc == 0 && r.snap_identity.count != 0) {
+        var fixed: u32 = 0;
+        rc = cfs_snapshot_fix_identity(fs, borrow mut fixed as *mut u32);
+        r.snap_identity.repaired += fixed as u64;
+    }
+    return rc;
+}
+
+// ---- The pass ----
+
+fn reportClean(r: borrow cosmofs_check_report) -> bool =>
+    r.alloc_not_seen.count == 0 && r.seen_not_alloc.count == 0 && r.dup.count == 0 && r.nlink_wrong.count == 0 &&
+        r.orphan.count == 0 && r.dangling_entry.count == 0 && r.dir_bad.count == 0 && r.counter_wrong.count == 0 &&
+        r.chain_cycle.count == 0 && r.extent_order.count == 0 && r.extent_overlap.count == 0 &&
+        r.dir_dup_name.count == 0 && r.snap_identity.count == 0 && r.rollback_record.count == 0 &&
+        r.hold.count == 0 && r.unreadable.count == 0 &&
+        // A pass that did not finish cannot call a filesystem sound. Every other `partial` also fires a class, so this
+        // changed nothing until the duplicate-name confirmation bound arrived: that one stops looking without finding
+        // anything, and a report of `clean` plus `partial` would have told an operator "no findings" about a directory
+        // the pass had stopped reading. A checker's output is the claim `this filesystem is sound`, and it cannot make
+        // it.
+        !r.partial;
+
+/// The maps and the buffers, whatever was allocated of them.
+/// Safety: `ck`'s maps are zeroed or allocated, its buffers null or kmalloc's.
+unsafe fn release(ck: borrow mut Check) {
+    bitsFree(ck.seen);
+    bitsFree(ck.live);
+    bitsFree(ck.reach);
+    bitsFree(ck.alive);
+    countsFree(mut ck.links);
+    countsFree(mut ck.nlink);
+    kfree(ck.nameSeen as *mut void);
+    kfree(ck.dupBlk as *mut void);
+    kfree(ck.dupCmp as *mut void);
+    kfree(ck.dupName as *mut void);
+    kfree(ck.uuids as *mut void);
+    kfree(ck.ids as *mut void);
+}
+
+/// What the pass found, as the console says it.
+fn summary(r: borrow cosmofs_check_report) {
+    var buffer = [0u8; 512];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("cosmofs: check: ");
+    line.decimal(r.alloc_not_seen.count);
+    line.text(" leaked, ");
+    line.decimal(r.seen_not_alloc.count);
+    line.text(" free-in-use, ");
+    line.decimal(r.dup.count);
+    line.text(" cross-linked, ");
+    line.decimal(r.nlink_wrong.count);
+    line.text(" bad nlink, ");
+    line.decimal(r.orphan.count);
+    line.text(" orphan, ");
+    line.decimal(r.dangling_entry.count);
+    line.text(" dangling, ");
+    line.decimal(r.dir_bad.count);
+    line.text(" bad entries, ");
+    line.decimal(r.counter_wrong.count);
+    line.text(" counters, ");
+    line.decimal(r.chain_cycle.count);
+    line.text(" cycles, ");
+    line.decimal(r.extent_order.count);
+    line.text(" unordered extents, ");
+    line.decimal(r.extent_overlap.count);
+    line.text(" overlapping extents, ");
+    line.decimal(r.dir_dup_name.count);
+    line.text(" duplicate names, ");
+    line.decimal(r.snap_identity.count);
+    line.text(" snapshot identities, ");
+    line.decimal(r.rollback_record.count);
+    line.text(" rollback records, ");
+    line.decimal(r.hold.count);
+    line.text(" holds, ");
+    line.decimal(r.unreadable.count);
+    line.text(" unreadable");
+    KernelLog.send(LogLevel.Warn, line);
+}
+
+/// kernel/cosmofs.h's cosmofs_check: the walk, the comparison and, with COSMOFS_CHECK_REPAIR, the repairs, under the
+/// mount's lock.
+/// Safety: `mnt` is a mount; `out` null or a report.
+@export("cosmofs_check")
+unsafe fn check(mnt: *mut mount, out: *mut cosmofs_check_report, flags: u32) -> i32 {
+    let fs = Ptr.toBorrow(mnt as *mount).fs_priv as *mut cfs;
+    if (fs.isNull() || !slotsFit()) {
+        return -EINVAL;
+    }
+    // A repair goes into the open transaction, and a read-only mount never commits one (CFS-1): refused rather than
+    // done and dropped.
+    if ((flags & COSMOFS_CHECK_REPAIR) != 0 && fsOf(fs).rdonly) {
+        return -EROFS;
+    }
+
+    // The report is about 1.6 KiB: on the heap, not the kernel stack (scripts/frame-baseline.txt).
+    let size = layoutOf<cosmofs_check_report>().size;
+    let rep = kzalloc(size) as *mut cosmofs_check_report;
+    if (rep.isNull()) {
+        return -ENOMEM;
+    }
+    var seenSlot = [0u64; 2];
+    var liveSlot = [0u64; 2];
+    var reachSlot = [0u64; 2];
+    var aliveSlot = [0u64; 2];
+    var ck = Check {
+        fs: fs,
+        rep: rep,
+        seen: borrow mut seenSlot as *mut [u64; 2] as *mut cfs_bits,
+        live: borrow mut liveSlot as *mut [u64; 2] as *mut cfs_bits,
+        reach: borrow mut reachSlot as *mut [u64; 2] as *mut cfs_bits,
+        alive: borrow mut aliveSlot as *mut [u64; 2] as *mut cfs_bits,
+        links: Counts { chunk: 0 as *mut *mut u8, nchunks: 0 },
+        nlink: Counts { chunk: 0 as *mut *mut u8, nchunks: 0 },
+        nameSeen: 0 as *mut u8,
+        dupBlk: 0 as *mut u8,
+        dupCmp: 0 as *mut u8,
+        dupName: 0 as *mut u8,
+        flags: flags,
+        freeWrong: false,
+        inodesWrong: false,
+        uuids: 0 as *mut u8,
+        ids: 0 as *mut u64,
+        nuuids: 0,
+        uuidCap: 0,
+        badRollback: false,
+    };
+    let t0 = clock_now_ns();
+
+    let lock = borrow mut fsOf(fs).lock as *mut mutex;
+    mutex_lock(lock);
+    if (fsOf(fs).failed != 0) {
+        mutex_unlock(lock);
+        kfree(rep as *mut void);
+        return -EIO;
+    }
+    let nblocks = fsOf(fs).nblocks;
+    let inos = fsOf(fs).sb.next_ino.wrappingAdd(2);
+    var rc = bitsAlloc(ck.seen, nblocks);
+    if (rc == 0) {
+        rc = bitsAlloc(ck.live, nblocks);
+    }
+    if (rc == 0) {
+        rc = bitsAlloc(ck.reach, inos);
+    }
+    if (rc == 0) {
+        rc = bitsAlloc(ck.alive, inos);
+    }
+    if (rc == 0) {
+        rc = countsAlloc(mut ck.links, inos);
+    }
+    if (rc == 0) {
+        rc = countsAlloc(mut ck.nlink, inos);
+    }
+    // Part of the same up-front budget as the maps above: if it cannot be had, the pass says so before it starts rather
+    // than half way through.
+    if (rc == 0) {
+        ck.nameSeen = kmalloc(CFS_CHECK_NAMEBYTES, 0) as *mut u8;
+        ck.dupBlk = kmalloc(CFS_BLOCK, 0) as *mut u8;
+        ck.dupCmp = kmalloc(CFS_BLOCK, 0) as *mut u8;
+        ck.dupName = kmalloc(CFS_NAME_MAX_LONG, 0) as *mut u8;
+        ck.uuidCap = fsOf(fs).snap_count.wrappingAdd(8);
+        ck.uuids = kmalloc(ck.uuidCap as usize * 16, 0) as *mut u8;
+        ck.ids = kzalloc(ck.uuidCap as usize * 8) as *mut u64;
+        if (ck.nameSeen.isNull() || ck.dupBlk.isNull() || ck.dupCmp.isNull() || ck.dupName.isNull() ||
+            ck.uuids.isNull() || ck.ids.isNull()) {
+            rc = -ENOMEM;
+        }
+    }
+    if (rc != 0) {
+        mutex_unlock(lock);
+        release(mut ck);
+        kfree(rep as *mut void);
+        return rc; // -ENOMEM before the walk, never half way through it
+    }
+    let chunks = bitsOf(ck.seen).nchunks as u64 + bitsOf(ck.live).nchunks as u64 + bitsOf(ck.reach).nchunks as u64 +
+        bitsOf(ck.alive).nchunks as u64 + ck.links.nchunks as u64 + ck.nlink.nchunks as u64;
+    let rp = repOf(rep);
+    rp.bytes_allocated = chunks * (CFS_BLOCK as u64) + (CFS_CHECK_NAMEBYTES as u64) + 2 * (CFS_BLOCK as u64);
+
+    // Blocks this transaction released are still marked allocated until the next commit makes them reusable
+    // (cosmofs_core.c, the deferred free list): allocated, reachable from nothing, and correct. They are claimed here
+    // so the walk does not call the filesystem's own copy-on-write history a leak -- which is what the first run of
+    // cosmofs-check-faults did, three blocks at a time.
+    for (i in 0u32..fsOf(fs).nr_pending) {
+        claim(mut ck, fsOf(fs).pending_free.add(i as usize).read(), true);
+    }
+    for (i in 0u32..fsOf(fs).nr_exempt) {
+        claim(mut ck, fsOf(fs).pending_exempt.add(i as usize).read(), true);
+    }
+
+    // The blocks no structure points at but every mount needs: the superblock slots and, on each member, the label.
+    for (v in 0u32..fsOf(fs).nmembers) {
+        let first = Ptr.toBorrow(fsOf(fs).mem.add(v as usize) as *cfs_memstate).first_usable;
+        for (b in 0u64..first) {
+            claim(mut ck, dvaOf(v, b), true);
+        }
+    }
+
+    walkImap(mut ck, fsOf(fs).sb.imap_root, fsOf(fs).sb.next_ino, true, true);
+    for (v in 0u32..fsOf(fs).nmembers) {
+        walkAlloc(mut ck, Ptr.toBorrow(fsOf(fs).mem.add(v as usize) as *cfs_memstate).alloc_root, true);
+    }
+    if (fsOf(fs).sb.members != 0) {
+        claim(mut ck, fsOf(fs).sb.members, true);
+    }
+    // Each mirrored member's copy state (version 13): the table names it, so it is reachable, and a pass that did not
+    // claim it would call it a leak -- which a boot's repair frees.
+    for (v in 0u32..fsOf(fs).nmembers) {
+        let stateRoot = Ptr.toBorrow(fsOf(fs).mem.add(v as usize) as *cfs_memstate).state_root;
+        if (stateRoot == 0) {
+            continue;
+        }
+        claim(mut ck, stateRoot, true);
+        let sb = readMeta(mut ck, stateRoot, CFS_KIND_COPYSTATE);
+        if (!sb.isNull()) {
+            cfs_buf_put(fs, sb);
+        }
+    }
+    // The record of what this root freed is metadata like any other: the root names it, so it is reachable, and a pass
+    // that did not claim it would call every block of it a leak (docs/audit/next-subsystem-unmount-leak.md).
+    if (fsOf(fs).sb.version >= 9) {
+        walkRecord(mut ck, fsOf(fs).sb.free_root, CFS_KIND_FREELOG);
+    }
+    // And what this root still owes, for the same reason.
+    if (fsOf(fs).sb.version >= 10) {
+        walkRecord(mut ck, fsOf(fs).sb.orphan_root, CFS_KIND_ORPHAN);
+    }
+    if (fsOf(fs).sb.key_root != 0) {
+        claim(mut ck, fsOf(fs).sb.key_root, true);
+    }
+    walkSnapshots(mut ck);
+    checkRollback(mut ck);
+
+    var rootSlot = [0u64; 32];
+    let root = borrow mut rootSlot as *mut [u64; 32] as *mut cfs_inode;
+    if (cfs_inode_read(fs, CFS_ROOT_INO, root) == 0 && inodeOf(root as *cfs_inode).mode >> 12 != CFS_TYPE_DIR) {
+        // The mount refuses such a root (-ENOTDIR); a walk that reads it as a directory would read a file's bytes as
+        // entries.
+        nameIt(mut repOf(rep).dir_bad, CFS_ROOT_INO);
+        setPartial(rep);
+    } else if (cfs_inode_read(fs, CFS_ROOT_INO, root) == 0) {
+        bitsSet(ck.reach, CFS_ROOT_INO);
+        walkDir(mut ck, CFS_ROOT_INO, root as *cfs_inode, 0);
+    } else {
+        nameIt(mut repOf(rep).unreadable, CFS_ROOT_INO);
+        setPartial(rep);
+    }
+
+    compare(mut ck);
+    if ((flags & COSMOFS_CHECK_REPAIR) != 0) {
+        rc = repair(mut ck);
+    }
+
+    mutex_unlock(lock);
+    release(mut ck);
+
+    let r = repOf(rep);
+    r.clean = reportClean(r);
+    r.elapsed_ns = clock_since_ns(t0);
+    if (!out.isNull()) {
+        memcpy(out as *mut void, rep as *void, size);
+    }
+    if (r.csum_two_level != 0) {
+        var buffer = [0u8; 128];
+        var line = TextWriter.create(mut buffer[..]);
+        line.text("cosmofs: check: ");
+        line.decimal(r.csum_two_level);
+        line.text(" two-level checksum tree(s) walked");
+        KernelLog.send(LogLevel.Info, line);
+    }
+    if (!r.clean && r.unreadable.count != 0) {
+        var buffer = [0u8; 128];
+        var line = TextWriter.create(mut buffer[..]);
+        line.text("cosmofs: check: first unreadable block 0x");
+        line.hex(r.unreadable.name[0], 1);
+        KernelLog.send(LogLevel.Warn, line);
+    }
+    if (!r.clean) {
+        summary(r);
+    }
+    kfree(rep as *mut void);
+    return rc;
+}
+
+// ---- The check on an unmounted device (roadmap 1.2 B2, fsck.cosmofs) ----
+
+/// What names the pool and never changes after the format. The roots, the generation and the version (a raise writes
+/// the new version in the next commit's slot) legitimately differ.
+fn slotsDisagree(a: borrow cfs_super, b: borrow cfs_super) -> bool {
+    var differ = a.total_blocks != b.total_blocks || a.block_size != b.block_size;
+    for (i in 0..16) {
+        if (a.uuid[i] != b.uuid[i] || a.label[i] != b.label[i]) {
+            differ = true;
+        }
+    }
+    return differ;
+}
+
+fn anyRepaired(r: borrow cosmofs_check_report) -> bool =>
+    r.alloc_not_seen.repaired != 0 || r.seen_not_alloc.repaired != 0 || r.nlink_wrong.repaired != 0 ||
+        r.orphan.repaired != 0 || r.counter_wrong.repaired != 0 || r.snap_identity.repaired != 0 ||
+        r.rollback_record.repaired != 0 || r.hold.repaired != 0;
+
+/// What the mount found and did, before the walk changes anything.
+/// Safety: `fs` is a mounted filesystem's state; `dev` a device report.
+unsafe fn devFill(fs: *mut cfs, dev: *mut cosmofs_dev_report) {
+    let lock = borrow mut fsOf(fs).lock as *mut mutex;
+    mutex_lock(lock);
+    let f = fsOf(fs);
+    let d = Ptr.toBorrowMut(dev);
+    d.format = f.sb.version;
+    d.generation = f.sb.generation;
+    d.replayed_frees = f.replay_freed as u64;
+    d.replayed_orphans = f.replay_orphans;
+    if (f.fell_back) {
+        d.flags = d.flags | DEV_F_FELL_BACK;
+    }
+    if (f.rollback_switched) {
+        d.flags = d.flags | DEV_F_ROLLBACK_APPLIED;
+    }
+    var slot = [0u64; 32];
+    let r = borrow mut slot as *mut [u64; 32] as *mut cfs_rollback;
+    if (f.sb.version >= 12 && f.sb.rollback_root != 0 && cfs_rollback_read(fs, r) == 0) {
+        let rec = Ptr.toBorrow(r as *cfs_rollback);
+        let pending = rec.state == CFS_ROLLBACK_PENDING;
+        d.flags = d.flags | (if (pending) DEV_F_ROLLBACK_PENDING else DEV_F_ROLLBACK_HELD);
+        var tslot = [0u64; 16];
+        let t = borrow mut tslot as *mut [u64; 16] as *mut cfs_snapshot;
+        if (cfs_snapshot_lookup_uuid(fs, borrow rec.target_uuid as *[u8; 16] as *u8, t) == 0) {
+            let name = borrow Ptr.toBorrow(t as *cfs_snapshot).name as *[u8; 32] as *CChar;
+            strlcpy(borrow mut d.rollback_target as *mut [u8; 32] as *mut CChar, name, 32);
+        }
+        if (pending && f.rollback_error != 0) {
+            d.flags = d.flags | DEV_F_ROLLBACK_REFUSED;
+            d.rollback_error = f.rollback_error;
+        }
+    }
+    mutex_unlock(lock);
+}
+
+/// "cosmofs: <device>: <what>".
+/// Safety: `bd` is a block device.
+unsafe fn devWarn(bd: *blkdev, what: StringView) {
+    var buffer = [0u8; 256];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("cosmofs: ");
+    cText(mut line, devName(bd));
+    line.text(": ");
+    line.text(what);
+    KernelLog.send(LogLevel.Warn, line);
+}
+
+/// kernel/cosmofs.h's cosmofs_check_dev: the checker on a device nothing has mounted: the same cosmofs_check, on a
+/// mount no namespace sees (vfs_mount_detached), so there is one implementation and not a second one in user space.
+/// Read-only unless COSMOFS_CHECK_REPAIR, and then OFFLINE too: nothing else is using the pool, so a reachable block
+/// the bitmap calls free can be marked.
+///
+/// What a mount cannot get past is answered here rather than refused: two superblock slots that name different pools
+/// (the mount would pick the newer and carry on), neither slot verifying, a load that fails at a stage the report
+/// names. The pool is then not checked and the device record says why.
+/// Safety: `bd` is a block device; `rep` and `dev` reports.
+@export("cosmofs_check_dev")
+unsafe fn checkDev(bd: *mut blkdev, flags: u32, rep: *mut cosmofs_check_report, dev: *mut cosmofs_dev_report) -> i32 {
+    memset(dev as *mut void, 0, layoutOf<cosmofs_dev_report>().size);
+    memset(rep as *mut void, 0, layoutOf<cosmofs_check_report>().size);
+    let superSize = layoutOf<cfs_super>().size;
+    let sl = kmalloc(2 * superSize, 0) as *mut u8;
+    if (sl.isNull()) {
+        return -ENOMEM;
+    }
+    let a = sl as *mut cfs_super;
+    let b = sl.add(superSize) as *mut cfs_super;
+    var ra: i32 = -EIO;
+    var rb: i32 = -EIO;
+    var rc = cfs_super_slots(bd, a, borrow mut ra as *mut i32, b, borrow mut rb as *mut i32);
+    if (rc != 0) {
+        kfree(sl as *mut void);
+        return rc;
+    }
+    let d = Ptr.toBorrowMut(dev);
+    d.slot_generation[0] = if (ra == 0) Ptr.toBorrow(a as *cfs_super).generation else 0;
+    d.slot_generation[1] = if (rb == 0) Ptr.toBorrow(b as *cfs_super).generation else 0;
+    let none = ra != 0 && rb != 0;
+    let disagree = ra == 0 && rb == 0 && slotsDisagree(Ptr.toBorrow(a as *cfs_super), Ptr.toBorrow(b as *cfs_super));
+    kfree(sl as *mut void);
+    // An encrypted pool with no key loaded is not a pool without a superblock: it cannot be read, and says why (roadmap
+    // 1.2 B5).
+    if (none && (ra == -ENOKEY || rb == -ENOKEY)) {
+        d.flags = d.flags | DEV_F_LOCKED;
+        devWarn(bd as *blkdev, "encrypted and locked; not checked");
+        return 0;
+    }
+    if (none || disagree) {
+        d.flags = d.flags | (if (none) DEV_F_SUPER_NONE else DEV_F_SUPER_DISAGREE);
+        if (none) {
+            devWarn(bd as *blkdev, "neither superblock slot verifies; not checked");
+        } else {
+            devWarn(bd as *blkdev, "the superblock slots name different pools; not checked");
+        }
+        return 0;
+    }
+
+    let repairing = (flags & COSMOFS_CHECK_REPAIR) != 0;
+    var mnt = 0 as *mut mount;
+    rc = vfs_mount_detached(
+        vfs_find_fs("cosmofs\0".ptr as *CChar), bd, if (repairing) 0 else MOUNT_RDONLY,
+        borrow mut mnt as *mut *mut mount,
+    );
+    if (rc == -EBUSY || rc == -ENOMEM) {
+        return rc; // somebody has it, or no memory: the caller's, not the pool's
+    }
+    if (rc != 0) {
+        d.flags = d.flags | DEV_F_MOUNT_FAILED;
+        d.mount_error = rc;
+        var stage: u32 = FSCTL_STAGE_NONE;
+        var frc: i32 = 0;
+        if (cfs_mount_failure(bd as *blkdev, borrow mut stage as *mut u32, borrow mut frc as *mut i32)) {
+            d.mount_stage = stage;
+        }
+        return 0;
+    }
+    // Every device the pool assembled, not only the one named: a mirror mounted through its other leg is not
+    // "unmounted" because this leg is, and an offline repair beside a live allocator would be anything but offline
+    // (Codex on #434). Another mount's, not this one's: the detached mount holds the pool's other devices itself
+    // (CFS-5).
+    let fs = Ptr.toBorrow(mnt as *mount).fs_priv as *mut cfs;
+    let pool = Ptr.toBorrow(fsOf(fs).pool as *spool);
+    for (v in 0u32..pool.nmembers) {
+        let m = Ptr.toBorrow(pool.m.add(v as usize) as *spool_member);
+        for (c in 0u32..m.ncopies) {
+            let other = m.copy[c as usize].dev;
+            if (!other.isNull() && other != bd && vfs_bdev_mounted_except(other as *blkdev, mnt as *mount)) {
+                var buffer = [0u8; 256];
+                var line = TextWriter.create(mut buffer[..]);
+                line.text("cosmofs: ");
+                cText(mut line, devName(bd as *blkdev));
+                line.text(": ");
+                cText(mut line, devName(other as *blkdev));
+                line.text(", another device of this pool, is mounted; not checked");
+                KernelLog.send(LogLevel.Warn, line);
+                let _ = vfs_mount_detached_release(mnt, false);
+                return -EBUSY;
+            }
+        }
+    }
+    devFill(fs, dev);
+    rc = check(mnt, rep, flags | (if (repairing) COSMOFS_CHECK_OFFLINE else 0));
+    if (rc == 0) {
+        d.flags = d.flags | DEV_F_CHECKED;
+    }
+    if (Ptr.toBorrow(rep as *cosmofs_check_report).boot_refused) {
+        d.flags = d.flags | DEV_F_BOOT_REFUSED;
+    }
+    // Committed only when a repair was made: then with everything the mount holds -- the replays, a rollback's switch
+    // -- as any unmount would. A writable check that repaired nothing writes nothing: its mount's own changes are
+    // dropped and the next mount makes them again. Committing them anyway is how the first draft lost a free block in
+    // use -- a boot's refused repair committed, and the commit's copies took the block the bitmap called free
+    // (cosmofs-check-dev).
+    let commit = rc == 0 && repairing && anyRepaired(Ptr.toBorrow(rep as *cosmofs_check_report));
+    let urc = vfs_mount_detached_release(mnt, commit);
+    if (commit) {
+        if (urc == 0) {
+            d.flags = d.flags | DEV_F_COMMITTED;
+        } else {
+            rc = urc;
+        }
+    }
+    if (rc == 0 && urc != 0) {
+        var buffer = [0u8; 256];
+        var line = TextWriter.create(mut buffer[..]);
+        line.text("cosmofs: ");
+        cText(mut line, devName(bd as *blkdev));
+        line.text(": the check's unmount did not commit (");
+        line.signed(urc as i64);
+        line.text(")");
+        KernelLog.send(LogLevel.Warn, line);
+    }
+    return rc;
+}

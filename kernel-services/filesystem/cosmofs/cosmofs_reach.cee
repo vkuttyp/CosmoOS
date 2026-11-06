@@ -289,7 +289,7 @@ unsafe fn treeWalk(
                     continue;
                 }
                 // A slot whose number is not its position, or past the tree's high-water mark, is not trusted for
-                // its blocks (the checker's rule, cosmofs_check.c walk_imap).
+                // its blocks (the checker's rule, cosmofs_check.cee walkImap).
                 let expect = ((i * CFS_PTRS_PER_BLOCK + j) * CFS_INODES_PER_BLOCK + k) as u64;
                 if (ino != expect || expect >= next_ino) {
                     fail(mut r, expect, Why.SlotOutOfPlace);

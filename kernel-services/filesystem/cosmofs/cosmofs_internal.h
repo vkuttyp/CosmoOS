@@ -336,7 +336,7 @@ int cfs_inode_prepare(struct cfs *fs, uint64_t ino);
 /* Mark block `lin` (a linear index) allocated: the offline repair of a
  * block something reaches and the bitmap calls free. */
 void cfs_bitmap_claim(struct cfs *fs, uint64_t lin);
-/* A set of block numbers in page-sized chunks (cosmofs_check.c): the
+/* A set of block numbers in page-sized chunks (cosmofs_check.cee): the
  * checker's maps and the scrub's record of what it verified. */
 struct cfs_bits {
     uint8_t **chunk;

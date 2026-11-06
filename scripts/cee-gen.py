@@ -128,6 +128,8 @@ PORTS = [
     ("kernel-services/filesystem/cosmofs/cosmofs_member.cee", "kernel-services/filesystem/cosmofs/cosmofs_member.c",
      "cosmofs's members: labels, assembly, copy state, the member table, read repair (cosmofs_internal.h)", None,
      True),
+    ("kernel-services/filesystem/cosmofs/cosmofs_check.cee", "kernel-services/filesystem/cosmofs/cosmofs_check.c",
+     "cosmofs's structural check and the check of an unmounted device (cosmofs.h, cosmofs_internal.h)", None, True),
     ("kernel-services/filesystem/cosmofs/cfsparse.cee", "kernel-services/filesystem/cosmofs/cfsparse.c",
      "cosmofs's decoders of on-disk metadata (cosmofs_internal.h)", None, False),
     ("kernel/process/elfparse.cee", "kernel/process/elfparse.c", "The user executable validator (elf.h)", None, False),

@@ -1323,6 +1323,25 @@ checked against their C sizes; the buffer cache's list is walked with
 `cfs_newer_member0` takes its uuid as a pointer.
 `tools/cfs31-probe.py` and `tools/b3-copystate-probe.py` patch the port;
 their `--old` texts compile.
+`cosmofs_check.cee`, the structural check: `tests/host/test_cfscheck.c`
+runs it with the real entry decoders (cfsparse) over filesystems it
+builds and owns -- inode maps of one and two levels, runs in order, out
+of order, overlapping and compressed, extent chains, checksum trees of
+one and two levels, directories written with the format's encoder
+(long names, repeats, colliding hashes, malformed and dangling entries,
+two parents, too deep), snapshots with member tables and deadlists,
+rollback records and holds, the free and orphan records, the pending
+blocks and a bitmap that does and does not agree -- on a mount (plain,
+repairing, offline, at boot) and on an unmounted device, the page
+allocator and kmalloc failing at every point (0xe84d1de85355a449, clang
+and gcc; every line and branch that can be reached). The bit maps, the
+inodes, snapshot entries and rollback records the C kept on the stack
+are slots of words checked against their C sizes; the link counts are a
+CeeSafe pair of page pointers; `cosmofs_check_floor.c` takes a page from
+the page allocator and gives it back (`kernel/page.h`'s conversions are
+inline). `tools/b3-mirror-probe.py` patches the port, and
+`tools/cosmofs-extent-fail-probe.py` takes the check's two lines out of
+it by their text; both `--old` texts compile.
 
 Size: about 4.5x.
 

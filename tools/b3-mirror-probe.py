@@ -31,8 +31,13 @@ ROOT = Path(__file__).resolve().parents[1]
 
 # [(file, text, old text)], the test-mirror FAIL line's pattern.
 CASES = {
-    "check": ([("kernel-services/filesystem/cosmofs/cosmofs_check.c",
-                "vfs_bdev_mounted_except(d, mnt)", "vfs_bdev_mounted(d)")],
+    # The check is CeeSafe (cosmofs_check.cee, roadmap 2.0 SA7): the old call, and its declaration beside the new one's.
+    "check": ([("kernel-services/filesystem/cosmofs/cosmofs_check.cee",
+                "vfs_bdev_mounted_except(other as *blkdev, mnt as *mount)", "vfs_bdev_mounted(other as *blkdev)"),
+               ("kernel-services/filesystem/cosmofs/cosmofs_check.cee",
+                "    fn vfs_bdev_mounted_except(bd: *blkdev, other: *mount) -> bool;\n",
+                "    fn vfs_bdev_mounted_except(bd: *blkdev, other: *mount) -> bool;\n"
+                "    fn vfs_bdev_mounted(bd: *blkdev) -> bool;\n")],
               r"test-mirror: FAIL: replace: the boot's check of the root"),
     "gone": ([("kernel-services/vfs/vfs.c",
                "    return blk_part_disk(a) == b || blk_part_disk(b) == a;\n",
