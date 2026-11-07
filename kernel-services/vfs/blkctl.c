@@ -216,13 +216,9 @@ static int64_t blkctl_format_keyed(struct blkctl_open *o, struct cosmo_blkctl *c
     return rc ? rc : (int64_t)len;
 }
 
-static int64_t blkctl_write_file(struct vnode *vn, struct file *f, uint64_t off, const void *buf, size_t len)
+/* One command; the caller clears the result when it fails. */
+static int64_t blkctl_command(struct blkctl_open *o, const void *buf, size_t len)
 {
-    (void)vn;
-    (void)off;
-    struct blkctl_open *o = f->priv;
-    if (o == NULL)
-        return -EINVAL;
     if (!cred_has(cred_current(), PRIV_SYS_ADMIN))
         return -EPERM;   /* the fd may have outlived the privilege that opened it */
     if (len < sizeof(struct cosmo_blkctl))
@@ -258,24 +254,19 @@ static int64_t blkctl_write_file(struct vnode *vn, struct file *f, uint64_t off,
         const char *l = (const char *)buf + label_at;
         for (size_t i = 0; i < label_len; i++)
             if (l[i] < 0x21 || l[i] > 0x7e || l[i] == '"' || l[i] == '\\')
-                return -EINVAL;   /* printable, no blank: blkid prints it between quotes and
-                                   * fstab fields split on blanks */
+                return -EINVAL;   /* printable, no blank: blkid quotes it, fstab fields split on blanks */
         memcpy(label, l, label_len);
     }
     if (cmd.op == COSMO_BLKCTL_LIST) {
         int64_t rc = blkctl_list(o);
-        if (rc)
-            set_result(o, NULL, 0);
         return rc ? rc : (int64_t)len;
     }
 
     cmd.name[sizeof(cmd.name) - 1] = '\0';
     cmd.fstype[sizeof(cmd.fstype) - 1] = '\0';
     struct blkdev *bd = blk_find(cmd.name);
-    if (bd == NULL) {
-        set_result(o, NULL, 0);
+    if (bd == NULL)
         return -ENODEV;
-    }
     int64_t rc;
     switch (cmd.op) {
     case COSMO_BLKCTL_READ:
@@ -336,13 +327,22 @@ static int64_t blkctl_write_file(struct vnode *vn, struct file *f, uint64_t off,
         break;
     }
     blkdev_put(bd);
-    if (rc)
-        set_result(o, NULL, 0);
     return rc ? rc : (int64_t)len;
 }
 
-/* The result of this file's last command, whole or not at all; nothing
- * when the last command failed or had no result. */
+/* A command that fails leaves no result (blkctl.h): not the one before it, which a reader would take for its own. */
+static int64_t blkctl_write_file(struct vnode *vn, struct file *f, uint64_t off, const void *buf, size_t len)
+{
+    (void)vn;
+    (void)off;
+    struct blkctl_open *o = f->priv;
+    int64_t rc = o == NULL ? -EINVAL : blkctl_command(o, buf, len);
+    if (rc < 0 && o != NULL)
+        set_result(o, NULL, 0);
+    return rc;
+}
+
+/* The result of this file's last command, whole or not at all; nothing when it failed or had no result. */
 static int64_t blkctl_read_file(struct vnode *vn, struct file *f, uint64_t off, void *buf, size_t len)
 {
     (void)vn;
