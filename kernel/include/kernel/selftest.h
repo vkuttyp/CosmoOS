@@ -343,7 +343,7 @@ bool selftest_cache_limits(const char **reason);   /* ramfs page budget, global 
 bool selftest_cache_budget_race(const char **reason);   /* the budget admission under concurrent misses */
 bool selftest_crc32c(const char **reason);
 
-/* Phase 7: kernel-services/filesystem/cosmofs/cosmofstest.c */
+/* Phase 7: kernel-services/filesystem/cosmofs/cosmofstest_*.cee */
 bool selftest_pool(const char **reason);
 bool selftest_cosmofs_format(const char **reason);
 bool selftest_cosmofs_ops(const char **reason);

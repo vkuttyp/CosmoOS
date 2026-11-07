@@ -1525,6 +1525,27 @@ The tests still in C reach them through `cosmofstest.h`;
 `cosmofstest_lib_floor.c` keeps the engine mount's fault seams and
 their self-test, cosmofs-fixture-cleanup, which only a build with
 CONFIG_SELFTEST and CONFIG_FAULTINJECT has.
+Then the rest of `cosmofstest.c`, by group, after which it is gone:
+`cosmofstest_basic.cee` (the scratch disk's pool, format, ops and crash,
+and the transaction engine's holes to metadata-csum-id),
+`cosmofstest_media.cee` (badmap, snapshot, mirror, mirror-stale,
+compress), `cosmofstest_extent.cee` (extent-bound, -rebuild, -raw,
+-fail), `cosmofstest_check.cee` (crypt, badmembers, the structural
+check's manufactured faults), `cosmofstest_orphan.cee` (the orphan
+record's replays, check-partial, fsctl-check), `cosmofstest_freelog.cee`
+(symlinks, the free record, snapshot deadlists), `cosmofstest_names.cee`
+(old formats, two members, snapshot identity, long names, hard links),
+`cosmofstest_rollback.cee` (rollbacks and clones), `cosmofstest_b2.cee`
+(roadmap 1.2 B2's defects, cosmofs-nomem) and `cosmofstest_copies.cee`
+(copy states, resilvers, spares, attach). A C test that jumped to its
+cleanup is a body that returns at its first failed check and a caller
+that cleans up after it. Their floors assert the layout each writes as
+constants, call `cosmofs_stats` (an extern block cannot name a function
+and a struct alike), hold the variables and fault seams a build
+configuration decides, and are the debug-only tests in a release build.
+The boot test passes every one (x86_64 debug, 2026-11-07); the
+analysis baselines lose the two `cosmofstest.c` entries whose functions
+moved.
 
 Size: about 4.5x.
 

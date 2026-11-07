@@ -220,7 +220,6 @@ KERNEL_GENERIC_SRCS := \
 	kernel-services/filesystem/cosmofs/cosmofs_crypt_floor.c \
 	kernel-services/filesystem/cosmofs/cosmofs.c \
 	kernel-services/filesystem/cosmofs/cosmofs_floor.c \
-	kernel-services/filesystem/cosmofs/cosmofstest.c \
 	kernel-services/filesystem/cosmofs/cosmofstest_lib.c \
 	kernel-services/filesystem/cosmofs/cosmofstest_lib_floor.c \
 	kernel-services/filesystem/cosmofs/cosmofstest_media.c \
@@ -462,6 +461,7 @@ $(OUT)/kernel-services/filesystem/cosmofs/cosmofs_keytest.o $(OUT)/kernel-servic
 $(OUT)/kernel-services/filesystem/cosmofs/cosmofstest_rollback.o $(OUT)/kernel-services/filesystem/cosmofs/cosmofstest_rollback.analyzed: \
 	EXTRA_CFLAGS += -I$(ROOT)/kernel-services/filesystem/cosmofs
 $(OUT)/kernel-services/filesystem/cosmofs/cosmofstest_b2.o $(OUT)/kernel-services/filesystem/cosmofs/cosmofstest_b2.analyzed: \
+	EXTRA_CFLAGS += -I$(ROOT)/kernel-services/filesystem/cosmofs
 $(OUT)/kernel-services/filesystem/cosmofs/cosmofstest_basic.o $(OUT)/kernel-services/filesystem/cosmofs/cosmofstest_basic.analyzed: \
 	EXTRA_CFLAGS += -I$(ROOT)/kernel-services/filesystem/cosmofs
 $(OUT)/kernel-services/filesystem/cosmofs/cosmofstest_copies.o $(OUT)/kernel-services/filesystem/cosmofs/cosmofstest_copies.analyzed: \

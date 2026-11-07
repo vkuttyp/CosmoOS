@@ -13,5 +13,6 @@ filesystem's format (`cosmofs_member.cee`). Redundancy attaches here next
 (constitution section 29). `pool_floor.c` keeps the C the port needs: the sysctl's
 `g_pool_fault_errors`, the spare slots' addresses and the asserted constants.
 `tests/host/test_pool.c` holds the port to the C's digest. Self-tests `pool` and
-`pool-copy-states` (in cosmofs's `cosmofstest.c`). Docs:
+`pool-copy-states` (in cosmofs's `cosmofstest_basic.cee` and
+`cosmofstest_copies.cee`). Docs:
 `docs/kernel-services/vfs/`.
