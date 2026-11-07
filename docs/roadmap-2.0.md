@@ -1487,6 +1487,13 @@ clone's or a snapshot's and their inodes written through:
 line and branch that can be reached). The vnode operation tables are
 named in `cosmofs_internal.h` now; `cosmofs_vnode_floor.c` hands out
 their addresses and keeps the inode's fault seam.
+`cosmofs.cee`, the thirteenth, what the directory operations share: the
+directory block helpers, the .snapshots directory, snapshots by name and
+the tree locks, after the operations themselves moved to
+`cosmofs_dir.c`. `tests/host/test_cfsdirblk.c` runs them with the real
+entry decoders (0x79a7a841980074bb, clang and gcc; every line and branch
+that can be reached). `cosmofs_floor.c` keeps the vnode operation
+tables.
 
 Size: about 4.5x.
 

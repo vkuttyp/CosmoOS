@@ -1,8 +1,9 @@
 /*
  * test_cfsdirblk.c - cosmofs's directory blocks, the .snapshots directory and the tree locks
- * (kernel-services/filesystem/cosmofs/cosmofs.c) on the host: roadmap 2.0 SA7. A digest recorded from the C over
- * directories of zero to several blocks on pools of versions 4 to 15, holding short names, long names with their
- * continuations, free runs and slots that do not check: names looked up (of every length, some there, some not),
+ * (kernel-services/filesystem/cosmofs/cosmofs.cee; its floor holds the tables) on the host: roadmap 2.0 SA7. A
+ * digest recorded from the C over directories of zero to several blocks on pools of versions 4 to 15, holding short
+ * names, long names with their continuations, free runs and slots that do not check: names looked up (of every
+ * length, some there, some not),
  * added (into a free run or a new block, or refused), removed and asked whether the directory is empty; the
  * .snapshots directory made or cached; snapshots looked up by name; and the read-only test and the tree lock for
  * vnodes of the live tree, a snapshot, a clone that exists and one that does not -- with the real entry decoders
@@ -24,6 +25,21 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* The values the CeeSafe port writes as its own constants. */
+_Static_assert(ENOENT == 2 && EIO == 5 && ENOMEM == 12 && ENOSPC == 28 && EROFS == 30 && ENAMETOOLONG == 36,
+               "cosmofs's errno.h values");
+_Static_assert(CFS_BLOCK == 4096 && CFS_ALLOC_META == 0 && CFS_NAME_MAX == 47 && CFS_NAME_MAX_LONG == 255 &&
+                   CFS_DIRENTS_PER_BLOCK == 64 && sizeof(struct cfs_dirent) == 64 && CFS_DIRENT_CONT == ~0ull &&
+                   CFS_DIRENT_HEAD_NAME == 48 && CFS_DIRENT_CONT_NAME == 56 && CFS_TYPE_DIR == 2 &&
+                   CFS_ROOT_INO == 1 && CFS_SNAP_INO_SHIFT == 48 && CFS_SNAPDIR_INO == 0xFFFF000000000000ull &&
+                   CFS_SNAP_ID_MAX == 0xFFFE && CFS_SNAP_NAME_MAX == 31 &&
+                   CFS_MODE(CFS_TYPE_DIR, 0555) == 0x2000u + 365,
+               "cosmofs's cosmofs_format.h values");
+_Static_assert(offsetof(struct cfs_dirent, type) == 8 && offsetof(struct cfs_dirent, namelen) == 9 &&
+                   offsetof(struct cfs_dirent, extra) == 10 && offsetof(struct cfs_dirent, name) == 16 &&
+                   offsetof(struct cfs_dirent_cont, name) == 8,
+               "cosmofs.cee's entry offsets");
 
 /* The digest of the C (cosmofs.c, 2026-11-07), which the CeeSafe port gives. */
 #define DIRBLK_DIGEST 0x79a7a841980074bbull
@@ -268,8 +284,8 @@ int cfs_mkdir(struct vnode *d, const char *n, size_t l, uint32_t m, struct vnode
 int cfs_link(struct vnode *d, const char *n, size_t l, struct vnode *t) NEVER()
 int cfs_unlink(struct vnode *d, const char *n, size_t l, struct vnode *v) NEVER()
 int cfs_rmdir(struct vnode *d, const char *n, size_t l, struct vnode *v) NEVER()
-int cfs_rename(struct vnode *od, const char *on, size_t ol, struct vnode *v, struct vnode *nd, const char *nn, size_t nl,
-               struct vnode *r) NEVER()
+int cfs_rename(struct vnode *od, const char *on, size_t ol, struct vnode *v, struct vnode *nd, const char *nn,
+               size_t nl, struct vnode *r) NEVER()
 int cfs_readdir(struct vnode *d, uint64_t *p, vfs_dirent_cb cb, void *a) NEVER()
 int cfs_readpage(struct vnode *v, uint64_t i, void *b) NEVER()
 int cfs_dirty_check(struct vnode *v, uint64_t i, unsigned d) NEVER()

@@ -223,6 +223,7 @@ HOST_CFSVNODE_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/cos
 	kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_cfsvnode.c
 # cosmofs's directory blocks, .snapshots and tree locks with the real entry decoders: the rest is the test's.
 HOST_CFSDIRBLK_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/cosmofs.c \
+	kernel-services/filesystem/cosmofs/cosmofs_floor.c \
 	kernel-services/filesystem/cosmofs/cfsparse.c kernel/core/crc32c.c kernel/ceesafe/ceesafe_rt_core.c \
 	tests/host/ceesafe_panic.c tests/host/test_cfsdirblk.c
 HOST_CFSPARSE_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/cfsparse.c kernel/core/crc32c.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_cfsparse.c

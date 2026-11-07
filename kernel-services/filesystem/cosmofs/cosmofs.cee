@@ -1,0 +1,425 @@
+// cosmofs.cee - A directory's blocks, the .snapshots directory and the tree locks, in CeeSafe: roadmap 2.0 SA7.
+// tests/host/test_cfsdirblk.c holds it to the digest of the C it replaced.
+//
+// Every mutation writes the inode through to its (copy-on-write) inode block immediately, so the buffer cache always
+// holds the complete pre-commit state and vnode eviction has nothing to flush but pages. Directory blocks are written
+// to freshly allocated blocks; the previous block goes on the deferred free list. The directory operations are
+// cosmofs_dir.cee's, a file's cosmofs_file.cee's, the vnodes cosmofs_vnode.cee's; what is here is what they share.
+//
+// struct cfs, the vnodes, the entries and the snapshot entries stay C (cosmofs_internal.h, cosmofs_format.h). The
+// entry helpers cosmofs_format.h has as inline functions -- the free run, the put and the clear -- are written out
+// here. cosmofs_floor.c keeps the vnode operation tables.
+
+@header("kernel/vfs.h", "kernel/kmalloc.h", "kernel/mutex.h", "kernel/string.h", "cosmofs_internal.h")
+extern "C" {
+    struct mount;
+    struct vnode {
+        ino: u64;
+        size: u64;
+        mtime_ns: u64;
+        mnt: *mut mount;
+        fs_priv: *mut void;
+    }
+    struct cfs_super {
+        version: u32;
+    }
+    struct cfs {
+        sb: cfs_super;
+        mnt: *mut mount;
+        lock: mutex;
+    }
+    struct cfs_inode {
+        mode: u32;
+        nlink: u32;
+        ino: u64;
+        parent: u64;
+    }
+    struct cfs_vnode {
+        inode: cfs_inode;
+        snap_tag: u32;
+    }
+    struct cfs_snapshot {
+        id: u64;
+    }
+    struct cfs_dirent {
+        ino: u64;
+    }
+    struct cfs_clone {
+        id: u64;
+    }
+
+    fn kzalloc(size: usize) -> *mut void;
+    fn cfs_dir_read_block_at(fs: *mut cfs, dir: *cfs_inode, lblk: u64, buf: *mut u8) -> i32;
+    fn cfs_data_write_block(fs: *mut cfs, inode: *mut cfs_inode, lblk: u64, buf: *void, cls: u32) -> i32;
+    fn cfs_vnode_inode_sync(fs: *mut cfs, vn: *mut vnode) -> i32;
+    fn cfs_fill_vnode(vn: *mut vnode, inode: *cfs_inode);
+    fn vfs_now_ns() -> u64;
+    fn vnode_lookup_cached(mnt: *mut mount, ino: u64) -> *mut vnode;
+    fn vnode_alloc(mnt: *mut mount, ino: u64) -> *mut vnode;
+    fn vnode_hash_insert(vn: *mut vnode);
+    fn cfs_dirent_extra(len: u32) -> u32;
+    fn cfs_dirent_check(blk: *cfs_dirent, s: u32, version: u32) -> u32;
+    fn cfs_dirent_name_eq(blk: *cfs_dirent, s: u32, name: *CChar, len: u32) -> i32;
+    fn cfs_snapshot_find(fs: *mut cfs, name: *CChar, out: *mut cfs_snapshot) -> bool;
+    fn cfs_clone_by_id(fs: *mut cfs, id: u64) -> *mut cfs_clone;
+    fn cfs_clone_enter(fs: *mut cfs, c: *mut cfs_clone);
+    fn cfs_clone_leave(fs: *mut cfs);
+    fn memset(p: *mut void, c: i32, n: usize) -> *mut void;
+    fn memcpy(dst: *mut void, src: *void, n: usize) -> *mut void;
+}
+
+// ---- errno.h, kmalloc.h and cosmofs_format.h values (asserted in tests/host/test_cfsdirblk.c) ----
+
+const ENOENT: i32 = 2;
+const EIO: i32 = 5;
+const ENOMEM: i32 = 12;
+const ENOSPC: i32 = 28;
+const EROFS: i32 = 30;
+const ENAMETOOLONG: i32 = 36;
+const CFS_BLOCK: u64 = 4096;
+const CFS_ALLOC_META: u32 = 0;
+const CFS_NAME_MAX: usize = 47;
+const CFS_NAME_MAX_LONG: usize = 255;
+const CFS_DIRENTS_PER_BLOCK: u32 = 64;
+const CFS_DIRENT_SIZE: usize = 64;
+const CFS_DIRENT_CONT: u64 = 0xFFFFFFFFFFFFFFFF;
+const CFS_DIRENT_HEAD_NAME: u32 = 48;
+const CFS_DIRENT_CONT_NAME: u32 = 56;
+const CFS_TYPE_DIR: u32 = 2;
+const CFS_ROOT_INO: u64 = 1;
+const CFS_SNAP_INO_SHIFT: u32 = 48;
+const CFS_SNAPDIR_INO: u64 = 0xFFFF000000000000;
+const CFS_SNAP_ID_MAX: u64 = 0xFFFE;
+const CFS_SNAP_NAME_MAX: usize = 31;
+/// The .snapshots directory's tag: not a snapshot's tree, but not the live one either.
+const SNAPDIR_TAG: u32 = 0xFFFF;
+/// Where an entry's fields are (struct cfs_dirent, struct cfs_dirent_cont): checked by the test.
+const DIRENT_TYPE: usize = 8;
+const DIRENT_NAMELEN: usize = 9;
+const DIRENT_EXTRA: usize = 10;
+const DIRENT_NAME: usize = 16;
+const CONT_NAME: usize = 8;
+
+// ---- Helpers ----
+
+/// Safety: `vn` is a vnode with this filesystem's state.
+unsafe fn inodeOf(vn: *mut vnode) -> *mut cfs_inode =>
+    borrow mut Ptr.toBorrowMut(Ptr.toBorrow(vn as *vnode).fs_priv as *mut cfs_vnode).inode as *mut cfs_inode;
+
+/// Safety: `vn` is a vnode.
+unsafe fn cvOf(vn: *mut vnode) -> *mut cfs_vnode => Ptr.toBorrow(vn as *vnode).fs_priv as *mut cfs_vnode;
+
+/// Safety: `block` is a directory block.
+unsafe fn direntIno(block: *mut u8, s: u32) -> u64 =>
+    ByteOrder.readU64LE(Slice.fromRaw(block as *u8, CFS_BLOCK as usize), s as usize * CFS_DIRENT_SIZE);
+
+/// Safety: as direntIno.
+unsafe fn setDirentIno(block: *mut u8, s: u32, ino: u64) {
+    ByteOrder.writeU64LE(SliceMut.fromRaw(block, CFS_BLOCK as usize), s as usize * CFS_DIRENT_SIZE, ino);
+}
+
+/// Safety: as direntIno.
+unsafe fn setDirentByte(block: *mut u8, s: u32, at: usize, v: u8) {
+    block.add(s as usize * CFS_DIRENT_SIZE + at).write(v);
+}
+
+/// cosmofs_format.h's cfs_dirent_free_run: the first slot of `block` that starts `need` consecutive free slots, or -1.
+/// Safety: as direntIno.
+unsafe fn freeRun(block: *mut u8, need: u32) -> i32 {
+    var run: u32 = 0;
+    for (s in 0u32..CFS_DIRENTS_PER_BLOCK) {
+        run = if (direntIno(block, s) == 0) run + 1 else 0;
+        if (run == need) {
+            return truncate<i32>(s + 1 - need);
+        }
+    }
+    return -1;
+}
+
+/// cosmofs_format.h's cfs_dirent_put: the entry for `name` (`len` bytes) at slot `s`, whose slots the caller found
+/// free.
+/// Safety: as direntIno; `name` is `len` readable bytes.
+unsafe fn direntPut(block: *mut u8, s: u32, ino: u64, kind: u32, name: *u8, len: u32) {
+    let extra = cfs_dirent_extra(len);
+    memset(block.add(s as usize * CFS_DIRENT_SIZE) as *mut void, 0, (1 + extra as usize) * CFS_DIRENT_SIZE);
+    setDirentIno(block, s, ino);
+    setDirentByte(block, s, DIRENT_TYPE, truncate<u8>(kind));
+    setDirentByte(block, s, DIRENT_NAMELEN, truncate<u8>(len));
+    setDirentByte(block, s, DIRENT_EXTRA, truncate<u8>(extra));
+    var n: u32 = 0;
+    while (n < len && n < CFS_DIRENT_HEAD_NAME) {
+        setDirentByte(block, s, DIRENT_NAME + n as usize, name.add(n as usize).read());
+        n += 1;
+    }
+    for (k in 1u32..extra + 1) {
+        setDirentIno(block, s + k, CFS_DIRENT_CONT);
+        var i: u32 = 0;
+        while (i < CFS_DIRENT_CONT_NAME && n < len) {
+            setDirentByte(block, s + k, CONT_NAME + i as usize, name.add(n as usize).read());
+            i += 1;
+            n += 1;
+        }
+    }
+}
+
+// ---- Directory blocks ----
+
+/// Read directory block `lblk` into `buf` (zeros for a hole).
+/// Safety: `fs` is a mounted filesystem's state, its lock held; `dir` a directory vnode of it; `buf` CFS_BLOCK
+/// writable bytes.
+@export("cfs_dir_read_block")
+unsafe fn dirReadBlock(fs: *mut cfs, dir: *mut vnode, lblk: u64, buf: *mut u8) -> i32 =>
+    cfs_dir_read_block_at(fs, inodeOf(dir) as *cfs_inode, lblk, buf);
+
+/// Write directory block `lblk` copy-on-write and update the inode.
+/// Safety: as dirReadBlock; `buf` CFS_BLOCK bytes.
+@export("cfs_dir_write_block")
+unsafe fn dirWriteBlock(fs: *mut cfs, dir: *mut vnode, lblk: u64, buf: *u8) -> i32 {
+    let rc = cfs_data_write_block(fs, inodeOf(dir), lblk, buf as *void, CFS_ALLOC_META);
+    if (rc != 0) {
+        return rc;
+    }
+    let d = Ptr.toBorrowMut(dir);
+    let end = (lblk + 1).wrappingMul(CFS_BLOCK);
+    if (end > d.size) {
+        d.size = end;
+    }
+    d.mtime_ns = vfs_now_ns();
+    return cfs_vnode_inode_sync(fs, dir);
+}
+
+/// The blocks a directory spans.
+/// Safety: `dir` is a vnode.
+@export("cfs_dir_blocks")
+unsafe fn dirBlocks(dir: *vnode) -> u64 => (Ptr.toBorrow(dir).size + CFS_BLOCK - 1) / CFS_BLOCK;
+
+/// Find `name`; the block index and slot, or -ENOENT.
+/// Safety: as dirReadBlock; `name` `len` bytes; `block` CFS_BLOCK writable bytes; the outs writable.
+@export("cfs_dir_find")
+unsafe fn dirFind(fs: *mut cfs, dir: *mut vnode, name: *CChar, len: usize, block: *mut u8, lblkOut: *mut u64,
+    slotOut: *mut u32) -> i32 {
+    let version = Ptr.toBorrow(fs as *cfs).sb.version;
+    if (len > CFS_NAME_MAX_LONG) {
+        return -ENAMETOOLONG;
+    }
+    if (len > CFS_NAME_MAX && version < 15) {
+        return -ENOENT; // no entry of a pool below 15 has a name this long
+    }
+    var lblk: u64 = 0;
+    while (lblk < dirBlocks(dir as *vnode)) {
+        let rc = dirReadBlock(fs, dir, lblk, block);
+        if (rc != 0) {
+            return rc;
+        }
+        let d = block as *cfs_dirent;
+        var s: u32 = 0;
+        while (s < CFS_DIRENTS_PER_BLOCK) {
+            let slots = cfs_dirent_check(d, s, version);
+            if (slots != 0) {
+                if (cfs_dirent_name_eq(d, s, name, truncate<u32>(len)) != 0) {
+                    lblkOut.write(lblk);
+                    slotOut.write(s);
+                    return 0;
+                }
+                s += slots - 1;
+            }
+            s += 1;
+        }
+        lblk += 1;
+    }
+    return -ENOENT;
+}
+
+/// Add an entry for `name`. A long name's slots are one run in one block (design.md, "Format version 15"); the caller
+/// has had cfs_names_allow say yes to `len`.
+/// Safety: as dirFind.
+@export("cfs_dir_add")
+unsafe fn dirAdd(fs: *mut cfs, dir: *mut vnode, name: *CChar, len: usize, ino: u64, kind: u32, block: *mut u8)
+    -> i32 {
+    let max = if (Ptr.toBorrow(fs as *cfs).sb.version >= 15) CFS_NAME_MAX_LONG else CFS_NAME_MAX;
+    if (len == 0 || len > max) {
+        return -ENAMETOOLONG;
+    }
+    let need = 1 + cfs_dirent_extra(truncate<u32>(len));
+    let nb = dirBlocks(dir as *vnode);
+    var lblk: u64 = 0;
+    while (lblk <= nb) {
+        if (lblk == nb) {
+            memset(block as *mut void, 0, CFS_BLOCK as usize);
+        } else {
+            let rc = dirReadBlock(fs, dir, lblk, block);
+            if (rc != 0) {
+                return rc;
+            }
+        }
+        let s = freeRun(block, need);
+        if (s >= 0) {
+            // An entry names an inode of its own tree, untagged.
+            direntPut(block, truncate<u32>(s), ino & ((1u64 << CFS_SNAP_INO_SHIFT) - 1), kind, name as *u8,
+                truncate<u32>(len));
+            return dirWriteBlock(fs, dir, lblk, block as *u8);
+        }
+        lblk += 1;
+    }
+    return -ENOSPC;
+}
+
+/// The entry at `slot`, found by cfs_dir_find: its head and continuations.
+/// Safety: as dirFind; `block` the entry's block, as cfs_dir_find left it.
+@export("cfs_dir_remove_slot")
+unsafe fn dirRemoveSlot(fs: *mut cfs, dir: *mut vnode, lblk: u64, slot: u32, block: *mut u8) -> i32 {
+    let slots = 1 + block.add(slot as usize * CFS_DIRENT_SIZE + DIRENT_EXTRA).read() as usize;
+    memset(block.add(slot as usize * CFS_DIRENT_SIZE) as *mut void, 0, slots * CFS_DIRENT_SIZE);
+    return dirWriteBlock(fs, dir, lblk, block as *u8);
+}
+
+/// Whether a directory holds no entry (false when a block cannot be read).
+/// Safety: as dirFind.
+@export("cfs_dir_is_empty")
+unsafe fn dirIsEmpty(fs: *mut cfs, dir: *mut vnode, block: *mut u8) -> bool {
+    var lblk: u64 = 0;
+    while (lblk < dirBlocks(dir as *vnode)) {
+        if (dirReadBlock(fs, dir, lblk, block) != 0) {
+            return false;
+        }
+        for (s in 0u32..CFS_DIRENTS_PER_BLOCK) {
+            if (direntIno(block, s) != 0) {
+                return false;
+            }
+        }
+        lblk += 1;
+    }
+    return true;
+}
+
+// ---- The .snapshots directory and the trees ----
+
+/// The synthetic .snapshots directory: an inode number no real inode can have, and just enough of an inode to be a
+/// directory.
+/// Safety: `fs` is a mounted filesystem's state, its lock held; `out` writable.
+@export("cfs_snapdir_get")
+unsafe fn snapdirGet(fs: *mut cfs, out: *mut *mut vnode) -> i32 {
+    let mnt = Ptr.toBorrow(fs as *cfs).mnt;
+    let cached = vnode_lookup_cached(mnt, CFS_SNAPDIR_INO);
+    if (!cached.isNull()) {
+        out.write(cached);
+        return 0;
+    }
+    let cv = kzalloc(layoutOf<cfs_vnode>().size) as *mut cfs_vnode;
+    if (cv.isNull()) {
+        return -ENOMEM;
+    }
+    let c = Ptr.toBorrowMut(cv);
+    let i = Ptr.toBorrowMut(borrow mut c.inode as *mut cfs_inode);
+    i.mode = (CFS_TYPE_DIR << 12) | 365; // 0555
+    i.nlink = 1;
+    i.ino = CFS_SNAPDIR_INO;
+    i.parent = CFS_ROOT_INO;
+    c.snap_tag = SNAPDIR_TAG;
+    let vn = vnode_alloc(mnt, CFS_SNAPDIR_INO);
+    if (vn.isNull()) {
+        kfree(cv as *mut void);
+        return -ENOMEM;
+    }
+    let v = Ptr.toBorrowMut(vn);
+    v.fs_priv = cv as *mut void;
+    cfs_fill_vnode(vn, borrow c.inode as *cfs_inode);
+    vnode_hash_insert(vn);
+    out.write(vn);
+    return 0;
+}
+
+/// The snapshot named `name` (`len` bytes, not terminated) and its tag. The tag a snapshot's vnodes carry is its id,
+/// which is never reused: a positional index would let a cached vnode be handed to a different snapshot after a
+/// deletion compacted the list.
+/// Safety: as snapdirGet; `name` `len` bytes; `out` and `tag` writable.
+@export("cfs_snap_by_name")
+unsafe fn snapByName(fs: *mut cfs, name: *CChar, len: usize, out: *mut cfs_snapshot, tag: *mut u32) -> i32 {
+    var buf = [0u8; 32];
+    if (len > CFS_SNAP_NAME_MAX) {
+        return -ENOENT;
+    }
+    memcpy(borrow mut buf as *mut [u8; 32] as *mut void, name as *void, len);
+    buf[len] = 0;
+    if (!cfs_snapshot_find(fs, borrow buf as *[u8; 32] as *CChar, out)) { // walks every list block
+        return -ENOENT;
+    }
+    let id = Ptr.toBorrow(out as *cfs_snapshot).id;
+    if (id == 0 || id > CFS_SNAP_ID_MAX) {
+        return -EIO;
+    }
+    tag.write(truncate<u32>(id));
+    return 0;
+}
+
+/// Whether `vn` is the .snapshots directory.
+/// Safety: `vn` is a vnode.
+@export("cfs_is_snapdir")
+unsafe fn isSnapdir(vn: *mut vnode) -> bool {
+    let cv = cvOf(vn);
+    return !cv.isNull() && Ptr.toBorrow(cv as *cfs_vnode).snap_tag == SNAPDIR_TAG;
+}
+
+/// The tag of the tree `vn` is in: a snapshot's or a clone's id, or 0 for the live tree (and .snapshots).
+/// Safety: `vn` is a vnode.
+@export("cfs_snap_tag_of")
+unsafe fn snapTagOf(vn: *mut vnode) -> u32 {
+    let cv = cvOf(vn);
+    if (cv.isNull()) {
+        return 0;
+    }
+    let tag = Ptr.toBorrow(cv as *cfs_vnode).snap_tag;
+    return if (tag != SNAPDIR_TAG) tag else 0;
+}
+
+/// The tree an operation on `vn` writes: the live tree, or a clone, which it enters for the length of the operation
+/// (cosmofs_clone.cee). A vnode of a snapshot is read-only, and so is one of a clone since deleted.
+/// Safety: `fs` is a mounted filesystem's state, its lock not held; `vn` a vnode of it.
+@export("cfs_tree_readonly")
+unsafe fn treeReadonly(fs: *mut cfs, vn: *mut vnode) -> bool {
+    if (isSnapdir(vn)) {
+        return true;
+    }
+    let tag = snapTagOf(vn);
+    if (tag == 0) {
+        return false;
+    }
+    let lock = borrow mut Ptr.toBorrowMut(fs).lock as *mut mutex;
+    mutex_lock(lock);
+    let clone = !cfs_clone_by_id(fs, tag as u64).isNull();
+    mutex_unlock(lock);
+    return !clone;
+}
+
+/// The tree an operation that writes on `vn` takes, under the one hold that enters the clone; -EROFS (and the lock
+/// not held) for a vnode whose tree is not writable -- .snapshots, a snapshot, or a clone deleted since the vnode was
+/// found. Deciding it here and not before taking the lock is what keeps a write racing a clone's deletion off the live
+/// tree, whose inode numbers a clone's share.
+/// Safety: as treeReadonly.
+@export("cfs_lock_tree_w")
+unsafe fn lockTreeW(fs: *mut cfs, vn: *mut vnode) -> i32 {
+    if (isSnapdir(vn)) {
+        return -EROFS;
+    }
+    let lock = borrow mut Ptr.toBorrowMut(fs).lock as *mut mutex;
+    mutex_lock(lock);
+    let tag = snapTagOf(vn);
+    if (tag == 0) {
+        return 0;
+    }
+    let c = cfs_clone_by_id(fs, tag as u64);
+    if (c.isNull()) {
+        mutex_unlock(lock);
+        return -EROFS;
+    }
+    cfs_clone_enter(fs, c);
+    return 0;
+}
+
+/// Leave the tree cfs_lock_tree_w took.
+/// Safety: `fs` is a mounted filesystem's state, its lock held by cfs_lock_tree_w.
+@export("cfs_unlock_tree")
+unsafe fn unlockTree(fs: *mut cfs) {
+    cfs_clone_leave(fs);
+    mutex_unlock(borrow mut Ptr.toBorrowMut(fs).lock as *mut mutex);
+}
