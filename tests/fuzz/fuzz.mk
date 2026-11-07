@@ -48,7 +48,8 @@ FUZZ_FBVALID_SRCS := tests/fuzz/fuzz_fbvalid.c kernel/core/fbvalid.c kernel/cees
 FUZZ_CPUTIME_SRCS := tests/fuzz/fuzz_cputime.c kernel/process/cputime.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c $(FUZZ_DRIVER)
 FUZZ_GPT_SRCS := tests/fuzz/fuzz_gpt.c kernel/block/gpt.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c $(FUZZ_DRIVER)
 FUZZ_COSMOFS_SRCS := tests/fuzz/fuzz_cosmofs.c tests/fuzz/shim_fs.c \
-	kernel-services/filesystem/cosmofs/cosmofs_core.c kernel-services/filesystem/cosmofs/cosmofs.c \
+	kernel-services/filesystem/cosmofs/cosmofs_core.c kernel-services/filesystem/cosmofs/cosmofs_core_floor.c \
+	kernel-services/filesystem/cosmofs/cosmofs.c \
 	kernel-services/filesystem/cosmofs/cosmofs_buf.c kernel-services/filesystem/cosmofs/cosmofs_buf_floor.c \
 	kernel-services/filesystem/cosmofs/cosmofs_alloc.c kernel-services/filesystem/cosmofs/cosmofs_commit.c \
 	kernel-services/filesystem/cosmofs/cosmofs_commit_floor.c \

@@ -1,5 +1,5 @@
 /*
- * test_cfscore.c - cosmofs's mount and unmount (kernel-services/filesystem/cosmofs/cosmofs_core.c) on the host:
+ * test_cfscore.c - cosmofs's mount and unmount (kernel-services/filesystem/cosmofs/cosmofs_core.cee) on the host:
  * roadmap 2.0 SA7. A digest recorded from the C over mounts of pools the test makes: two superblock slots of every
  * shape (missing, not a superblock, of a version this kernel does not read, refusing to authenticate, locked, another
  * pool's key), a device behind a newer member 0 that is or is not mounted, pools in the clear, version-1 encrypted
@@ -32,6 +32,33 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* The values the CeeSafe port writes as its own constants. */
+_Static_assert(EIO == 5 && EAGAIN == 11 && ENOMEM == 12 && EBUSY == 16 && ENOTDIR == 20 && EINVAL == 22 &&
+                   ENOKEY == 126 && EKEYREJECTED == 129,
+               "cosmofs_core's errno.h values");
+_Static_assert(VNODE_HASH == 64 && MOUNT_RDONLY == 1 && MOUNT_DETACHED == 8 && MOUNT_STATE_DEGRADED == 1 &&
+                   SCHED_PRIO_DEFAULT == 32,
+               "cosmofs_core's vfs.h and thread.h values");
+_Static_assert(COSMO_FSCTL_STAGE_SUPER == 1 && COSMO_FSCTL_STAGE_MEMBERS == 2 && COSMO_FSCTL_STAGE_BITMAP == 3 &&
+                   COSMO_FSCTL_STAGE_FREE_RECORD == 4 && COSMO_FSCTL_STAGE_SNAPSHOTS == 5 &&
+                   COSMO_FSCTL_STAGE_ROLLBACK == 6 && COSMO_FSCTL_STAGE_ORPHAN_RECORD == 7 &&
+                   COSMO_FSCTL_STAGE_ROOT == 8,
+               "cosmofs_core's fsctl.h stages");
+_Static_assert(CFS_BLOCK == 4096 && CFS_MHDR_SIZE == 32 && CFS_BITS_PER_BITMAP == 32512 && CFS_SUPER_A == 0 &&
+                   CFS_SUPER_B == 1 && CFS_VERSION_MIN == 2 && CFS_VERSION == 15 && CFS_ROOT_INO == 1 &&
+                   CFS_TYPE_DIR == 2 && CFS_KIND_ALLOCIDX == 4 && CFS_KIND_BITMAP == 5 && CFS_KIND_KEYS == 12 &&
+                   CFS_LABEL_MAX == 16 && CFS_DVA_VDEV_SHIFT == 56 && CFS_WB_POLL_MS == 50 &&
+                   CFS_WB_DIRTY_BUFS == 64 && CFS_WB_PENDING == 512 && CFS_WB_DIRTY_PAGES == 256 &&
+                   CFS_WB_INTERVAL_MS == 5000 && CHACHA20_KEY_SIZE == 32,
+               "cosmofs_core's cosmofs_format.h and cosmofs_internal.h values");
+_Static_assert(sizeof(((struct cfs *)0)->pool_name) == 17 && sizeof(((struct cfs *)0)->master_key) == 32 &&
+                   sizeof(((struct cfs_mac *)0)->key) == 32 && sizeof(bool) == 1,
+               "cosmofs_core.cee's arrays");
+/* cosmofs_core.cee keeps a superblock in a stack slot of 21 words, a MAC key in one of 5 and an inode in one of 32. */
+_Static_assert(sizeof(struct cfs_super) <= 21 * 8 && sizeof(struct cfs_mac) <= 5 * 8 &&
+                   sizeof(struct cfs_inode) <= 32 * 8,
+               "cosmofs_core.cee's stack slots");
 
 /* The digest of the C (cosmofs_core.c, 2026-11-07), which the CeeSafe port gives. */
 #define CORE_DIGEST 0x25fe84ab2d7cdbbfull

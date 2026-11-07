@@ -1425,6 +1425,23 @@ a filesystem, of every version, mirrored or not, encrypted or not
 (0x677b20b102df3691, clang and gcc; every line and branch).
 `cosmofs_hooks_floor.c` keeps the three hooks whose fields only a debug
 or self-test build's struct cfs has.
+`cosmofs_core.cee`, the seventh, mount and unmount, the writeback thread
+and the first-change mark -- what was left of `cosmofs_core.c`:
+`tests/host/test_cfscore.c` mounts pools whose superblock slots take
+every shape, behind a newer member 0 or not, in the clear and encrypted
+at versions 1 and 14, over several members, with rollback switches that
+fail and roots that fall back or are not directories, then commits, runs
+the writeback thread, writes pages back and unmounts, while every stage
+and kmalloc fail (0x25fe84ab2d7cdbbf, clang and gcc; every line and
+branch that can be reached -- not a committer before the mount is live,
+which is the invariant, nor a bitmap chunk past its member's span).
+`cosmofs_core_floor.c` keeps the fs_type table and `cosmofs_init`, the
+walk of the vnode hash under its spinlock, and the lock assertion only a
+lockdep build makes. `tools/p3-residue-probe.py`'s freecount defect now
+moves the comparison in the `.cee`; `tools/analyzer-fix-probe.py`'s old
+mode for its cosmofs cases fails to compile its baseline against today's
+headers, as it did on `origin/main` before this (to be mended with the
+extent-fail probe once `cosmofs.c` is ported).
 
 Size: about 4.5x.
 

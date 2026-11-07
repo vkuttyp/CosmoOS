@@ -18,7 +18,11 @@
 
 --old reverse-applies, newest first, the defect's commits (the fix, and
 for zero and wget #413's review commit that reworked it) on the defect's
-sources and nothing else, in a throwaway worktree, so the check fails.
+sources and nothing else, in a throwaway worktree, so the check fails. A
+source that has since become CeeSafe has no C for the diff to apply to:
+freecount's mount is cosmofs_core.cee (roadmap 2.0 SA7), so where the tree
+has it, --old instead moves the comparison back after the replay, which is
+what the fix's diff undoes.
 Each commit is found by its subject, which --grep matches anywhere in a
 message (a squashed merge's body lists them); failing that, --tree's own
 commit when it changes the sources; or name them with --fix (repeatable,
@@ -55,8 +59,34 @@ DEFECTS = {
         subjects=["cosmofs: compare the free count with the bitmap before the free-log replay"],
         sources=["kernel-services/filesystem/cosmofs/cosmofs_core.c"],
         target="test-install", ok="test-install: PASS",
-        failed="the installed root's first mount: the mount warned 'cosmofs: free block count"),
+        failed="the installed root's first mount: the mount warned 'cosmofs: free block count",
+        cee="kernel-services/filesystem/cosmofs/cosmofs_core.cee"),
 }
+
+# freecount in cosmofs_core.cee: the comparison of the free counts, taken out from before the replay of the free
+# record and put back after it.
+FREECOUNT_COMPARE = """    if (f.free_blocks != f.sb.free_blocks) {
+        var buffer = [0u8; 160];
+        var line = TextWriter.create(mut buffer[..]);
+        line.text("cosmofs: free block count ");
+        line.decimal(f.free_blocks);
+        line.text(" differs from the superblock's ");
+        line.decimal(f.sb.free_blocks);
+        line.text("; using the bitmap");
+        KernelLog.send(LogLevel.Warn, line);
+    }
+"""
+FREECOUNT_REPLAY = "    return cfs_freelog_replay(fs);\n"
+FREECOUNT_OLD = ("    let replayed = cfs_freelog_replay(fs);\n"
+                 "    if (replayed != 0) {\n        return replayed;\n    }\n" + FREECOUNT_COMPARE + "    return 0;\n")
+
+
+def freecount_old(path):
+    """The mount as it was before the fix: the free counts compared after the replay."""
+    text = path.read_text()
+    if text.count(FREECOUNT_COMPARE) != 1 or text.count(FREECOUNT_REPLAY) != 1:
+        sys.exit(f"{path}: the comparison or the replay is not where this probe expects it")
+    path.write_text(text.replace(FREECOUNT_COMPARE, "").replace(FREECOUNT_REPLAY, FREECOUNT_OLD))
 
 
 def main():
@@ -80,7 +110,9 @@ def main():
     subprocess.run(["git", "-C", str(ROOT), "worktree", "add", "--detach", str(tree), a.tree], check=True,
                    stdout=subprocess.DEVNULL)
     try:
-        if a.old:
+        if a.old and (tree / d.get("cee", "-")).is_file():
+            freecount_old(tree / d["cee"])
+        elif a.old:
             shas = a.fix
             if not shas:
                 found = [subprocess.check_output(

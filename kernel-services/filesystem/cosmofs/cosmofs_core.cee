@@ -1,0 +1,1277 @@
+// cosmofs_core.cee - Mount and unmount, the writeback thread and the open transaction's first change, in CeeSafe:
+// roadmap 2.0 SA7. tests/host/test_cfscore.c holds it to the digest of the C it replaced.
+//
+// Rules (docs/kernel-services/vfs/design.md): a metadata block from a committed generation is never modified in place;
+// the in-memory bitmap is authoritative during a transaction and its chunks are written at commit through a
+// reserve-then-write fixpoint; blocks freed in a transaction become allocatable only after that transaction's root is
+// on disk.
+//
+// struct cfs, the pool, the superblock, the mount and the vnodes stay C (cosmofs_internal.h, kernel/storage.h,
+// kernel/vfs.h). What the C kept on the stack -- two superblocks, a MAC key, an inode -- is kept in zeroed slots of
+// words, checked against their C sizes (tests/host/test_cfscore.c): a CeeSafe local cannot hold C state.
+// cosmofs_core_floor.c keeps the fs_type table and its registration, the walk of the VFS's vnode hash under its
+// spinlock, whose list and reference count are inline functions of kernel/vfs.h, and the lock assertion only a lockdep
+// build makes.
+
+@header("kernel/blk.h", "kernel/vfs.h", "kernel/storage.h", "kernel/kmalloc.h", "kernel/string.h", "kernel/thread.h",
+    "kernel/timer.h", "kernel/lockdep.h", "kernel/fwcfg.h", "kernel/cosmofs.h", "uapi/cosmo/fsctl.h",
+    "cosmofs_internal.h")
+extern "C" {
+    struct thread;
+    struct blkdev {
+        obj: kobject;
+        name: [u8; 16];
+    }
+    struct fs_type {
+        name: *CChar;
+    }
+    struct vnode {
+        lock: mutex;
+    }
+    struct vfs_statfs {
+        bsize: u32;
+        blocks: u64;
+        bfree: u64;
+        bavail: u64;
+    }
+    struct mount {
+        root: *mut vnode;
+        fs_priv: *mut void;
+        state: u32;
+        sync_lock: mutex;
+        cache_dirty: u64;
+        unmounted: bool;
+    }
+    struct spool_member {
+        nblocks: u64;
+    }
+    struct spool {
+        m: *mut spool_member;
+        state_seq: u64;
+        name: *CChar;
+        notify: extern "C" fn(*mut void);
+        notify_arg: *mut void;
+    }
+    struct cfs_mac {
+        on: bool;
+        key: [u8; 32];
+    }
+    struct cfs_super {
+        magic: [u8; 8];
+        version: u32;
+        total_blocks: u64;
+        generation: u64;
+        inode_count: u64;
+        free_blocks: u64;
+        uuid: [u8; 16];
+        key_root: u64;
+        rollback_root: u64;
+        label: [u8; 16];
+    }
+    struct cfs_memstate {
+        nblocks: u64;
+        first_usable: u64;
+        base: u64;
+        chunk0: u32;
+        nchunks: u32;
+        alloc_root: u64;
+        free_blocks: u64;
+        alloc_hint: u64;
+    }
+    struct cfs_buf {
+        link: list_node;
+        data: *mut u8;
+    }
+    struct cfs {
+        pool: *mut spool;
+        mnt: *mut mount;
+        sb: cfs_super;
+        sb_slot: u32;
+        gen: u64;
+        nblocks: u64;
+        bitmap: *mut u8;
+        bitmap_dirty: *mut u8;
+        nr_chunks: u32;
+        free_blocks: u64;
+        alloc_hint: u64;
+        mem: *mut cfs_memstate;
+        nmembers: u32;
+        pending_free: *mut u64;
+        nr_pending: u32;
+        pending_exempt: *mut u64;
+        nr_exempt: u32;
+        orphans: *mut u64;
+        nr_orphans: u32;
+        bufs: list_node;
+        nr_bufs: u32;
+        nr_dirty: u32;
+        lock: mutex;
+        discard_on_unmount: bool;
+        rollback_off: bool;
+        rollback_failed: bool;
+        failed: i32;
+        rdonly: bool;
+        replay_freed: u32;
+        replay_orphans: u32;
+        load_stage: u32;
+        rollback_switched: bool;
+        rollback_error: i32;
+        fell_back: bool;
+        reserve: u64;
+        encrypted: bool;
+        have_key: bool;
+        master_key: [u8; 32];
+        mac: cfs_mac;
+        key_held: bool;
+        copystate_seq: u64;
+        pool_name: [u8; 17];
+        snap_count: u32;
+        wb_thread: *mut thread;
+        wb_stop: bool;
+        maint: bool;
+        wb_enabled: bool;
+        wb_interval_ms: u32;
+        first_dirty_ns: u64;
+        wb_commits: u64;
+        mount_done: bool;
+        mount_dirty_notes: u64;
+        wb_early: u64;
+    }
+    struct cfs_inode {
+        mode: u32;
+    }
+    struct cfs_snapshot {
+        id: u64;
+    }
+    struct cfs_keys2 {
+        version: u32;
+        uuid: [u8; 16];
+    }
+
+    fn pool_open(bd: *mut blkdev, out: *mut *mut spool) -> i32;
+    fn pool_close(p: *mut spool);
+    fn pool_read(p: *mut spool, dva: u64, buf: *mut void) -> i32;
+    fn pool_commit_done(p: *mut spool, gen: u64);
+    fn pool_degraded(p: *spool) -> bool;
+    fn cfs_super_shape_ok(sb: *cfs_super, dev0: u64) -> bool;
+    fn cfs_super_verify(block: *void, mac: *mut cfs_mac) -> i32;
+    fn cfs_super_peek_ok(block: *void) -> bool;
+    fn cfs_newer_member0(bd: *mut blkdev, uuid: *u8, gen: u64, newerGen: *mut u64) -> *mut blkdev;
+    fn cfs_members_load(fs: *mut cfs) -> i32;
+    fn cfs_members_free(fs: *mut cfs);
+    fn cfs_keytab_take(uuid: *u8, hold: bool, master: *mut u8) -> i32;
+    fn cfs_keytab_release(uuid: *u8);
+    fn cfs_keys_load(fs: *mut cfs, key: *void, len: usize) -> i32;
+    fn cfs_buf_get(fs: *mut cfs, blkno: u64, kind: u32, out: *mut *mut cfs_buf) -> i32;
+    fn cfs_buf_put(fs: *mut cfs, b: *mut cfs_buf);
+    fn cfs_freelog_replay(fs: *mut cfs) -> i32;
+    fn cfs_snapshot_list(fs: *mut cfs, out: *mut cfs_snapshot, max: u32, count: *mut u32) -> i32;
+    fn cfs_clones_load(fs: *mut cfs) -> i32;
+    fn cfs_clones_free(fs: *mut cfs);
+    fn cfs_rollback_at_mount(fs: *mut cfs, switched: *mut bool) -> i32;
+    fn cfs_inode_read(fs: *mut cfs, ino: u64, out: *mut cfs_inode) -> i32;
+    fn cfs_orphan_replay(fs: *mut cfs) -> i32;
+    fn cfs_vnode_get(fs: *mut cfs, ino: u64, out: *mut *mut vnode) -> i32;
+    fn cfs_holds_sync(fs: *mut cfs);
+    fn cfs_resilver_mount(fs: *mut cfs);
+    fn cfs_resilver_stop(fs: *mut cfs);
+    fn cfs_commit_ex(fs: *mut cfs, published: *mut bool) -> i32;
+    fn cfs_lin_dva(fs: *cfs, lin: u64) -> u64;
+    fn vfs_bdev_mounted(bd: *blkdev) -> bool;
+    fn fwcfg_get_string(key: *CChar, buf: *mut CChar, len: usize) -> bool;
+    fn vnode_put(vn: *mut vnode);
+    fn pagecache_sync(vn: *mut vnode) -> i32;
+    fn thread_create(entry: extern "C" fn(*mut void), arg: *mut void, name: *CChar, priority: i32) -> *mut thread;
+    fn thread_join(t: *mut thread) -> i32;
+    fn kzalloc(size: usize) -> *mut void;
+    fn mutex_trylock(m: *mut mutex) -> bool;
+    fn thread_sleep_ns(ns: u64);
+    fn clock_now_ns() -> u64;
+    fn clock_since_ns(stamp: u64) -> u64;
+    fn strlen(s: *CChar) -> usize;
+    fn strlcpy(dst: *mut CChar, src: *CChar, size: usize) -> usize;
+    fn memcmp(a: *void, b: *void, n: usize) -> i32;
+    fn memcpy(dst: *mut void, src: *void, n: usize) -> *mut void;
+    fn memset(p: *mut void, c: i32, n: usize) -> *mut void;
+    /// cosmofs_core_floor.c: the next hashed regular file of bucket `b` with dirty pages, referenced; or null.
+    fn cfs_core_floor_dirty_vnode(mnt: *mut mount, b: u32) -> *mut vnode;
+    /// cosmofs_core_floor.c: lockdep_assert_held(&fs->lock, LOCKDEP_KIND_MUTEX), which only a lockdep build makes.
+    fn cfs_core_floor_assert_held(fs: *mut cfs);
+}
+
+// ---- errno.h, vfs.h, thread.h, lockdep.h, fsctl.h, cosmofs_format.h and cosmofs_internal.h values (asserted in
+// tests/host/test_cfscore.c) ----
+
+const EIO: i32 = 5;
+const EAGAIN: i32 = 11;
+const ENOMEM: i32 = 12;
+const EBUSY: i32 = 16;
+const ENOTDIR: i32 = 20;
+const EINVAL: i32 = 22;
+const ENOKEY: i32 = 126;
+const EKEYREJECTED: i32 = 129;
+const VNODE_HASH: u32 = 64;
+const MOUNT_RDONLY: u32 = 1;
+const MOUNT_DETACHED: u32 = 8;
+const MOUNT_STATE_DEGRADED: u32 = 1;
+const SCHED_PRIO_DEFAULT: i32 = 32;
+const STAGE_SUPER: u32 = 1;
+const STAGE_MEMBERS: u32 = 2;
+const STAGE_BITMAP: u32 = 3;
+const STAGE_FREE_RECORD: u32 = 4;
+const STAGE_SNAPSHOTS: u32 = 5;
+const STAGE_ROLLBACK: u32 = 6;
+const STAGE_ORPHAN_RECORD: u32 = 7;
+const STAGE_ROOT: u32 = 8;
+const CFS_BLOCK: usize = 4096;
+const CFS_MHDR_SIZE: usize = 32;
+const CFS_BITS_PER_BITMAP: u64 = 32512;
+const CFS_SUPER_A: u32 = 0;
+const CFS_SUPER_B: u32 = 1;
+const CFS_VERSION_MIN: u32 = 2;
+const CFS_VERSION: u32 = 15;
+const CFS_ROOT_INO: u64 = 1;
+const CFS_TYPE_DIR: u32 = 2;
+const CFS_KIND_ALLOCIDX: u32 = 4;
+const CFS_KIND_BITMAP: u32 = 5;
+const CFS_KIND_KEYS: u32 = 12;
+const CFS_LABEL_MAX: usize = 16;
+const CFS_DVA_VDEV_SHIFT: u32 = 56;
+const CFS_WB_POLL_MS: u64 = 50;
+const CFS_WB_DIRTY_BUFS: u32 = 64;
+const CFS_WB_PENDING: u32 = 512;
+const CFS_WB_DIRTY_PAGES: u64 = 256;
+const CFS_WB_INTERVAL_MS: u32 = 5000;
+/// The magic a superblock starts with: "COSMOFS1".
+const CFS_MAGIC: StringView = "COSMOFS1";
+/// Failed mounts remembered, by device.
+const CFS_FAIL_NOTES: u32 = 8;
+
+// ---- Helpers ----
+
+/// Safety: `fs` is a filesystem's state.
+unsafe fn fsOf(fs: *mut cfs) -> borrow mut(static) cfs => Ptr.toBorrowMut(fs);
+
+/// Safety: `fs` is a filesystem's state.
+unsafe fn lockOf(fs: *mut cfs) -> *mut mutex => borrow mut fsOf(fs).lock as *mut mutex;
+
+/// The writeback thread's stop flag, read and written as an atomic.
+/// Safety: `fs` is a filesystem's state.
+unsafe fn stopOf(fs: *mut cfs) -> borrow(static) AtomicBool =>
+    Ptr.toBorrow(borrow mut fsOf(fs).wb_stop as *mut bool as *AtomicBool);
+
+/// Safety: `node` is a buffer's link.
+unsafe fn bufOfLink(node: *mut list_node) -> *mut cfs_buf => containerOf(node, offsetOf<cfs_buf>(link)) as *mut cfs_buf;
+
+/// Safety: `map` holds bit `i`.
+unsafe fn bitTest(map: *mut u8, i: u64) -> bool => (map.add((i >> 3) as usize).read() >> truncate<u8>(i & 7)) & 1 != 0;
+
+/// Safety: as bitTest.
+unsafe fn bitSet(map: *mut u8, i: u64) {
+    let at = map.add((i >> 3) as usize);
+    at.write(at.read() | (1u8 << truncate<u8>(i & 7)));
+}
+
+/// Safety: `s` holds a terminated string.
+unsafe fn cText(line: borrow mut TextWriter, s: *CChar) { line.bytes(Slice.fromRaw(s as *u8, strlen(s))); }
+
+/// Safety: `bd` is a device.
+unsafe fn devName(bd: *mut blkdev) -> *CChar => borrow Ptr.toBorrow(bd as *blkdev).name as *[u8; 16] as *CChar;
+
+/// Safety: `fs` is a filesystem's state.
+unsafe fn poolName(fs: *mut cfs) -> *CChar => borrow fsOf(fs).pool_name as *[u8; 17] as *CChar;
+
+/// `v` in octal, as printf's %o.
+fn octal(line: borrow mut TextWriter, v: u32) {
+    var digits = [0u8; 11];
+    var n: usize = 0;
+    var x = v;
+    while (n == 0 || x != 0) {
+        digits[n] = 48 + truncate<u8>(x & 7);
+        x >>= 3;
+        n += 1;
+    }
+    while (n > 0) {
+        n -= 1;
+        line.bytes(digits[n..n + 1]);
+    }
+}
+
+/// Copy a superblock.
+/// Safety: both are struct cfs_super.
+unsafe fn superCopy(to: *mut cfs_super, from: *cfs_super) {
+    memcpy(to as *mut void, from as *void, layoutOf<cfs_super>().size);
+}
+
+/// cosmofs_format.h's cfs_super_is_mac: a version-14 pool with a key block MACs its superblock.
+fn superIsMac(sb: borrow cfs_super) -> bool => sb.version >= 14 && sb.key_root != 0;
+
+// ---- The open transaction's first change ----
+
+/// The open transaction just became (or stayed) non-empty. The writeback thread starts here, on the first change, so a
+/// mount that only reads (the replay harness mounts hundreds of prefix images) never has one to join at unmount.
+///
+/// Not before the mount is live, though. A mount's replay dirties buffers (the freelog reclaim and the orphan replay
+/// both do) and it does that with fs->lock unheld, because until cosmofs_mount returns nobody else has the filesystem.
+/// A thread started here would falsify that: it takes only the mount's sync lock, which the mount path does not hold,
+/// finds mnt->unmounted false, and commits a half-built mount from the other side of an unlocked fs->bufs. That is a
+/// second writer on an intrusive list, and it showed up as a metadata block that would not verify and, on x86_64, as a
+/// null dereference in list_remove under a commit the writeback thread ran while the mount was still replaying. The
+/// same window is why a failed mount could reach cfs_destroy, which frees every buffer and fs itself, with that thread
+/// still running.
+///
+/// So the rule is: no autonomous committer before the mount is live. cosmofs_mount sets mount_done and calls back here,
+/// which starts the thread then if the replay left anything dirty.
+/// Safety: `fs` is a filesystem's state.
+@export("cfs_note_dirty")
+unsafe fn noteDirty(fs: *mut cfs) {
+    let f = fsOf(fs);
+    if (f.first_dirty_ns == 0) {
+        f.first_dirty_ns = clock_now_ns();
+    }
+    // A read-only mount never commits, so it has nothing for a committer to do: its replay's changes stay in memory
+    // (CFS-1).
+    if (f.wb_thread.isNull() && f.wb_enabled && !f.wb_stop && !f.mnt.isNull() && f.mount_done && !f.rdonly) {
+        f.wb_thread = thread_create(wbThread, fs as *mut void, "cfs-wb\0".ptr as *CChar, SCHED_PRIO_DEFAULT);
+        if (f.wb_thread.isNull()) {
+            f.wb_enabled = false;
+            KernelLog.write(LogLevel.Warn,
+                "cosmofs: no writeback thread; commits happen on sync, fsync and unmount only");
+        }
+    }
+    // The invariant, counted rather than asserted: whether such a thread wins the race is timing, but whether it
+    // exists at all is not, and that is what cosmofs-mount-no-early-writeback reads.
+    if (!f.mount_done) {
+        f.mount_dirty_notes = f.mount_dirty_notes.wrappingAdd(1);
+        if (!f.wb_thread.isNull()) {
+            f.wb_early = f.wb_early.wrappingAdd(1);
+        }
+    }
+}
+
+// ---- The page cache's write-back ----
+
+/// Write back every dirty page of every cached regular file. Called with no cfs lock held (writepage takes it).
+/// Safety: `fs` is a mounted filesystem's state.
+@export("cfs_sync_vnodes")
+unsafe fn syncVnodes(fs: *mut cfs) -> i32 {
+    let mnt = fsOf(fs).mnt;
+    var rc: i32 = 0;
+    for (b in 0u32..VNODE_HASH) {
+        while (true) {
+            let vn = cfs_core_floor_dirty_vnode(mnt, b);
+            if (vn.isNull()) {
+                break;
+            }
+            let lock = borrow mut Ptr.toBorrowMut(vn).lock as *mut mutex;
+            mutex_lock(lock);
+            let r = pagecache_sync(vn);
+            mutex_unlock(lock);
+            vnode_put(vn);
+            if (r != 0) {
+                rc = r;
+                break;
+            }
+        }
+    }
+    return rc;
+}
+
+// ---- Mount / unmount ----
+
+/// Superblock slot `slot` into `out`, checked for shape and then for its seal; its MAC key, if any, kept in fs.
+/// Safety: `fs` has an open pool; `out` writable.
+unsafe fn superRead(fs: *mut cfs, slot: u32, out: *mut cfs_super) -> i32 {
+    let block = kmalloc(CFS_BLOCK, 0) as *mut u8;
+    if (block.isNull()) {
+        return -ENOMEM;
+    }
+    var rc = pool_read(fsOf(fs).pool, slot as u64, block as *mut void);
+    if (rc == 0) {
+        let sbp = block as *cfs_super;
+        let sb = Ptr.toBorrow(sbp);
+        // Version 2 mounts unchanged: snapshots only use fields it already reserved, and its snap_root is 0 (no
+        // snapshots).
+        let versionOk = sb.version >= CFS_VERSION_MIN && sb.version <= CFS_VERSION;
+        if (memcmp(borrow sb.magic as *[u8; 8] as *void, CFS_MAGIC.ptr as *void, 8) == 0 && !versionOk &&
+            sb.version != 0) {
+            var buffer = [0u8; 160];
+            var line = TextWriter.create(mut buffer[..]);
+            line.text("cosmofs: slot ");
+            line.decimal(slot as u64);
+            line.text(" is format version ");
+            line.decimal(sb.version as u64);
+            line.text("; this kernel reads versions ");
+            line.decimal(CFS_VERSION_MIN as u64);
+            line.text(" to ");
+            line.decimal(CFS_VERSION as u64);
+            line.text(" (reformat)");
+            KernelLog.send(LogLevel.Error, line);
+        }
+        // The member table is not read yet -- it is named by this very block -- so a pointer can only be checked for
+        // shape here. What it actually addresses is checked when it is read: every metadata block carries its own DVA
+        // (mhdr_check). Before version 4 there is one member and the old exact checks hold.
+        let dev0 = Ptr.toBorrow(Ptr.toBorrow(fsOf(fs).pool as *spool).m as *spool_member).nblocks;
+        // The seal last: a slot that is not a superblock at all is -EIO whether or not a key is loaded, and only one
+        // that is a version-14 encrypted pool's says -ENOKEY (design.md, "The key handle"). Its MAC key comes with
+        // it.
+        var macSlot = [0u64; 5];
+        let mac = borrow mut macSlot as *mut [u64; 5] as *mut cfs_mac;
+        if (!cfs_super_shape_ok(sbp, dev0)) {
+            rc = -EIO; // cfsparse: magic, version, geometry, pointers' shape
+        } else {
+            rc = cfs_super_verify(block as *void, mac);
+        }
+        // Said once per slot read: the test of the MAC domains (make test-encrypt) and an operator both need to know
+        // which slot a mount refused and why.
+        if (rc == -EIO && superIsMac(sb) && versionOk) {
+            var buffer = [0u8; 160];
+            var line = TextWriter.create(mut buffer[..]);
+            line.text("cosmofs: superblock slot ");
+            line.decimal(slot as u64);
+            line.text(" (generation ");
+            line.decimal(sb.generation);
+            line.text(") does not authenticate");
+            KernelLog.send(LogLevel.Error, line);
+        }
+        if (rc == 0) {
+            superCopy(out, sbp);
+            let m = Ptr.toBorrow(mac as *cfs_mac);
+            let f = fsOf(fs);
+            if (m.on && !f.mac.on) {
+                memcpy(borrow mut f.mac as *mut cfs_mac as *mut void, mac as *void, layoutOf<cfs_mac>().size);
+            } else if (m.on != f.mac.on ||
+                (m.on && memcmp(borrow m.key as *[u8; 32] as *void, borrow f.mac.key as *[u8; 32] as *void, 32) != 0)) {
+                rc = -EIO; // the other slot was another pool's: slots_disagree's case, refused here
+            }
+        }
+        memset(mac as *mut void, 0, layoutOf<cfs_mac>().size);
+    }
+    kfree(block as *mut void);
+    return rc;
+}
+
+/// The allocation bitmap from every member's chunks, then the replay of what the last commit freed.
+/// Safety: `fs` is a mounting filesystem's state, its members loaded.
+unsafe fn loadBitmap(fs: *mut cfs) -> i32 {
+    let f = fsOf(fs);
+    // fs->nblocks and fs->nr_chunks describe the linear space the members were laid out in (cfs_members_load).
+    f.bitmap = kzalloc(((f.nblocks + 7) / 8) as usize) as *mut u8;
+    f.bitmap_dirty = kzalloc(f.nr_chunks as usize) as *mut u8;
+    if (f.bitmap.isNull() || f.bitmap_dirty.isNull()) {
+        return -ENOMEM;
+    }
+    var rc: i32 = 0;
+    var free: u64 = 0;
+    var v: u32 = 0;
+    while (v < f.nmembers && rc == 0) {
+        let m = Ptr.toBorrowMut(f.mem.add(v as usize));
+        var idx = 0 as *mut cfs_buf;
+        rc = cfs_buf_get(fs, m.alloc_root, CFS_KIND_ALLOCIDX, borrow mut idx as *mut *mut cfs_buf);
+        if (rc != 0) {
+            break;
+        }
+        let slots = Slice.fromRaw(Ptr.toBorrow(idx as *cfs_buf).data as *u8, CFS_BLOCK);
+        var c: u32 = 0;
+        while (c < m.nchunks && rc == 0) {
+            var bm = 0 as *mut cfs_buf;
+            rc = cfs_buf_get(fs, ByteOrder.readU64LE(slots, CFS_MHDR_SIZE + c as usize * 8), CFS_KIND_BITMAP,
+                borrow mut bm as *mut *mut cfs_buf);
+            if (rc != 0) {
+                break;
+            }
+            let bytes = (CFS_BITS_PER_BITMAP / 8) as usize;
+            let off = m.chunk0.wrappingAdd(c) as usize * bytes;
+            let total = ((f.nblocks + 7) / 8) as usize;
+            let n = if (off + bytes <= total) bytes else total - off;
+            memcpy(f.bitmap.add(off) as *mut void, Ptr.toBorrow(bm as *cfs_buf).data.add(CFS_MHDR_SIZE) as *void, n);
+            cfs_buf_put(fs, bm);
+            c += 1;
+        }
+        cfs_buf_put(fs, idx);
+        if (rc != 0) {
+            break;
+        }
+        // The tail of a member's last chunk addresses nothing: mark it taken so the allocator can never reach it.
+        for (b in m.nblocks..m.nchunks as u64 * CFS_BITS_PER_BITMAP) {
+            bitSet(f.bitmap, m.base + b);
+        }
+        var mfree: u64 = 0;
+        for (b in m.first_usable..m.nblocks) {
+            if (!bitTest(f.bitmap, m.base + b)) {
+                mfree += 1;
+            }
+        }
+        m.free_blocks = mfree;
+        m.alloc_hint = m.first_usable;
+        free += mfree;
+        v += 1;
+    }
+    if (rc != 0) {
+        return rc;
+    }
+    f.free_blocks = free;
+    // The superblock's count is the bitmap's as that commit wrote it, so the two are compared now, before the replay
+    // below frees the blocks the commit released after its root was durable: compared after it, every mount following
+    // an unmount warned by the last commit's frees (4-7 blocks, roadmap 1.1 P3).
+    if (f.free_blocks != f.sb.free_blocks) {
+        var buffer = [0u8; 160];
+        var line = TextWriter.create(mut buffer[..]);
+        line.text("cosmofs: free block count ");
+        line.decimal(f.free_blocks);
+        line.text(" differs from the superblock's ");
+        line.decimal(f.sb.free_blocks);
+        line.text("; using the bitmap");
+        KernelLog.send(LogLevel.Warn, line);
+    }
+    // Finish what the last commit started. It cleared these blocks' bits in memory after its root was durable and
+    // marked the chunks for the next commit, which at an unmount never came -- so on disk they are still allocated and
+    // reachable from nothing. The root that freed them says which they are, and this is where that is read
+    // (docs/audit/next-subsystem-unmount-leak.md).
+    //
+    // Idempotent on purpose: the record is not cleared here. A mount that replays and unmounts without committing
+    // changes nothing, and the next mount replays the same list to the same effect. The commit that supersedes the
+    // record is what retires it.
+    f.load_stage = STAGE_FREE_RECORD;
+    return cfs_freelog_replay(fs);
+}
+
+/// Every buffer of the cache, freed.
+/// Safety: `fs` is a filesystem's state that nothing else is using.
+unsafe fn freeBufs(fs: *mut cfs) {
+    let head = borrow mut fsOf(fs).bufs as *mut list_node;
+    var node = List.first(head as *list_node);
+    while (!node.isNull()) {
+        let after = List.next(head as *list_node, node);
+        List.remove(node);
+        let b = bufOfLink(node);
+        kfree(Ptr.toBorrow(b as *cfs_buf).data as *mut void);
+        kfree(b as *mut void);
+        node = after;
+    }
+}
+
+/// Stop the writeback thread, if there is one.
+/// Safety: `fs` is a filesystem's state.
+unsafe fn wbStop(fs: *mut cfs) {
+    let f = fsOf(fs);
+    if (!f.wb_thread.isNull()) {
+        stopOf(fs).storeWith(true, StoreOrdering.Release);
+        let _ = thread_join(f.wb_thread);
+        f.wb_thread = 0 as *mut thread;
+    }
+}
+
+/// Free a filesystem's state.
+/// Safety: `fs` is a filesystem's state that nothing else is using.
+unsafe fn destroy(fs: *mut cfs) {
+    // Nothing may still be committing while this frees the buffers and fs. cosmofs_unmount has already stopped the
+    // thread; a mount that failed has none to stop, and this says so rather than trusting it.
+    cfs_resilver_stop(fs);
+    wbStop(fs);
+    freeBufs(fs);
+    let f = fsOf(fs);
+    kfree(f.bitmap as *mut void);
+    kfree(f.bitmap_dirty as *mut void);
+    kfree(f.pending_free as *mut void);
+    kfree(f.pending_exempt as *mut void);
+    kfree(f.orphans as *mut void);
+    cfs_clones_free(fs);
+    cfs_members_free(fs);
+    if (!f.pool.isNull()) {
+        pool_close(f.pool);
+    }
+    // The key goes with the mount: its copy here is wiped, and the last writable mount's release wipes the table's
+    // (design.md, "The key handle").
+    if (f.key_held) {
+        cfs_keytab_release(borrow f.sb.uuid as *[u8; 16] as *u8);
+    }
+    f.master_key = [0u8; 32];
+    memset(borrow mut f.mac as *mut cfs_mac as *mut void, 0, layoutOf<cfs_mac>().size);
+    kfree(fs as *mut void);
+}
+
+/// Drop every buffer and the bitmap so a different root can be loaded.
+/// Safety: `fs` is a mounting filesystem's state.
+unsafe fn resetRoot(fs: *mut cfs) {
+    freeBufs(fs);
+    let f = fsOf(fs);
+    f.nr_bufs = 0;
+    f.nr_dirty = 0;
+    kfree(f.bitmap as *mut void);
+    kfree(f.bitmap_dirty as *mut void);
+    f.bitmap = 0 as *mut u8;
+    f.bitmap_dirty = 0 as *mut u8;
+    // And everything the abandoned attempt accumulated in the open transaction. Nothing of it belongs to the root
+    // about to be tried: the orphan replay can queue deferred frees and then fail the mount, and carrying those into
+    // the fallback would have its first commit hand the allocator blocks the older root's inodes still name -- live
+    // data, not a leak. The block numbers are the older root's to decide about, and it has not been read yet.
+    f.nr_pending = 0;
+    f.nr_exempt = 0;
+    f.nr_orphans = 0;
+    f.first_dirty_ns = 0;
+    f.failed = 0; // the attempt is abandoned, not the filesystem
+    cfs_clones_free(fs); // read again from the root about to be loaded
+    // The other root may describe a different set of members; the pool keeps its devices, the table is read again.
+    cfs_members_free(fs);
+}
+
+/// The key of an encrypted pool: the key table's for version 14, else the firmware's for a version-1 wrap.
+/// Safety: `fs` is a mounting filesystem's state, its members loaded.
+unsafe fn loadKey(fs: *mut cfs) -> i32 {
+    let f = fsOf(fs);
+    if (f.encrypted && f.mac.on && !f.have_key) {
+        // Version 14: the superblock verified under the key table's MAC key, so the master key is there; a writable
+        // mount holds it until its unmount (design.md, "The key handle"). The key block is read as any metadata is, so
+        // it authenticates too.
+        var rc = cfs_keytab_take(borrow f.sb.uuid as *[u8; 16] as *u8, !f.maint,
+            borrow mut f.master_key as *mut [u8; 32] as *mut u8);
+        if (rc != 0) {
+            return rc;
+        }
+        f.have_key = true;
+        f.key_held = !f.maint;
+        var kb = 0 as *mut cfs_buf;
+        rc = cfs_buf_get(fs, f.sb.key_root, CFS_KIND_KEYS, borrow mut kb as *mut *mut cfs_buf);
+        if (rc != 0) {
+            return rc;
+        }
+        let k = Ptr.toBorrow(Ptr.toBorrow(kb as *cfs_buf).data.add(CFS_MHDR_SIZE) as *cfs_keys2);
+        let ok = k.version == 2 &&
+            memcmp(borrow k.uuid as *[u8; 16] as *void, borrow f.sb.uuid as *[u8; 16] as *void, 16) == 0;
+        cfs_buf_put(fs, kb);
+        if (!ok) {
+            var buffer = [0u8; 160];
+            var line = TextWriter.create(mut buffer[..]);
+            line.text("cosmofs: ");
+            cText(mut line, poolName(fs));
+            line.text(": the key block is not this pool's version-2 key block");
+            KernelLog.send(LogLevel.Error, line);
+            return -EIO;
+        }
+    } else if (f.encrypted && !f.have_key) {
+        var key = [0u8; 128];
+        let kp = borrow mut key as *mut [u8; 128] as *mut CChar;
+        if (fwcfg_get_string("fskey\0".ptr as *CChar, kp, 128) && key[0] != 0) {
+            let rc = cfs_keys_load(fs, kp as *void, strlen(kp as *CChar));
+            key = [0u8; 128];
+            if (rc == -EKEYREJECTED) {
+                KernelLog.write(LogLevel.Error, "cosmofs: the key in opt/cosmo/fskey does not unwrap this filesystem");
+            } else if (rc != 0 && rc != -EAGAIN) {
+                return rc; // -EAGAIN: unseeded pool, mount locked (S18)
+            }
+        }
+        if (!f.have_key) {
+            KernelLog.write(LogLevel.Warn, "cosmofs: encrypted and locked; metadata only until a key arrives");
+        }
+    }
+    return 0;
+}
+
+/// Load the allocator and the root directory of the root in fs->sb.
+/// Safety: `fs` is a mounting filesystem's state; `root` writable.
+unsafe fn loadRoot(fs: *mut cfs, root: *mut *mut vnode) -> i32 {
+    let f = fsOf(fs);
+    f.gen = f.sb.generation.wrappingAdd(1);
+    f.alloc_hint = 2;
+    f.load_stage = STAGE_MEMBERS;
+    // The root being loaded is the last durable one: what the copies missed is counted from it (design.md, "Degraded
+    // operation").
+    pool_commit_done(f.pool, f.sb.generation);
+    var rc = cfs_members_load(fs);
+    if (rc != 0) {
+        return rc;
+    }
+    f.copystate_seq = Ptr.toBorrow(f.pool as *spool).state_seq;
+    // The key, if this filesystem has one. A mount without it still works for everything that is not a file's
+    // contents: the metadata is plaintext by design, and every data read answers -ENOKEY (design.md, "Boot-time
+    // unlock").
+    f.encrypted = f.sb.version >= 7 && f.sb.key_root != 0;
+    rc = loadKey(fs);
+    if (rc != 0) {
+        return rc;
+    }
+    // From the blocks that exist, not the linear span: that is rounded up to whole bitmap chunks per member and is
+    // mostly padding on a small device.
+    let tot = f.sb.total_blocks;
+    f.reserve = if (tot / 32 > 32) tot / 32 else 32;
+    f.load_stage = STAGE_BITMAP;
+    rc = loadBitmap(fs);
+    if (rc != 0) {
+        return rc;
+    }
+    f.load_stage = STAGE_SNAPSHOTS;
+    // How many snapshots exist decides whether a commit may free the blocks it releases (design.md, "Format version
+    // 3").
+    var n: u32 = 0;
+    if (cfs_snapshot_list(fs, 0 as *mut cfs_snapshot, 0, borrow mut n as *mut u32) == 0) {
+        f.snap_count = n;
+    }
+    if (n != 0) {
+        var buffer = [0u8; 64];
+        var line = TextWriter.create(mut buffer[..]);
+        line.text("cosmofs: ");
+        line.decimal(n as u64);
+        line.text(" snapshot(s)");
+        KernelLog.send(LogLevel.Info, line);
+    }
+    rc = cfs_clones_load(fs);
+    if (rc != 0) {
+        return rc;
+    }
+    // And what the last root still owed: inodes unlinked while something held them, whose eviction the crash or the
+    // forced unmount threw away. After the bitmap and after the snapshot count, because the frees this does go through
+    // both (docs/audit/next-subsystem-orphan.md).
+    //
+    // A pending rollback (design.md, "Rollback"): before the orphan replay, because a switch makes another tree live
+    // and the old one's orphans are the safety snapshot's to keep. A switch that fails is reported, and the mount
+    // abandons it and loads this root again without trying (cosmofs_mount).
+    var switched = false;
+    if (f.sb.version >= 12 && f.sb.rollback_root != 0 && f.rdonly) {
+        KernelLog.write(LogLevel.Info,
+            "cosmofs: read-only: a rollback record is in place; a writable mount acts on it");
+    }
+    f.load_stage = STAGE_ROLLBACK;
+    if (f.sb.version >= 12 && f.sb.rollback_root != 0 && !f.rollback_off && !f.rdonly) {
+        rc = cfs_rollback_at_mount(fs, borrow mut switched as *mut bool);
+        if (rc != 0) {
+            f.rollback_failed = true;
+            return rc;
+        }
+    }
+    f.rollback_switched = switched;
+    f.load_stage = STAGE_ROOT;
+    // The root must be a directory -- the one the switch, if any, made live: the VFS takes that as given (do_mount
+    // asserts it), so a root inode that says otherwise is refused here, by name, rather than met as a panic. A disk
+    // with one changed mode used to stop the kernel.
+    var slot = [0u64; 32];
+    let ri = borrow mut slot as *mut [u64; 32] as *mut cfs_inode;
+    if (cfs_inode_read(fs, CFS_ROOT_INO, ri) == 0 && Ptr.toBorrow(ri as *cfs_inode).mode >> 12 != CFS_TYPE_DIR) {
+        var buffer = [0u8; 160];
+        var line = TextWriter.create(mut buffer[..]);
+        line.text("cosmofs: generation ");
+        line.decimal(f.sb.generation);
+        line.text(": the root inode is not a directory (mode 0");
+        octal(mut line, Ptr.toBorrow(ri as *cfs_inode).mode);
+        line.text("); refusing it");
+        KernelLog.send(LogLevel.Error, line);
+        return -ENOTDIR;
+    }
+    // After a switch the record is the target's own orphans, which the switch's commit wrote (cosmofs_rollback.cee).
+    f.load_stage = STAGE_ORPHAN_RECORD;
+    rc = cfs_orphan_replay(fs);
+    if (rc != 0) {
+        return rc;
+    }
+    if (f.rdonly && (f.replay_freed != 0 || f.replay_orphans != 0)) {
+        var buffer = [0u8; 192];
+        var line = TextWriter.create(mut buffer[..]);
+        line.text("cosmofs: read-only: ");
+        line.decimal(f.replay_freed as u64);
+        line.text(" block(s) of the free record and ");
+        line.decimal(f.replay_orphans as u64);
+        line.text(" orphan inode(s) released in memory only; a writable mount writes them");
+        KernelLog.send(LogLevel.Info, line);
+    }
+    return cfs_vnode_get(fs, CFS_ROOT_INO, root);
+}
+
+/// The writeback thread (design.md): commits when the open transaction has grown past a threshold or aged past the
+/// interval. It takes the mount's sync lock with a trylock so it never waits on an unmount or a vfs_sync in progress,
+/// and never commits when the test hook has turned autonomous commits off.
+/// Safety: `fs` is a mounted filesystem's state.
+unsafe fn wbDue(fs: *mut cfs) -> bool {
+    let f = fsOf(fs);
+    if (f.failed != 0 || f.first_dirty_ns == 0) {
+        return false;
+    }
+    if (f.nr_dirty >= CFS_WB_DIRTY_BUFS || f.nr_pending >= CFS_WB_PENDING) {
+        return true;
+    }
+    let pages = Ptr.toBorrow(borrow mut Ptr.toBorrowMut(f.mnt).cache_dirty as *mut u64 as *AtomicU64);
+    if (pages.loadWith(LoadOrdering.Relaxed) >= CFS_WB_DIRTY_PAGES) {
+        return true;
+    }
+    return clock_since_ns(f.first_dirty_ns) >= f.wb_interval_ms as u64 * 1000000;
+}
+
+/// Safety: `arg` is a mounted filesystem's state, which outlives the thread (cfs_destroy joins it).
+@callback
+unsafe fn wbThread(arg: *mut void) {
+    let fs = arg as *mut cfs;
+    let mnt = fsOf(fs).mnt;
+    let syncLock = borrow mut Ptr.toBorrowMut(mnt).sync_lock as *mut mutex;
+    while (!stopOf(fs).loadWith(LoadOrdering.Acquire)) {
+        thread_sleep_ns(CFS_WB_POLL_MS * 1000000);
+        if (!fsOf(fs).wb_enabled || !wbDue(fs)) {
+            continue;
+        }
+        if (!mutex_trylock(syncLock)) {
+            continue; // an unmount or vfs_sync is at it: they commit
+        }
+        if (!Ptr.toBorrow(mnt as *mount).unmounted && !stopOf(fs).loadWith(LoadOrdering.Acquire)) {
+            let rc = syncCounted(mnt, true);
+            if (rc != 0) {
+                var buffer = [0u8; 64];
+                var line = TextWriter.create(mut buffer[..]);
+                line.text("cosmofs: writeback commit failed (");
+                line.signed(rc as i64);
+                line.text(")");
+                KernelLog.send(LogLevel.Warn, line);
+            }
+        }
+        mutex_unlock(syncLock);
+    }
+}
+
+// Failed mounts' stages, by device, for the check on an unmounted device, which asks right after its own mount failed
+// while it holds the device's claim. One entry per device and a few of them, so two checks of different devices
+// failing at once each find their own (Codex on #434: one shared record lost the first). An entry is taken by the
+// question, so a stale one cannot answer a later mount.
+static mut g_fail_lock: spinlock_t = SPINLOCK_INIT("cosmofs-mount-fail\0".ptr as *CChar);
+static mut g_fail_bd: [*blkdev; 8] = [0 as *blkdev; 8];
+static mut g_fail_stage: [u32; 8] = [0; 8];
+static mut g_fail_rc: [i32; 8] = [0; 8];
+static mut g_fail_next: u32 = 0;
+
+/// Safety: `bd` is a device.
+unsafe fn mountFailureNote(bd: *blkdev, stage: u32, rc: i32) {
+    spin_lock(borrow mut g_fail_lock as *mut spinlock_t);
+    var slot = CFS_FAIL_NOTES;
+    var i: u32 = 0;
+    while (i < CFS_FAIL_NOTES && slot == CFS_FAIL_NOTES) {
+        if (g_fail_bd[i as usize] == bd) {
+            slot = i; // this device's: replaced
+        }
+        i += 1;
+    }
+    if (slot == CFS_FAIL_NOTES) {
+        slot = g_fail_next % CFS_FAIL_NOTES;
+        g_fail_next = g_fail_next.wrappingAdd(1);
+    }
+    g_fail_bd[slot as usize] = bd;
+    g_fail_stage[slot as usize] = stage;
+    g_fail_rc[slot as usize] = rc;
+    spin_unlock(borrow mut g_fail_lock as *mut spinlock_t);
+}
+
+/// Where the last failed mount of `bd` stopped, and why; taken by the question.
+/// Safety: `stage` and `rc` writable.
+@export("cfs_mount_failure")
+unsafe fn mountFailure(bd: *blkdev, stage: *mut u32, rc: *mut i32) -> bool {
+    var mine = false;
+    spin_lock(borrow mut g_fail_lock as *mut spinlock_t);
+    var i: u32 = 0;
+    while (i < CFS_FAIL_NOTES && !mine) {
+        if (g_fail_bd[i as usize] == bd) {
+            stage.write(g_fail_stage[i as usize]);
+            rc.write(g_fail_rc[i as usize]);
+            g_fail_bd[i as usize] = 0 as *blkdev;
+            mine = true;
+        }
+        i += 1;
+    }
+    spin_unlock(borrow mut g_fail_lock as *mut spinlock_t);
+    return mine;
+}
+
+/// The newest superblock slot of the pool that is either a CRC'd one that verifies or a version-14 encrypted one,
+/// *unverified* -- which without its key is all it can be. For the key operations alone (design.md, "The key handle"):
+/// KEY_INFO hands out the slots, which authenticate themselves, and KEY_LOAD verifies what it found under the key it
+/// was given before it keeps anything. -ENOENT when neither slot is either.
+/// Safety: `p` is an open pool; `out` writable.
+@export("cfs_super_peek")
+unsafe fn superPeek(p: *mut spool, out: *mut cfs_super) -> i32 {
+    let block = kmalloc(CFS_BLOCK, 0) as *mut u8;
+    if (block.isNull()) {
+        return -ENOMEM;
+    }
+    var rc: i32 = -2; // -ENOENT
+    for (slot in 0u64..2) {
+        if (pool_read(p, slot, block as *mut void) != 0) {
+            continue;
+        }
+        let sb = block as *cfs_super;
+        if (!cfs_super_peek_ok(block as *void)) {
+            continue;
+        }
+        if (rc == 0 && Ptr.toBorrow(sb).generation <= Ptr.toBorrow(out as *cfs_super).generation) {
+            continue;
+        }
+        superCopy(out, sb);
+        rc = 0;
+    }
+    kfree(block as *mut void);
+    return rc;
+}
+
+/// Both superblock slots of `bd`, each read and checked as a mount reads them.
+/// Safety: `bd` is a device; the rest writable.
+@export("cfs_super_slots")
+unsafe fn superSlots(bd: *mut blkdev, a: *mut cfs_super, ra: *mut i32, b: *mut cfs_super, rb: *mut i32) -> i32 {
+    let fs = kzalloc(layoutOf<cfs>().size) as *mut cfs;
+    if (fs.isNull()) {
+        return -ENOMEM;
+    }
+    let f = fsOf(fs);
+    var pool = 0 as *mut spool;
+    let rc = pool_open(bd, borrow mut pool as *mut *mut spool);
+    f.pool = pool;
+    if (rc == 0) {
+        ra.write(superRead(fs, CFS_SUPER_A, a));
+        rb.write(superRead(fs, CFS_SUPER_B, b));
+        pool_close(f.pool);
+    }
+    memset(borrow mut f.mac as *mut cfs_mac as *mut void, 0, layoutOf<cfs_mac>().size); // a MAC key super_read took
+    kfree(fs as *mut void);
+    return rc;
+}
+
+/// Mark linear block `lin` allocated (a block a replay found in use), and the transaction dirty.
+/// Safety: `fs` is a mounted filesystem's state, its lock held.
+@export("cfs_bitmap_claim")
+unsafe fn bitmapClaim(fs: *mut cfs, lin: u64) {
+    let f = fsOf(fs);
+    if (lin >= f.nblocks || bitTest(f.bitmap, lin)) {
+        return;
+    }
+    bitSet(f.bitmap, lin);
+    f.bitmap_dirty.add((lin / CFS_BITS_PER_BITMAP) as usize).write(1);
+    if (f.free_blocks > 0) {
+        f.free_blocks -= 1;
+    }
+    let dva = cfs_lin_dva(fs as *cfs, lin);
+    let v = truncate<u32>(dva >> CFS_DVA_VDEV_SHIFT);
+    if (v < f.nmembers) {
+        let m = Ptr.toBorrowMut(f.mem.add(v as usize));
+        if (m.free_blocks > 0) {
+            m.free_blocks -= 1;
+        }
+    }
+    noteDirty(fs);
+}
+
+/// A copy changed state (the pool's notify, under fs->lock or during the mount): the change is a commit due, and the
+/// mount listing says whether the pool runs degraded (design.md, "Degraded operation").
+/// Safety: `arg` is a filesystem's state.
+@callback
+unsafe fn poolChanged(arg: *mut void) {
+    let fs = arg as *mut cfs;
+    let f = fsOf(fs);
+    if (f.mnt.isNull()) {
+        return;
+    }
+    let state = Ptr.toBorrow(borrow mut Ptr.toBorrowMut(f.mnt).state as *mut u32 as *AtomicU32);
+    if (pool_degraded(f.pool as *spool)) {
+        let _ = state.fetchOrWith(MOUNT_STATE_DEGRADED, Ordering.Relaxed);
+    } else {
+        let _ = state.fetchAndWith(MOUNT_STATE_DEGRADED ^ 0xFFFFFFFF, Ordering.Relaxed);
+    }
+    if (f.mount_done && !f.rdonly) {
+        noteDirty(fs);
+    }
+}
+
+/// Which slot to mount from: the newer valid one.
+fn firstSlot(ra: i32, rb: i32, genA: u64, genB: u64) -> u32 =>
+    if (ra == 0 && (rb != 0 || genA >= genB)) CFS_SUPER_A else CFS_SUPER_B;
+
+/// Mount `bdev`'s pool on `mnt`.
+/// Safety: `bdev` null or a device the VFS holds; `mnt` the mount being made.
+@export("cfs_core_mount")
+unsafe fn mountFs(fst: *mut fs_type, bdev: *mut blkdev, flags: u32, mnt: *mut mount) -> i32 {
+    if (bdev.isNull()) {
+        return -EINVAL;
+    }
+    let fs = kzalloc(layoutOf<cfs>().size) as *mut cfs;
+    if (fs.isNull()) {
+        return -ENOMEM;
+    }
+    let f = fsOf(fs);
+    f.rdonly = (flags & MOUNT_RDONLY) != 0;
+    // A maintenance mount (cosmofs_check_dev) commits only when its release decides to: no writeback thread may commit
+    // a replay or a refused repair before then (Codex on #434).
+    let detached = (flags & MOUNT_DETACHED) != 0;
+    List.init(borrow mut f.bufs as *mut list_node);
+    mutex_init(lockOf(fs), "cosmofs\0".ptr as *CChar);
+    f.mnt = mnt;
+    f.wb_enabled = !detached;
+    f.maint = detached;
+    f.wb_interval_ms = CFS_WB_INTERVAL_MS;
+    var pool = 0 as *mut spool;
+    var rc = pool_open(bdev, borrow mut pool as *mut *mut spool);
+    f.pool = pool;
+    if (rc != 0) {
+        kfree(fs as *mut void);
+        return rc;
+    }
+    // fs->nblocks and the reserve follow from the member table, which the root's own generation names (load_root).
+    var aSlot = [0u64; 21];
+    var bSlot = [0u64; 21];
+    let a = borrow mut aSlot as *mut [u64; 21] as *mut cfs_super;
+    let b = borrow mut bSlot as *mut [u64; 21] as *mut cfs_super;
+    var ra = superRead(fs, CFS_SUPER_A, a);
+    var rb = superRead(fs, CFS_SUPER_B, b);
+    if (ra != 0 && rb != 0) {
+        let why = if (ra == -ENOKEY || rb == -ENOKEY) -ENOKEY else -EIO;
+        var buffer = [0u8; 128];
+        var line = TextWriter.create(mut buffer[..]);
+        line.text("cosmofs: ");
+        cText(mut line, devName(bdev));
+        line.text(if (why == -ENOKEY) ": encrypted and locked: its key is not loaded" else ": no valid superblock");
+        KernelLog.send(LogLevel.Error, line);
+        mountFailureNote(bdev as *blkdev, STAGE_SUPER, why);
+        destroy(fs);
+        return why;
+    }
+    // The newest root of the pool, whichever of member 0's devices this one is (CF27): a copy that was away holds an
+    // older root that every checksum on it still passes.
+    let genA = Ptr.toBorrow(a as *cfs_super).generation;
+    let genB = Ptr.toBorrow(b as *cfs_super).generation;
+    let mine = if (firstSlot(ra, rb, genA, genB) == CFS_SUPER_A) a as *cfs_super else b as *cfs_super;
+    var newerGen: u64 = 0;
+    let newer = cfs_newer_member0(bdev, borrow Ptr.toBorrow(mine).uuid as *[u8; 16] as *u8,
+        Ptr.toBorrow(mine).generation, borrow mut newerGen as *mut u64);
+    if (!newer.isNull()) {
+        let mineGen = Ptr.toBorrow(mine).generation;
+        if (vfs_bdev_mounted(newer as *blkdev)) {
+            var buffer = [0u8; 160];
+            var line = TextWriter.create(mut buffer[..]);
+            line.text("cosmofs: ");
+            cText(mut line, devName(bdev));
+            line.text(" is behind (generation ");
+            line.decimal(mineGen);
+            line.text(") and ");
+            cText(mut line, devName(newer));
+            line.text(", newer, is mounted; not mounting");
+            KernelLog.send(LogLevel.Error, line);
+            kobject_put(borrow mut Ptr.toBorrowMut(newer).obj as *mut kobject);
+            destroy(fs);
+            return -EBUSY;
+        }
+        var buffer = [0u8; 160];
+        var line = TextWriter.create(mut buffer[..]);
+        line.text("cosmofs: ");
+        cText(mut line, devName(bdev));
+        line.text(" is behind (generation ");
+        line.decimal(mineGen);
+        line.text("); mounting from ");
+        cText(mut line, devName(newer));
+        line.text(" (generation ");
+        line.decimal(newerGen);
+        line.text(")");
+        KernelLog.send(LogLevel.Warn, line);
+        pool_close(f.pool);
+        f.pool = 0 as *mut spool;
+        pool = 0 as *mut spool;
+        rc = pool_open(newer, borrow mut pool as *mut *mut spool);
+        f.pool = pool;
+        kobject_put(borrow mut Ptr.toBorrowMut(newer).obj as *mut kobject);
+        if (rc == 0) {
+            ra = superRead(fs, CFS_SUPER_A, a);
+            rb = superRead(fs, CFS_SUPER_B, b);
+            if (ra != 0 && rb != 0) {
+                rc = -EIO;
+            }
+        }
+        if (rc != 0) {
+            mountFailureNote(bdev as *blkdev, STAGE_SUPER, rc);
+            destroy(fs);
+            return rc;
+        }
+    }
+    // The newer valid root first; if its tree does not load, the older one (design.md, "Older-slot fallback at
+    // mount").
+    let first = firstSlot(ra, rb, Ptr.toBorrow(a as *cfs_super).generation, Ptr.toBorrow(b as *cfs_super).generation);
+    let other = if (first == CFS_SUPER_A) CFS_SUPER_B else CFS_SUPER_A;
+    let rother = if (first == CFS_SUPER_A) rb else ra;
+    superCopy(borrow mut f.sb as *mut cfs_super, if (first == CFS_SUPER_A) a as *cfs_super else b as *cfs_super);
+    f.sb_slot = first;
+    let m = Ptr.toBorrowMut(mnt);
+    m.fs_priv = fs as *mut void;
+    // The pool's console lines name it by its label, or by this device; and every change of a copy's state is a
+    // commit due and, while any copy is out, a mount listed as degraded.
+    memcpy(borrow mut f.pool_name as *mut [u8; 17] as *mut void, borrow f.sb.label as *[u8; 16] as *void,
+        CFS_LABEL_MAX);
+    f.pool_name[CFS_LABEL_MAX] = 0;
+    if (f.pool_name[0] == 0) {
+        let _ = strlcpy(borrow mut f.pool_name as *mut [u8; 17] as *mut CChar, devName(bdev), 17);
+    }
+    let p = Ptr.toBorrowMut(f.pool);
+    p.name = poolName(fs);
+    p.notify = poolChanged;
+    p.notify_arg = fs as *mut void;
+    var root = 0 as *mut vnode;
+    let rootp = borrow mut root as *mut *mut vnode;
+    rc = loadRoot(fs, rootp);
+    if (rc != 0 && f.rollback_failed) {
+        // The rollback's switch failed: nothing of it was published, so the same root is loaded again with the switch
+        // off -- and why is kept, for whoever asks why the rollback is still pending (CFS-20).
+        let why = rc;
+        resetRoot(fs);
+        f.rollback_error = why;
+        // the switch changed the in-memory root
+        superCopy(borrow mut f.sb as *mut cfs_super,
+            if (f.sb_slot == CFS_SUPER_A) a as *cfs_super else b as *cfs_super);
+        f.rollback_failed = false;
+        f.rollback_off = true;
+        rc = loadRoot(fs, rootp);
+    }
+    if (rc != 0 && rother == 0) {
+        let otherSb = if (other == CFS_SUPER_A) a as *cfs_super else b as *cfs_super;
+        var buffer = [0u8; 160];
+        var line = TextWriter.create(mut buffer[..]);
+        line.text("cosmofs: ");
+        cText(mut line, devName(bdev));
+        line.text(": generation ");
+        line.decimal(f.sb.generation);
+        line.text(" does not load (");
+        line.signed(rc as i64);
+        line.text("); falling back to generation ");
+        line.decimal(Ptr.toBorrow(otherSb).generation);
+        KernelLog.send(LogLevel.Warn, line);
+        resetRoot(fs);
+        superCopy(borrow mut f.sb as *mut cfs_super, otherSb);
+        f.sb_slot = other;
+        f.fell_back = true;
+        rc = loadRoot(fs, rootp);
+    }
+    if (rc != 0) {
+        mountFailureNote(bdev as *blkdev, f.load_stage, rc);
+        m.fs_priv = 0 as *mut void;
+        destroy(fs);
+        return rc;
+    }
+    m.root = root;
+    poolChanged(fs as *mut void);
+    cfs_holds_sync(fs);
+    var buffer = [0u8; 192];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("cosmofs: ");
+    cText(mut line, devName(bdev));
+    line.text(": generation ");
+    line.decimal(f.sb.generation);
+    line.text(", ");
+    line.decimal(f.free_blocks);
+    line.text("/");
+    line.decimal(f.sb.total_blocks);
+    line.text(" blocks free (");
+    line.decimal(f.reserve);
+    line.text(" reserved), ");
+    line.decimal(f.sb.inode_count);
+    line.text(" inodes");
+    KernelLog.send(LogLevel.Info, line);
+    // Live now, so the writeback thread may exist. If the replay left an open transaction, this is where its committer
+    // starts.
+    f.mount_done = true;
+    if (f.first_dirty_ns != 0) {
+        noteDirty(fs);
+    }
+    // Spares, the pool's other devices held (CFS-5), and a resilver for every copy that wants one -- after the mount,
+    // so a boot does not wait for it (design.md, "Import").
+    cfs_resilver_mount(fs);
+    return 0;
+}
+
+/// A commit, and whether it counts as the writeback thread's.
+///
+/// The count is taken inside the same hold of fs->lock that publishes the generation, because cosmofs_stats reads the
+/// two together under that lock and a reader that sees one without the other sees a filesystem that never existed.
+/// It used to be taken after cosmofs_sync returned, which is after the lock was dropped: a window of a few
+/// instructions in which sb.generation had advanced and wb_commits had not, and cosmofs-writeback asserts exactly that
+/// pair (docs/audit/2026-09-deferred-work-inventory.md). The increment was also an unlocked read-modify-write on a
+/// field read under the lock.
+/// Safety: `mnt` is a mount.
+unsafe fn syncCounted(mnt: *mut mount, writeback: bool) -> i32 {
+    let fs = Ptr.toBorrow(mnt as *mount).fs_priv as *mut cfs;
+    if (fs.isNull()) {
+        return 0;
+    }
+    if (fsOf(fs).discard_on_unmount) {
+        return 0; // test hook: behave as if the root write never happened
+    }
+    var rc = syncVnodes(fs);
+    if (rc != 0) {
+        return rc;
+    }
+    mutex_lock(lockOf(fs));
+    // Counted only when this call actually published a root, which cfs_commit_ex reports rather than leaving to be
+    // inferred.
+    //
+    // `rc == 0` is not the question: the early return means "there was nothing to commit", and the writeback thread
+    // reaches it that way whenever a foreground file_sync -- which does not take mnt->sync_lock -- commits between
+    // wb_due and this call. Comparing the generation before and after is not the question either: a commit that failed
+    // after publishing the number leaves it advanced and fs->gen where it was, so the retry that finally succeeds
+    // republishes the same number and would go uncounted.
+    var published = false;
+    rc = cfs_commit_ex(fs, borrow mut published as *mut bool);
+    if (rc == 0 && writeback && published) {
+        // Published with the generation, not after it.
+        cfs_core_floor_assert_held(fs);
+        let f = fsOf(fs);
+        f.wb_commits = f.wb_commits.wrappingAdd(1);
+    }
+    mutex_unlock(lockOf(fs));
+    return rc;
+}
+
+/// statfs: the pool's blocks; what a file may still take is what is free beyond the metadata reserve (cfs_alloc_run's
+/// rule for data). Read without the filesystem's lock: a moment's figures, as df wants.
+/// Safety: `mnt` is a mounted cosmofs; `out` writable.
+@export("cfs_core_statfs")
+unsafe fn statfs(mnt: *mut mount, out: *mut vfs_statfs) -> i32 {
+    let f = fsOf(Ptr.toBorrow(mnt as *mount).fs_priv as *mut cfs);
+    let total = Ptr.toBorrow(borrow mut f.nblocks as *mut u64 as *AtomicU64).loadWith(LoadOrdering.Relaxed);
+    let free = Ptr.toBorrow(borrow mut f.free_blocks as *mut u64 as *AtomicU64).loadWith(LoadOrdering.Relaxed);
+    let reserve = Ptr.toBorrow(borrow mut f.reserve as *mut u64 as *AtomicU64).loadWith(LoadOrdering.Relaxed);
+    let o = Ptr.toBorrowMut(out);
+    o.bsize = truncate<u32>(CFS_BLOCK);
+    o.blocks = total;
+    o.bfree = free;
+    o.bavail = if (free > reserve) free - reserve else 0;
+    return 0;
+}
+
+/// Safety: `mnt` is a mount.
+@export("cfs_core_sync")
+unsafe fn sync(mnt: *mut mount) -> i32 => syncCounted(mnt, false);
+
+/// A commit of this mount now, as the writeback thread makes one (under the mount's sync lock): what a pool command
+/// changed is on disk when the command returns (cosmofs_poolctl).
+/// Safety: `mnt` is a mount.
+@export("cosmofs_commit_mount")
+unsafe fn commitMount(mnt: *mut mount) -> i32 {
+    let syncLock = borrow mut Ptr.toBorrowMut(mnt).sync_lock as *mut mutex;
+    mutex_lock(syncLock);
+    let rc = if (Ptr.toBorrow(mnt as *mount).unmounted) 0 else syncCounted(mnt, false);
+    mutex_unlock(syncLock);
+    return rc;
+}
+
+/// The VFS committed through cosmofs_sync before calling this; what is left is either nothing, a deliberately
+/// discarded transaction (test hook) or an abandoned one (cfs_fail), and both are dropped here so the on-disk state
+/// stays at the last committed root. The writeback thread is stopped first (it skips a mount whose sync lock is held,
+/// which it is here, so the join is short).
+/// Safety: `mnt` is a mounted cosmofs.
+@export("cfs_core_unmount")
+unsafe fn unmount(mnt: *mut mount) -> i32 {
+    let fs = Ptr.toBorrow(mnt as *mount).fs_priv as *mut cfs;
+    // The resilver first: its cursor is in the record the VFS's last sync wrote, and the next mount goes on from there.
+    cfs_resilver_stop(fs);
+    wbStop(fs);
+    let f = fsOf(fs);
+    if (f.discard_on_unmount) {
+        KernelLog.write(LogLevel.Warn, "cosmofs: discarding the open transaction (test hook)");
+    } else if (f.failed != 0) {
+        var buffer = [0u8; 64];
+        var line = TextWriter.create(mut buffer[..]);
+        line.text("cosmofs: dropping the abandoned transaction (");
+        line.signed(f.failed as i64);
+        line.text(")");
+        KernelLog.send(LogLevel.Warn, line);
+    }
+    let m = Ptr.toBorrowMut(mnt);
+    m.fs_priv = 0 as *mut void; // the root's eviction sees no filesystem
+    destroy(fs);
+    return 0;
+}
