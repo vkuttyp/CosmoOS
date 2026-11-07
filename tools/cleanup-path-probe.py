@@ -16,28 +16,28 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 BASELINE = "55b1825ebc28c7f5cdb948477019808dc8ed5517"
-COSMOFS = "kernel-services/filesystem/cosmofs/cosmofstest.c"
+COSMOFS = "kernel-services/filesystem/cosmofs/cosmofstest.c"   # at BASELINE
+COSMOFS_PORT = "kernel-services/filesystem/cosmofs/cosmofstest_lib.cee"
 DEVTEST = "kernel/device/devtest.c"
 EXPECTED = {"cosmofs-fixture-cleanup", "nvme-worker-cleanup"}
 
 
 def restore_old(tree):
-    path = tree / COSMOFS
+    # The fixture is CeeSafe now (cosmofstest_lib.cee, roadmap 2.0 SA7): keep the injected operation boundaries and the
+    # reason, and take out the cleanup the fix added -- the device and the directory the attempt made are left behind.
+    path = tree / COSMOFS_PORT
     source = path.read_text()
-    # Keep the injected operation boundaries, but restore CHECK's early
-    # returns and remove the cleanup label introduced by the fix.
-    source, count = re.subn(r"    bool created_dir = false;\n#define ENGINE_CHECK\(cond\).*?    } while \(0\)\n",
-                            "", source, count=1, flags=re.S)
-    if count != 1:
-        raise RuntimeError("engine_mount cleanup macro anchor changed")
-    source = source.replace("ENGINE_CHECK(", "CHECK(")
-    source = source.replace("    if (mk == 0)\n        created_dir = true;\n", "")
-    source = source.replace("#undef ENGINE_CHECK\n", "")
-    source, count = re.subn(r"\nfail:\n    if \(created_dir\).*?    return false;\n}", "\n}", source,
-                            count=1, flags=re.S)
-    if count != 1:
-        raise RuntimeError("engine_mount fail-label anchor changed")
-    path.write_text(source)
+    fixed = ("    reason.write(why);\n"
+             "    if (createdDir) {\n"
+             "        let _ = vfs_rmdir(0 as *mut vnode, eng());\n"
+             "    }\n"
+             "    ramblk_destroy(bd);\n"
+             "    return false;\n")
+    if source.count(fixed) != 1:
+        raise RuntimeError("engine mount cleanup anchor changed")
+    path.write_text(source.replace(fixed, "    reason.write(why);\n"
+                                          "    let _ = createdDir; // --old: what the attempt made is left behind\n"
+                                          "    return false;\n", 1))
 
     path = tree / DEVTEST
     source = path.read_text()

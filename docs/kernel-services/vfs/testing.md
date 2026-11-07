@@ -30,7 +30,7 @@ inode; `cfs_map_block` over three runs including the hole beyond them.
 `tests/host/test_crypto.c` gained `crc32c`: the `123456789` vector,
 the empty string, 32 zero bytes, and incremental equals one-shot.
 
-## Self-tests (`kernel-services/vfs/vfstest.c`, `kernel-services/filesystem/cosmofs/cosmofstest.c`)
+## Self-tests (`kernel-services/vfs/vfstest.c`, `kernel-services/filesystem/cosmofs/cosmofstest_*.cee`)
 
 **`crc32c`**: the standard vector and incremental update.
 
@@ -114,7 +114,7 @@ and every directory and file to walk and read cleanly. 75 writes, 139
 prefix images per boot; the property is the commit rule in `design.md`
 made a machine check.
 
-**The transaction-engine tests** (milestone 7, `cosmofstest.c`, each on
+**The transaction-engine tests** (milestone 7, `cosmofstest_basic.cee`, each on
 its own RAM device mounted at `/mnt/eng` with the writeback thread off
 unless the test is about it): **`cosmofs-holes`** writes four bytes
 200 MiB into a file on a 4 MiB device (five blocks consumed, no zero

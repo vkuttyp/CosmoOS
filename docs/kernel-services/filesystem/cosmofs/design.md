@@ -2519,7 +2519,7 @@ A directory has one name (`-EPERM`).
 
 ## Self-test fixture failure ownership
 
-`cosmofstest.c:engine_mount` owns the registered RAM device until setup
+`cosmofstest_lib.cee`'s engine mount (`cfst_engine_mount`) owns the registered RAM device until setup
 succeeds and publishes it through the output pointer. Format, directory
 creation and mount failures must destroy that device; directory cleanup
 removes only a directory this attempt created. The debug fixture test

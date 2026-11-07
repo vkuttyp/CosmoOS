@@ -328,7 +328,7 @@ return `-EIO` without walking when the open transaction is abandoned.
 
 Declared in `cosmofs.h` and compiled in every build (only
 `cosmofs_test_name_hash` is under `CONFIG_DEBUG`); called only by the
-self-tests in `cosmofstest.c`, `cosmofscrash.c`, `vfstest.c`,
+self-tests in `cosmofstest_*.cee`, `cosmofscrash.cee`, `vfstest.c`,
 `faulttest.c` and `devtest.c`. Not an operator interface, no stability
 promise.
 

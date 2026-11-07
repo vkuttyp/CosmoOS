@@ -38,12 +38,18 @@ CASES = {
 # Where a case's function is now, when it has moved since the baseline: roadmap 2.0 SA7 took cosmofs_core.c apart. The
 # old mode analyzes the baseline's file, where the defect was; the fixed mode analyzes the function where it now lives,
 # or the fixed mode would pass on a file that no longer has the function. Once that file is CeeSafe (freelog_fill is,
-# in cosmofs_commit.cee; cosmofs_test_corrupt, in cosmofs_corrupt.cee; load_root, in cosmofs_core.cee) the fixed mode
-# analyzes the generated C, which has no C function of the first's name and none of the others' defects, so it passes
-# without saying anything: only the old mode still shows the defect.
+# in cosmofs_commit.cee; cosmofs_test_corrupt, in cosmofs_corrupt.cee; load_root, in cosmofs_core.cee; the self-tests,
+# in cosmofstest_media.cee and cosmofstest_orphan.cee) the fixed mode analyzes the generated C, which has no C function
+# of the first's name and none of the others' defects, so it passes without saying anything: only the old mode still
+# shows the defect.
 MOVED = {
     "cosmofs-freelog": "kernel-services/filesystem/cosmofs/cosmofs_commit.c",
     "cosmofs-corrupt": "kernel-services/filesystem/cosmofs/cosmofs_corrupt.c",
+    # cosmofstest.c's self-tests are CeeSafe too, by group (cosmofstest_*.cee).
+    "cosmofs-badmap": "kernel-services/filesystem/cosmofs/cosmofstest_media.c",
+    "cosmofs-mirror": "kernel-services/filesystem/cosmofs/cosmofstest_media.c",
+    "cosmofs-compress": "kernel-services/filesystem/cosmofs/cosmofstest_media.c",
+    "fsctl-check": "kernel-services/filesystem/cosmofs/cosmofstest_orphan.c",
 }
 
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Prove a failed mapping leaves the old block under its own checksum (CF16).
 
-    cosmofs-extent-fail-probe.py [--old] [--arch x86_64|aarch64] [--tree REV] [--fix REV]
+    cosmofs-extent-fail-probe.py [--old] [--arch x86_64|aarch64] [--tree REV]
 
 data_write_block stored a block's checksum before set_extent mapped the
 block, and record_write a record's before its set_extent. When the mapping
@@ -14,11 +14,12 @@ The self-test cosmofs-extent-fail fails one set_extent of a write-back
 through the FI_COSMOFS_EXTENT_NOMEM/FBIG seam and reads every block the
 open inode maps (cosmofs_test_verify_file). With the fix every block
 verifies; without it the first case, plain blocks over plain blocks,
-fails `bad == 0`. --old reverse-applies the fix commit (its cosmofs
-sources, the whole commit and nothing else; the check's two lines by
-their text in cosmofs_check.cee) in a throwaway worktree, keeping the
-seam and the self-test. The check runs in a debug
-`make test` on either architecture.
+fails `bad == 0`. The fix's sources are CeeSafe now (roadmap 2.0 SA7),
+so --old takes its parts out of the ports by their text, in a throwaway
+worktree, keeping the seam and the self-test: the saved entries put back
+nowhere (cosmofs_data.cee's csumRestore, the CF16 half the verdict
+rests on) and the check's two lines (cosmofs_check.cee). The check runs
+in a debug `make test` on either architecture.
 
 Logs stay under out/cosmofs-extent-fail-probe/<arch>-<mode>. Exit 0 when
 the mode shows what it should (fixed: cosmofs-extent-fail ok; old: it
@@ -32,11 +33,14 @@ import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-SUBJECT = "cosmofs: a failed mutation leaves every mapped block under its own checksum"
-SOURCES = ["kernel-services/filesystem/cosmofs/" + f for f in
-           ("cosmofs.c", "cosmofs_core.c", "cosmofs_snap.c", "cosmofs_internal.h")]
-# The fix's two lines in cosmofs_check.c, which is CeeSafe now (cosmofs_check.cee, roadmap 2.0 SA7): its diff no longer
-# applies, so the check's part is taken out of the port by its text.
+# The fix's CF16 half in cosmofs_data.cee: a saved checksum entry is put back when the mapping fails. --old keeps the
+# save and puts nothing back, which is what the code before the fix did.
+DATA = "kernel-services/filesystem/cosmofs/cosmofs_data.cee"
+DATA_RULE = ("unsafe fn csumRestore(fs: *mut cfs, inp: *mut cfs_inode, lblk: u64, s: *mut u64) {\n"
+             "    if (s.read() == 0) {\n")
+DATA_OLD = ("unsafe fn csumRestore(fs: *mut cfs, inp: *mut cfs_inode, lblk: u64, s: *mut u64) {\n"
+            "    if (s.read() == 0 || s.read() != 0) { // --old: nothing is put back\n")
+# The fix's two lines in cosmofs_check.cee.
 CHECK = "kernel-services/filesystem/cosmofs/cosmofs_check.cee"
 CHECK_RULE = (" else {\n"
               "                    cfs_fail(fs, rc); // the frees are queued and the slot still names them (CF17)\n"
@@ -51,7 +55,6 @@ def main():
     ap.add_argument("--old", action="store_true")
     ap.add_argument("--arch", choices=("x86_64", "aarch64"), default="x86_64")
     ap.add_argument("--tree", default="HEAD")
-    ap.add_argument("--fix", help="the commit that keeps the old checksum (default: found by its subject)")
     a = ap.parse_args()
     mode = "old" if a.old else "fixed"
     work = ROOT / "out" / "cosmofs-extent-fail-probe" / f"{a.arch}-{mode}"
@@ -66,15 +69,11 @@ def main():
                    stdout=subprocess.DEVNULL)
     try:
         if a.old:
-            sha = a.fix or subprocess.check_output(
-                ["git", "-C", str(ROOT), "log", "-1", "--format=%H", "--fixed-strings", f"--grep={SUBJECT}", a.tree],
-                text=True).strip()
-            if not sha:
-                sys.exit(f"no commit '{SUBJECT}' reachable from {a.tree}; name it with --fix")
-            patch = subprocess.check_output(["git", "-C", str(ROOT), "show", "--format=", sha, "--"] + SOURCES)
-            if not patch:
-                sys.exit(f"commit {sha[:8]} does not change {SOURCES}")
-            subprocess.run(["git", "-C", str(tree), "apply", "-R"], input=patch, check=True)
+            src = tree / DATA
+            body = src.read_text()
+            if body.count(DATA_RULE) != 1:
+                sys.exit(f"{DATA}: the fixed text is not there exactly once; the probe is stale")
+            src.write_text(body.replace(DATA_RULE, DATA_OLD))
             src = tree / CHECK
             body = src.read_text()
             if body.count(CHECK_RULE) != 1:
