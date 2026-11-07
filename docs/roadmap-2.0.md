@@ -1511,6 +1511,12 @@ passes with every line the C printed (x86_64 debug, 2026-11-07).
 and asserts the layout the CeeSafe half writes as constants. A check's
 reason keeps the C's form, "check failed: COND at line N", N its line in
 the .cee.
+`cosmofscrash.cee`, the crash-consistency harness cosmofs-replay: in the
+boot test it replays 410 prefix images of 227 writes over 9 sync points,
+none stranding a block or putting one on two deadlists (x86_64 debug,
+2026-11-07). `cosmofscrash_floor.c` lists a directory through its
+vnode's readdir, a function an operations table names, and is the
+self-test in a build without CONFIG_DEBUG.
 
 Size: about 4.5x.
 

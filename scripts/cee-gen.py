@@ -128,6 +128,8 @@ PORTS = [
     ("kernel-services/filesystem/cosmofs/cosmofs_member.cee", "kernel-services/filesystem/cosmofs/cosmofs_member.c",
      "cosmofs's members: labels, assembly, copy state, the member table, read repair (cosmofs_internal.h)", None,
      True),
+    ("kernel-services/filesystem/cosmofs/cosmofscrash.cee", "kernel-services/filesystem/cosmofs/cosmofscrash.c",
+     "cosmofs's crash-consistency self-test, cosmofs-replay (cosmofs.h, ramblk.h)", None, True),
     ("kernel-services/filesystem/cosmofs/cosmofs_keytest.cee", "kernel-services/filesystem/cosmofs/cosmofs_keytest.c",
      "cosmofs's self-test of an encrypted root's pool, format 14 (cosmofs.h, cosmofs_internal.h)", None, True),
     ("kernel-services/filesystem/cosmofs/cosmofs_dir.cee", "kernel-services/filesystem/cosmofs/cosmofs_dir.c",

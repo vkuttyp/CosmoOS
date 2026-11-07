@@ -1,0 +1,898 @@
+// cosmofscrash.cee - The cosmofs crash-consistency harness, self-test `cosmofs-replay` (docs/verification/design.md,
+// "Crash consistency"), in CeeSafe: roadmap 2.0 SA7.
+//
+// Record the write stream of a workload on a RAM device, then replay every prefix of it (and torn last writes) onto
+// the pre-workload image and require each result to mount, to contain every file the workload had committed by that
+// point with its exact contents, to walk and read without error, and to check clean.
+//
+// What the C kept in statics is one record on the heap for the run. The device's log, the reports and the stat stay C
+// (kernel/ramblk.h, kernel/cosmofs.h, uapi/cosmo/syscall.h). cosmofscrash_floor.c lists a directory through its
+// vnode's readdir, a function an operations table names, and is the self-test in a build without CONFIG_DEBUG.
+
+@header("kernel/blk.h", "kernel/vfs.h", "kernel/kmalloc.h", "kernel/ramblk.h", "kernel/string.h",
+    "kernel/cosmofs.h", "uapi/cosmo/syscall.h")
+extern "C" {
+    struct blkdev;
+    struct mount;
+    struct vnode {
+        mnt: *mut mount;
+    }
+    struct file;
+    struct ramblk_write {
+        nsectors: u32;
+    }
+    struct ramblk_log {
+        w: *mut ramblk_write;
+        n: u32;
+        dropped: u32;
+    }
+    struct cosmo_stat {
+        size: u64;
+    }
+    struct cosmofs_check_class {
+        count: u64;
+        name: [u64; 8];
+        named: u32;
+    }
+    struct cosmofs_check_report {
+        alloc_not_seen: cosmofs_check_class;
+        seen_not_alloc: cosmofs_check_class;
+        dup: cosmofs_check_class;
+        nlink_wrong: cosmofs_check_class;
+        orphan: cosmofs_check_class;
+        dangling_entry: cosmofs_check_class;
+        dir_bad: cosmofs_check_class;
+        unreadable: cosmofs_check_class;
+        counter_wrong: cosmofs_check_class;
+        chain_cycle: cosmofs_check_class;
+        snapshots_seen: u64;
+        clean: bool;
+    }
+
+    fn kzalloc(size: usize) -> *mut void;
+    fn ramblk_create(nblocks: u64) -> *mut blkdev;
+    fn ramblk_destroy(bd: *mut blkdev);
+    fn ramblk_snapshot(bd: *mut blkdev) -> *mut u8;
+    fn ramblk_restore(bd: *mut blkdev, image: *u8);
+    fn ramblk_record_start(bd: *mut blkdev, max: u32);
+    fn ramblk_record_stop(bd: *mut blkdev) -> *mut ramblk_log;
+    fn ramblk_record_count(bd: *mut blkdev) -> u32;
+    fn ramblk_log_free(log: *mut ramblk_log);
+    fn ramblk_replay(bd: *mut blkdev, log: *ramblk_log, count: u32, torn: bool);
+    fn vfs_mkdir(start: *mut vnode, path: *CChar, mode: u32) -> i32;
+    fn vfs_rmdir(start: *mut vnode, path: *CChar) -> i32;
+    fn vfs_unlink(start: *mut vnode, path: *CChar) -> i32;
+    fn vfs_rename(start: *mut vnode, from: *CChar, to: *CChar) -> i32;
+    fn vfs_mount(path: *CChar, fsname: *CChar, bd: *mut blkdev, flags: u32) -> i32;
+    fn vfs_umount2(path: *CChar, flags: u32) -> i32;
+    fn vfs_lookup(start: *mut vnode, path: *CChar, out: *mut *mut vnode) -> i32;
+    fn vnode_put(vn: *mut vnode);
+    fn vfs_open(start: *mut vnode, path: *CChar, flags: u32, mode: u32, out: *mut *mut file) -> i32;
+    fn file_read(f: *mut file, buf: *mut void, len: usize) -> i64;
+    fn file_write(f: *mut file, buf: *void, len: usize) -> i64;
+    fn vfs_stat(start: *mut vnode, path: *CChar, st: *mut cosmo_stat) -> i32;
+    fn vfs_sync() -> i32;
+    fn vfs_vnode_count() -> u32;
+    fn cosmofs_format(bd: *mut blkdev) -> i32;
+    fn cosmofs_check(mnt: *mut mount, out: *mut cosmofs_check_report, flags: u32) -> i32;
+    fn cosmofs_test_set_writeback(mnt: *mut mount, on: bool);
+    fn cosmofs_test_deadlist_dups(mnt: *mut mount, examined: *mut u64, first: *mut u64) -> u64;
+    fn strlen(s: *CChar) -> usize;
+    fn strcmp(a: *CChar, b: *CChar) -> i32;
+    fn memset(p: *mut void, c: i32, n: usize) -> *mut void;
+    fn memcpy(dst: *mut void, src: *void, n: usize) -> *mut void;
+    /// cosmofscrash_floor.c: up to LIST_MAX entries of `vn`, "." and ".." left out; readdir's result.
+    fn cfs_crash_floor_list(vn: *mut vnode, names: *mut u8, isdir: *mut u8, n: *mut u32) -> i32;
+}
+
+// ---- Values (asserted in cosmofscrash_floor.c) ----
+
+const ENOENT: i32 = 2;
+const EEXIST: i32 = 17;
+const O_RDONLY: u32 = 0;
+const O_WRONLY: u32 = 1;
+const O_CREAT: u32 = 0x40;
+const O_TRUNC: u32 = 0x200;
+const VFS_UMOUNT_FORCE: u32 = 1;
+const RAMBLK_WRITE: usize = 24;
+const MNT: StringView = "/mnt/crash";
+/// A 2 MiB device.
+const NBLOCKS: u64 = 512;
+const MAX_LOG: u32 = 4096;
+const MAX_FILES: u32 = 32;
+const MAX_SYNCS: u32 = 16;
+const LIST_MAX: usize = 64;
+const NAME_MAX: usize = 32;
+
+// ---- The run's record ----
+
+/// What the workload had committed of one file: contents byte i = seed + i.
+struct Expect {
+    path: [u8; 32];
+    len: u32;
+    seed: u8;
+    present: bool;
+}
+
+/// What the workload had committed at a sync point.
+struct SyncPoint {
+    logLen: u32; // writes recorded when the sync returned
+    commit: u32; // entries up to and including the last write that changes the device (trailing flushes excluded)
+    files: [Expect; 32];
+    nrFiles: u32;
+}
+
+struct Crash {
+    syncs: [SyncPoint; 16];
+    nrSyncs: u32;
+    state: [Expect; 32];
+    nrState: u32;
+    leakTotal: u64; // blocks a replayed prefix stranded: must be zero
+    prefixesChecked: u32; // images the structural check actually ran on
+    // The snapshot half (docs/audit/next-subsystem-snap-deadlist.md): a block named by two deadlist entries is what an
+    // interrupted keeper write-back used to leave, and cosmofs_check cannot see it, so the suite asks per prefix.
+    // `deadSeen` is how many entries it looked at across every prefix: zero would mean the workload never produced a
+    // deadlist and the whole check was vacuous.
+    deadDups: u64;
+    deadSeen: u64;
+    buf: [u8; 4096];
+}
+
+/// A terminated path, `MNT` + `leaf`, in `out`.
+/// Safety: the path is used while `out` lives; `leaf` fits.
+unsafe fn mntPath(out: borrow mut [u8; 96], leaf: StringView) -> *CChar {
+    var n: usize = 0;
+    for (i in 0usize..MNT.length) {
+        out[n] = MNT[i];
+        n += 1;
+    }
+    for (i in 0usize..leaf.length) {
+        out[n] = leaf[i];
+        n += 1;
+    }
+    out[n] = 0;
+    return out as *[u8; 96] as *CChar;
+}
+
+/// Safety: `reason` writable.
+unsafe fn failed(reason: *mut *CChar, why: StringView) -> bool {
+    reason.write(why.ptr as *CChar);
+    return false;
+}
+
+/// Safety: `f` is an open file.
+unsafe fn filePut(f: *mut file) { kobject_put(f as *mut kobject); }
+
+/// Safety: `path` a terminated string.
+unsafe fn writeFile(path: *CChar, seed: u8, len: u32) -> bool {
+    var f = 0 as *mut file;
+    if (vfs_open(0 as *mut vnode, path, O_WRONLY | O_CREAT | O_TRUNC, 420, borrow mut f as *mut *mut file) != 0) {
+        return false;
+    }
+    let buf = kmalloc(if (len != 0) len as usize else 1, 0) as *mut u8;
+    if (buf.isNull()) {
+        filePut(f);
+        return false;
+    }
+    for (i in 0u32..len) {
+        buf.add(i as usize).write(seed.wrappingAdd(truncate<u8>(i)));
+    }
+    let ok = file_write(f, buf as *void, len as usize) == len as i64;
+    kfree(buf as *mut void);
+    filePut(f);
+    return ok;
+}
+
+/// Safety: `path` a terminated string.
+unsafe fn readMatches(path: *CChar, seed: u8, len: u32) -> bool {
+    var f = 0 as *mut file;
+    if (vfs_open(0 as *mut vnode, path, O_RDONLY, 0, borrow mut f as *mut *mut file) != 0) {
+        return false;
+    }
+    let buf = kmalloc(len as usize + 1, 0) as *mut u8;
+    if (buf.isNull()) {
+        filePut(f);
+        return false;
+    }
+    let n = file_read(f, buf as *mut void, len as usize + 1);
+    var ok = n == len as i64;
+    var i: u32 = 0;
+    while (ok && i < len) {
+        ok = buf.add(i as usize).read() == seed.wrappingAdd(truncate<u8>(i));
+        i += 1;
+    }
+    kfree(buf as *mut void);
+    filePut(f);
+    return ok;
+}
+
+/// The record of `path`, made if it is new; null when the record is full.
+/// Safety: `path` a terminated string.
+unsafe fn stateOf(c: borrow mut Crash, path: *CChar) -> *mut Expect {
+    for (i in 0u32..c.nrState) {
+        let e = borrow mut c.state[i as usize] as *mut Expect;
+        if (strcmp(borrow Ptr.toBorrow(e as *Expect).path as *[u8; 32] as *CChar, path) == 0) {
+            return e;
+        }
+    }
+    if (c.nrState == MAX_FILES) {
+        return 0 as *mut Expect;
+    }
+    let e = borrow mut c.state[c.nrState as usize] as *mut Expect;
+    c.nrState += 1;
+    memset(e as *mut void, 0, layoutOf<Expect>().size);
+    let x = Ptr.toBorrowMut(e);
+    let n = strlen(path);
+    let m = if (n < 31) n else 31;
+    memcpy(borrow mut x.path as *mut [u8; 32] as *mut void, path as *void, m);
+    return e;
+}
+
+/// Safety: `path` a terminated string.
+unsafe fn wlWrite(c: borrow mut Crash, path: *CChar, seed: u8, len: u32) -> bool {
+    if (!writeFile(path, seed, len)) {
+        return false;
+    }
+    let e = stateOf(c, path);
+    if (e.isNull()) {
+        return false;
+    }
+    let x = Ptr.toBorrowMut(e);
+    x.seed = seed;
+    x.len = len;
+    x.present = true;
+    return true;
+}
+
+/// Safety: `path` a terminated string.
+unsafe fn wlUnlink(c: borrow mut Crash, path: *CChar) -> bool {
+    if (vfs_unlink(0 as *mut vnode, path) != 0) {
+        return false;
+    }
+    let e = stateOf(c, path);
+    if (!e.isNull()) {
+        let x = Ptr.toBorrowMut(e);
+        x.present = false;
+    }
+    return true;
+}
+
+/// Safety: the paths terminated strings.
+unsafe fn wlRename(c: borrow mut Crash, from: *CChar, to: *CChar) -> bool {
+    if (vfs_rename(0 as *mut vnode, from, to) != 0) {
+        return false;
+    }
+    let src = stateOf(c, from);
+    let dst = stateOf(c, to);
+    if (src.isNull() || dst.isNull()) {
+        return false;
+    }
+    let s = Ptr.toBorrowMut(src);
+    let d = Ptr.toBorrowMut(dst);
+    d.seed = s.seed;
+    d.len = s.len;
+    d.present = true;
+    s.present = false;
+    return true;
+}
+
+/// Safety: `bd` is the recorded device.
+unsafe fn wlSync(c: borrow mut Crash, bd: *mut blkdev) -> bool {
+    if (vfs_sync() != 0 || c.nrSyncs == MAX_SYNCS) {
+        return false;
+    }
+    let sp = borrow mut c.syncs[c.nrSyncs as usize] as *mut SyncPoint;
+    c.nrSyncs += 1;
+    let s = Ptr.toBorrowMut(sp);
+    s.logLen = ramblk_record_count(bd);
+    memcpy(borrow mut s.files as *mut [Expect; 32] as *mut void, borrow c.state as *[Expect; 32] as *void,
+        layoutOf<Expect>().size * MAX_FILES as usize);
+    s.nrFiles = c.nrState;
+    return true;
+}
+
+/// What a walk found.
+struct Walk {
+    files: u32;
+    dirs: u32;
+    ok: bool;
+}
+
+/// Walk every directory under `dir`, read every regular file.
+/// Safety: `dir` a terminated string; `buf` 4096 writable bytes.
+unsafe fn walk(dir: *CChar, depth: u32, w: borrow mut Walk, buf: *mut u8) {
+    if (!w.ok || depth > 4) {
+        return;
+    }
+    var vn = 0 as *mut vnode;
+    if (vfs_lookup(0 as *mut vnode, dir, borrow mut vn as *mut *mut vnode) != 0) {
+        w.ok = false;
+        return;
+    }
+    let names = kzalloc(LIST_MAX * NAME_MAX + LIST_MAX) as *mut u8;
+    if (names.isNull()) {
+        vnode_put(vn);
+        w.ok = false;
+        return;
+    }
+    let isdir = names.add(LIST_MAX * NAME_MAX);
+    var n: u32 = 0;
+    let rc = cfs_crash_floor_list(vn, names, isdir, borrow mut n as *mut u32);
+    vnode_put(vn);
+    if (rc != 0) {
+        w.ok = false;
+    }
+    w.dirs += 1;
+    var i: u32 = 0;
+    while (i < n && w.ok) {
+        // "%s/%s", cut to the buffer as ksnprintf cuts it.
+        var path = [0u8; 96];
+        var at: usize = 0;
+        let name = names.add(i as usize * NAME_MAX) as *CChar;
+        for (part in 0u32..3) {
+            let src = if (part == 0) dir as *u8 else if (part == 1) "/".ptr else name as *u8;
+            let len = if (part == 1) 1 else strlen(src as *CChar);
+            for (j in 0usize..len) {
+                if (at < 95) {
+                    path[at] = src.add(j).read();
+                    at += 1;
+                }
+            }
+        }
+        path[at] = 0;
+        let pp = borrow path as *[u8; 96] as *CChar;
+        if (isdir.add(i as usize).read() != 0) {
+            walk(pp, depth + 1, w, buf);
+        } else {
+            var f = 0 as *mut file;
+            if (vfs_open(0 as *mut vnode, pp, O_RDONLY, 0, borrow mut f as *mut *mut file) != 0) {
+                w.ok = false;
+                break;
+            }
+            var got: i64 = 1;
+            while (got > 0) {
+                got = file_read(f, buf as *mut void, 4096);
+            }
+            if (got < 0) {
+                w.ok = false;
+            }
+            filePut(f);
+            w.files += 1;
+        }
+        i += 1;
+    }
+    kfree(names as *mut void);
+}
+
+/// The last sync whose device-changing writes are all among the first `entries`.
+fn lastSyncWithin(c: borrow Crash, entries: u32) -> i32 {
+    var sp: i32 = -1;
+    for (s in 0u32..c.nrSyncs) {
+        if (c.syncs[s as usize].commit <= entries) {
+            sp = truncate<i32>(s);
+        }
+    }
+    return sp;
+}
+
+/// Every file sync point `s` recorded as present reads back with its contents; on a mismatch, the offending entry.
+/// Safety: `s` is a sync point; `bad` null or writable.
+unsafe fn stateMatches(c: borrow Crash, s: i32, bad: *mut i32) -> bool {
+    let sp = borrow c.syncs[truncate<usize>(s)];
+    for (i in 0u32..sp.nrFiles) {
+        let e = borrow sp.files[i as usize];
+        if (!e.present) {
+            continue;
+        }
+        if (!readMatches(borrow e.path as *[u8; 32] as *CChar, e.seed, e.len)) { // recorded with the mount prefix
+            if (!bad.isNull()) {
+                bad.write(truncate<i32>(i));
+            }
+            return false;
+        }
+    }
+    return true;
+}
+
+/// The mount at the test's mount point.
+/// Safety: none beyond the VFS's own.
+unsafe fn mountOfMnt() -> *mut mount {
+    var p = [0u8; 96];
+    var vn = 0 as *mut vnode;
+    if (vfs_lookup(0 as *mut vnode, mntPath(mut p, ""), borrow mut vn as *mut *mut vnode) != 0) {
+        return 0 as *mut mount;
+    }
+    let m = Ptr.toBorrow(vn as *vnode).mnt;
+    vnode_put(vn);
+    return m;
+}
+
+/// The snapshots the workload takes, by name: every one an image still has must read through, because a snapshot's
+/// tree is an ordinary tree and a prefix that lost half a snapshot-list change would not walk.
+const SNAPNAMES: [StringView; 2] = ["s1", "s2"];
+
+/// "cosmofs-replay: prefix K: ...", an error.
+fn prefixLine(line: borrow mut TextWriter, k: u32) {
+    line.text("cosmofs-replay: prefix ");
+    line.decimal(k as u64);
+    line.text(": ");
+}
+
+/// The check's findings, said: a prefix that is not clean.
+fn sayDirty(k: u32, rc: i32, r: borrow cosmofs_check_report) {
+    var buffer = [0u8; 256];
+    var line = TextWriter.create(mut buffer[..]);
+    prefixLine(mut line, k);
+    line.text("check rc ");
+    line.signed(rc as i64);
+    line.text(": ");
+    line.decimal(r.alloc_not_seen.count);
+    line.text(" leaked, ");
+    line.decimal(r.seen_not_alloc.count);
+    line.text(" free-in-use, ");
+    line.decimal(r.dup.count);
+    line.text(" cross-linked, ");
+    line.decimal(r.nlink_wrong.count);
+    line.text(" bad nlink, ");
+    line.decimal(r.orphan.count);
+    line.text(" orphan, ");
+    line.decimal(r.dangling_entry.count);
+    line.text(" dangling, ");
+    line.decimal(r.dir_bad.count);
+    line.text(" bad entries, ");
+    line.decimal(r.counter_wrong.count);
+    line.text(" counters, ");
+    line.decimal(r.chain_cycle.count);
+    line.text(" cycles, ");
+    line.decimal(r.unreadable.count);
+    line.text(" unreadable");
+    KernelLog.send(LogLevel.Error, line);
+    var buffer2 = [0u8; 256];
+    var line2 = TextWriter.create(mut buffer2[..]);
+    prefixLine(mut line2, k);
+    line2.text("first offenders: leaked ");
+    line2.decimal(if (r.alloc_not_seen.named != 0) r.alloc_not_seen.name[0] else 0);
+    line2.text(", free-in-use ");
+    line2.decimal(if (r.seen_not_alloc.named != 0) r.seen_not_alloc.name[0] else 0);
+    line2.text(", unreadable ");
+    line2.decimal(if (r.unreadable.named != 0) r.unreadable.name[0] else 0);
+    line2.text(", dir_bad ");
+    line2.decimal(if (r.dir_bad.named != 0) r.dir_bad.name[0] else 0);
+    line2.text("; snapshots seen ");
+    line2.decimal(r.snapshots_seen);
+    KernelLog.send(LogLevel.Error, line2);
+}
+
+/// Mount the prefix of `k` writes (the last one torn when `torn`) and check it against the last committed state.
+/// Safety: `bd` is the recorded device, `base` its image before the workload, `log` its log; `why` writable.
+unsafe fn checkPrefix(c: borrow mut Crash, bd: *mut blkdev, base: *u8, log: *ramblk_log, k: u32, torn: bool,
+    why: *mut *CChar) -> bool {
+    ramblk_restore(bd, base);
+    ramblk_replay(bd, log, k, torn);
+    var mp = [0u8; 96];
+    let mnt = mntPath(mut mp, "");
+    if (vfs_mount(mnt, "cosmofs\0".ptr as *CChar, bd, 0) != 0) {
+        why.write("prefix image does not mount\0".ptr as *CChar);
+        return false;
+    }
+    // The last sync whose device-changing writes are all in this prefix (a sync's trailing flush changes nothing, so a
+    // prefix that ends right after the superblock write shows the new root). With a torn last write, entry k-1 is
+    // incomplete: if it is a sync's commit write the device may show either root, depending on which half carried the
+    // superblock, so both states are accepted.
+    let sp = lastSyncWithin(c, if (torn && k > 0) k - 1 else k);
+    let alt = if (torn) lastSyncWithin(c, k) else sp;
+    var ok = true;
+    if (sp >= 0 && !stateMatches(c, sp, 0 as *mut i32) && !(alt != sp && stateMatches(c, alt, 0 as *mut i32))) {
+        var bad: i32 = -1;
+        var stSlot = [0u64; 12];
+        let st = borrow mut stSlot as *mut [u64; 12] as *mut cosmo_stat;
+        var src: i32 = -ENOENT;
+        let _ = stateMatches(c, sp, borrow mut bad as *mut i32);
+        if (bad >= 0) {
+            let e = borrow c.syncs[truncate<usize>(sp)].files[truncate<usize>(bad)];
+            let path = borrow e.path as *[u8; 32] as *CChar;
+            src = vfs_stat(0 as *mut vnode, path, st);
+            if (src == 0) {
+                let _ = vfs_stat(0 as *mut vnode, path, st);
+            }
+            var buffer = [0u8; 256];
+            var line = TextWriter.create(mut buffer[..]);
+            prefixLine(mut line, k);
+            line.bytes(Slice.fromRaw(path as *u8, strlen(path)));
+            line.text(" expected ");
+            line.decimal(e.len as u64);
+            line.text(" bytes (seed ");
+            line.decimal(e.seed as u64);
+            line.text("): stat ");
+            line.signed(src as i64);
+            line.text(" size ");
+            line.decimal(if (src == 0) Ptr.toBorrow(st as *cosmo_stat).size else 0);
+            line.text("; sync committed at log ");
+            line.decimal(c.syncs[truncate<usize>(sp)].commit as u64);
+            KernelLog.send(LogLevel.Error, line);
+        }
+        why.write("a committed file is missing or wrong in a prefix image\0".ptr as *CChar);
+        ok = false;
+    }
+    let buf = borrow mut c.buf as *mut [u8; 4096] as *mut u8;
+    if (ok) {
+        var w = Walk { files: 0, dirs: 0, ok: true };
+        walk(mnt, 0, mut w, buf);
+        if (!w.ok) {
+            why.write("a prefix image does not walk or read cleanly\0".ptr as *CChar);
+            ok = false;
+        }
+    }
+    // Every snapshot this image still has, read back the same way: the live walk never enters `.snapshots`, which is
+    // found by name only.
+    var i: usize = 0;
+    while (ok && i < 2) {
+        var p = [0u8; 96];
+        var n: usize = 0;
+        for (j in 0usize..MNT.length) {
+            p[n] = MNT[j];
+            n += 1;
+        }
+        let mid = "/.snapshots/";
+        for (j in 0usize..mid.length) {
+            p[n] = mid[j];
+            n += 1;
+        }
+        for (j in 0usize..SNAPNAMES[i].length) {
+            p[n] = SNAPNAMES[i][j];
+            n += 1;
+        }
+        let path = borrow p as *[u8; 96] as *CChar;
+        var vn = 0 as *mut vnode;
+        if (vfs_lookup(0 as *mut vnode, path, borrow mut vn as *mut *mut vnode) == 0) {
+            vnode_put(vn);
+            var w = Walk { files: 0, dirs: 0, ok: true };
+            walk(path, 0, mut w, buf);
+            if (!w.ok) {
+                var buffer = [0u8; 128];
+                var line = TextWriter.create(mut buffer[..]);
+                prefixLine(mut line, k);
+                line.text("snapshot ");
+                line.text(SNAPNAMES[i]);
+                line.text(" does not walk or read");
+                KernelLog.send(LogLevel.Error, line);
+                why.write("a snapshot in a prefix image does not walk or read cleanly\0".ptr as *CChar);
+                ok = false;
+            }
+        } // else this prefix predates it, or postdates its deletion
+        i += 1;
+    }
+    // And the shape, not only the bytes: every replayed prefix is **clean**. A root records what it freed, and a mount
+    // finishes the job (docs/audit/next-subsystem-unmount-leak.md), so a crash-consistent image has nothing stranded
+    // and the suite can say so plainly. The count is still gathered, because "zero" is a measurement and not an
+    // assumption, and it must be zero.
+    if (ok) {
+        let rep = kzalloc(layoutOf<cosmofs_check_report>().size) as *mut cosmofs_check_report;
+        let crc = if (rep.isNull()) -12 else cosmofs_check(mountOfMnt(), rep, 0);
+        if (crc != 0 || !Ptr.toBorrow(rep as *cosmofs_check_report).clean) {
+            if (!rep.isNull()) {
+                sayDirty(k, crc, Ptr.toBorrow(rep as *cosmofs_check_report));
+            }
+            why.write("a replayed prefix image is not clean\0".ptr as *CChar);
+            ok = false;
+        } else {
+            c.leakTotal += Ptr.toBorrow(rep as *cosmofs_check_report).alloc_not_seen.count; // must stay zero
+            c.prefixesChecked += 1;
+        }
+        kfree(rep as *mut void);
+    }
+    // And the one the structural check cannot make. A deadlist's entries are claimed as non-live, so a block named by
+    // two of them is not a duplicate claim and not a finding -- the image mounts, reads and checks perfectly, and the
+    // damage arrives two snapshot deletions later under whatever the allocator has since put in the block.
+    if (ok) {
+        var seen: u64 = 0;
+        var first: u64 = 0;
+        let dups = cosmofs_test_deadlist_dups(mountOfMnt(), borrow mut seen as *mut u64, borrow mut first as *mut u64);
+        c.deadSeen += seen;
+        c.deadDups += dups;
+        if (dups != 0) {
+            var buffer = [0u8; 128];
+            var line = TextWriter.create(mut buffer[..]);
+            prefixLine(mut line, k);
+            line.decimal(dups);
+            line.text(" deadlist entr");
+            line.text(if (dups == 1) "y" else "ies");
+            line.text(" duplicated, first block ");
+            line.decimal(first);
+            KernelLog.send(LogLevel.Error, line);
+            why.write("a replayed prefix has one block on two deadlists\0".ptr as *CChar);
+            ok = false;
+        }
+    }
+    let _ = vfs_umount2(mnt, VFS_UMOUNT_FORCE);
+    return ok;
+}
+
+/// The workload: creates, rewrites, a directory, renames, unlinks, with a sync after each group; then snapshots and
+/// an orphan.
+/// Safety: `bd` is the recorded device, mounted; `reason` writable.
+unsafe fn workload(c: borrow mut Crash, bd: *mut blkdev, reason: *mut *CChar) -> bool {
+    var p = [0u8; 96];
+    var q = [0u8; 96];
+    if (!wlWrite(c, mntPath(mut p, "/a"), 1, 100)) {
+        return failed(reason, "check failed: wl_write(MNT \"/a\", 1, 100) at line 618\0");
+    }
+    if (!wlWrite(c, mntPath(mut p, "/b"), 2, 5000)) {
+        return failed(reason, "check failed: wl_write(MNT \"/b\", 2, 5000) at line 621\0");
+    }
+    if (!wlSync(c, bd)) {
+        return failed(reason, "check failed: wl_sync(bd) at line 624\0");
+    }
+    if (!wlWrite(c, mntPath(mut p, "/a"), 3, 9000)) { // rewrite, grows
+        return failed(reason, "check failed: wl_write(MNT \"/a\", 3, 9000) at line 627\0");
+    }
+    if (vfs_mkdir(0 as *mut vnode, mntPath(mut p, "/d"), 493) != 0) {
+        return failed(reason, "check failed: vfs_mkdir(NULL, MNT \"/d\", 0755) == 0 at line 630\0");
+    }
+    if (!wlWrite(c, mntPath(mut p, "/d/c"), 4, 300)) {
+        return failed(reason, "check failed: wl_write(MNT \"/d/c\", 4, 300) at line 633\0");
+    }
+    if (!wlSync(c, bd)) {
+        return failed(reason, "check failed: wl_sync(bd) at line 636\0");
+    }
+    if (!wlRename(c, mntPath(mut p, "/b"), mntPath(mut q, "/d/b2"))) {
+        return failed(reason, "check failed: wl_rename(MNT \"/b\", MNT \"/d/b2\") at line 639\0");
+    }
+    if (!wlWrite(c, mntPath(mut p, "/e"), 5, 40000)) { // many blocks
+        return failed(reason, "check failed: wl_write(MNT \"/e\", 5, 40000) at line 642\0");
+    }
+    if (!wlSync(c, bd)) {
+        return failed(reason, "check failed: wl_sync(bd) at line 645\0");
+    }
+    if (!wlUnlink(c, mntPath(mut p, "/a"))) {
+        return failed(reason, "check failed: wl_unlink(MNT \"/a\") at line 648\0");
+    }
+    if (!wlWrite(c, mntPath(mut p, "/d/c"), 6, 100)) { // rewrite, shrinks
+        return failed(reason, "check failed: wl_write(MNT \"/d/c\", 6, 100) at line 651\0");
+    }
+    if (!wlWrite(c, mntPath(mut p, "/f"), 7, 1)) {
+        return failed(reason, "check failed: wl_write(MNT \"/f\", 7, 1) at line 654\0");
+    }
+    if (!wlSync(c, bd)) {
+        return failed(reason, "check failed: wl_sync(bd) at line 657\0");
+    }
+    if (!wlRename(c, mntPath(mut p, "/f"), mntPath(mut q, "/e"))) { // replaces e
+        return failed(reason, "check failed: wl_rename(MNT \"/f\", MNT \"/e\") at line 660\0");
+    }
+    if (!wlSync(c, bd)) {
+        return failed(reason, "check failed: wl_sync(bd) at line 663\0");
+    }
+    // And the snapshot list, which until this unit was the one metadata chain a commit edited where it lay
+    // (docs/audit/next-subsystem-snap-deadlist.md). Two groups, because the two hazards are in different writers:
+    // `s1` taken and then a file it holds unlinked, which is the commit's release loop appending to a deadlist; `s2`
+    // taken and `s1` deleted, which is the settle's keeper write-back and the cleared entry -- the two writes that run
+    // *inside* a transaction and that a crash could show to the root before it. Without them the suite replayed every
+    // prefix of a filesystem that had never taken a snapshot, and reported them all clean.
+    if (vfs_mkdir(0 as *mut vnode, mntPath(mut p, "/.snapshots/s1"), 493) != 0) {
+        return failed(reason, "check failed: vfs_mkdir(NULL, MNT \"/.snapshots/s1\", 0755) == 0 at line 672\0");
+    }
+    if (!wlUnlink(c, mntPath(mut p, "/d/c"))) { // blocks s1 holds leave the live tree
+        return failed(reason, "check failed: wl_unlink(MNT \"/d/c\") at line 675\0");
+    }
+    if (!wlSync(c, bd)) {
+        return failed(reason, "check failed: wl_sync(bd) at line 678\0");
+    }
+    if (vfs_mkdir(0 as *mut vnode, mntPath(mut p, "/.snapshots/s2"), 493) != 0) {
+        return failed(reason, "check failed: vfs_mkdir(NULL, MNT \"/.snapshots/s2\", 0755) == 0 at line 681\0");
+    }
+    if (vfs_rmdir(0 as *mut vnode, mntPath(mut p, "/.snapshots/s1")) != 0) {
+        return failed(reason, "check failed: vfs_rmdir(NULL, MNT \"/.snapshots/s1\") == 0 at line 684\0");
+    }
+    if (!wlSync(c, bd)) {
+        return failed(reason, "check failed: wl_sync(bd) at line 687\0");
+    }
+    // And an inode whose last name goes while a handle still holds it, across a sync -- so the prefixes from here on
+    // carry a live orphan record, and a crash in the middle of one is the case that used to lose the inode and its
+    // blocks for good (docs/audit/next-subsystem-orphan.md).
+    if (!wlWrite(c, mntPath(mut p, "/tmpfile"), 9, 3000)) {
+        return failed(reason, "check failed: wl_write(MNT \"/tmpfile\", 9, 3000) at line 693\0");
+    }
+    if (!wlSync(c, bd)) {
+        return failed(reason, "check failed: wl_sync(bd) at line 696\0");
+    }
+    var held = 0 as *mut file;
+    if (vfs_open(0 as *mut vnode, mntPath(mut p, "/tmpfile"), O_RDONLY, 0, borrow mut held as *mut *mut file) != 0) {
+        return failed(reason,
+            "check failed: vfs_open(NULL, MNT \"/tmpfile\", COSMO_O_RDONLY, 0, &held) == 0 at line 701\0");
+    }
+    if (!wlUnlink(c, mntPath(mut p, "/tmpfile"))) {
+        return failed(reason, "check failed: wl_unlink(MNT \"/tmpfile\") at line 704\0");
+    }
+    if (!wlSync(c, bd)) {
+        return failed(reason, "check failed: wl_sync(bd) at line 707\0");
+    }
+    filePut(held);
+    if (vfs_umount2(mntPath(mut p, ""), 0) != 0) { // the final commit
+        return failed(reason, "check failed: vfs_umount(MNT) == 0 at line 711\0");
+    }
+    return true;
+}
+
+/// Write `i` of the log's sectors: 0 for a flush.
+/// Safety: `log` holds more than `i` writes.
+unsafe fn nsectors(log: *mut ramblk_log, i: u32) -> u32 =>
+    Ptr.toBorrow((Ptr.toBorrow(log as *ramblk_log).w as *mut u8).add(i as usize * RAMBLK_WRITE) as *ramblk_write)
+        .nsectors;
+
+/// The self-test.
+/// Safety: `reason` writable.
+@cfg("CONFIG_DEBUG")
+@export("selftest_cosmofs_replay")
+unsafe fn selftestReplay(reason: *mut *CChar) -> bool {
+    let cp = kzalloc(layoutOf<Crash>().size) as *mut Crash;
+    if (cp.isNull()) {
+        return failed(reason, "check failed: the run's record at line 729\0");
+    }
+    let ok = replay(Ptr.toBorrowMut(cp), reason);
+    kfree(cp as *mut void);
+    return ok;
+}
+
+/// Safety: `reason` writable.
+unsafe fn replay(c: borrow mut Crash, reason: *mut *CChar) -> bool {
+    let vnodes0 = vfs_vnode_count();
+    var p = [0u8; 96];
+    let mnt = mntPath(mut p, "");
+    let bd = ramblk_create(NBLOCKS);
+    if (bd.isNull()) {
+        return failed(reason, "check failed: bd != NULL at line 743\0");
+    }
+    if (cosmofs_format(bd) != 0) {
+        return failed(reason, "check failed: cosmofs_format(bd) == 0 at line 746\0");
+    }
+    let base = ramblk_snapshot(bd);
+    if (base.isNull()) {
+        return failed(reason, "check failed: base != NULL at line 750\0");
+    }
+    let mk = vfs_mkdir(0 as *mut vnode, mnt, 493);
+    if (!(mk == 0 || mk == -EEXIST)) {
+        return failed(reason, "check failed: mk == 0 || mk == -EEXIST at line 754\0");
+    }
+    if (vfs_mount(mnt, "cosmofs\0".ptr as *CChar, bd, 0) != 0) {
+        return failed(reason, "check failed: vfs_mount(MNT, \"cosmofs\", bd, 0) == 0 at line 757\0");
+    }
+    var mv = 0 as *mut vnode;
+    if (vfs_lookup(0 as *mut vnode, mnt, borrow mut mv as *mut *mut vnode) != 0) {
+        return failed(reason, "check failed: vfs_lookup(NULL, MNT, &mv) == 0 at line 761\0");
+    }
+    // Every root write in the log is one this workload asked for.
+    cosmofs_test_set_writeback(Ptr.toBorrow(mv as *vnode).mnt, false);
+    vnode_put(mv);
+    ramblk_record_start(bd, MAX_LOG);
+    if (!workload(c, bd, reason)) {
+        return false;
+    }
+    let log = ramblk_record_stop(bd);
+    if (log.isNull() || Ptr.toBorrow(log as *ramblk_log).dropped != 0 || Ptr.toBorrow(log as *ramblk_log).n == 0) {
+        return failed(reason, "check failed: log != NULL && log->dropped == 0 && log->n > 0 at line 772\0");
+    }
+    let lg = Ptr.toBorrow(log as *ramblk_log);
+    for (s in 0u32..c.nrSyncs) {
+        var cnt = c.syncs[s as usize].logLen;
+        while (cnt > 0 && nsectors(log, cnt - 1) == 0) {
+            cnt -= 1;
+        }
+        c.syncs[s as usize].commit = cnt;
+        var buffer = [0u8; 96];
+        var line = TextWriter.create(mut buffer[..]);
+        line.text("cosmofs-replay: sync ");
+        line.decimal(s as u64);
+        line.text(" committed at log entry ");
+        line.decimal(cnt as u64);
+        line.text(" (returned at ");
+        line.decimal(c.syncs[s as usize].logLen as u64);
+        line.text(")");
+        KernelLog.send(LogLevel.Debug, line);
+    }
+
+    // Every prefix when the log is short; otherwise every entry around each sync point and a stride elsewhere. Both
+    // intact and torn last writes.
+    var checked: u32 = 0;
+    var why = 0 as *CChar;
+    var ok = true;
+    let n = lg.n;
+    let stride = if (n <= 256) 1 else (n + 127) / 128;
+    var k: u32 = 0;
+    while (k <= n && ok) {
+        var nearSync = false;
+        for (s in 0u32..c.nrSyncs) {
+            let ll = c.syncs[s as usize].logLen;
+            if (k + 4 >= ll && k <= ll + 4) {
+                nearSync = true;
+            }
+        }
+        if (!(nearSync || k % stride == 0 || k == n)) {
+            k += 1;
+            continue;
+        }
+        var tornVariant = false;
+        ok = checkPrefix(c, bd, base as *u8, log as *ramblk_log, k, false, borrow mut why as *mut *CChar);
+        checked += 1;
+        if (ok && k > 0 && nsectors(log, k - 1) > 1) {
+            tornVariant = true;
+            ok = checkPrefix(c, bd, base as *u8, log as *ramblk_log, k, true, borrow mut why as *mut *CChar);
+            checked += 1;
+        }
+        if (!ok) {
+            var buffer = [0u8; 160];
+            var line = TextWriter.create(mut buffer[..]);
+            line.text("cosmofs-replay: prefix ");
+            line.decimal(k as u64);
+            line.text(" of ");
+            line.decimal(n as u64);
+            line.text(" writes (last write ");
+            line.text(if (tornVariant) "torn" else "intact");
+            line.text("): ");
+            line.bytes(Slice.fromRaw(why as *u8, strlen(why)));
+            KernelLog.send(LogLevel.Error, line);
+        }
+        k += 1;
+    }
+    ramblk_log_free(log);
+    kfree(base as *mut void);
+    if (vfs_rmdir(0 as *mut vnode, mnt) != 0) {
+        return failed(reason, "check failed: vfs_rmdir(NULL, MNT) == 0 at line 839\0");
+    }
+    ramblk_destroy(bd);
+    if (!ok) {
+        return failed(reason, "check failed: ok at line 843\0");
+    }
+    if (vfs_vnode_count() != vnodes0) {
+        return failed(reason, "check failed: vfs_vnode_count() == vnodes0 at line 846\0");
+    }
+    // The structural check ran on these images, and found nothing. Both halves are asserted: a suite that stopped
+    // asking would pass in silence (what the fsck unit's no-crash-check bug-proof showed), and a suite that asked and
+    // found something would have a crash stranding blocks again.
+    if (c.prefixesChecked != checked) {
+        return failed(reason, "check failed: g_prefixes_checked == checked at line 852\0");
+    }
+    if (c.leakTotal != 0) {
+        return failed(reason, "check failed: g_leak_total == 0 at line 855\0");
+    }
+    // Both halves again: entries were looked at, and none was a duplicate. The first is what stops "no duplicates"
+    // being the answer a filesystem with no deadlist gives.
+    if (c.deadSeen == 0) {
+        return failed(reason, "check failed: g_dead_seen > 0 at line 860\0");
+    }
+    if (c.deadDups != 0) {
+        return failed(reason, "check failed: g_dead_dups == 0 at line 863\0");
+    }
+    sayDone(c, n, checked);
+    return true;
+}
+
+/// The run's three closing lines.
+fn sayDone(c: borrow Crash, writes: u32, checked: u32) {
+    var buffer = [0u8; 256];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: cosmofs-replay: ");
+    line.decimal(c.prefixesChecked as u64);
+    line.text(" prefix images checked, ");
+    line.decimal(c.leakTotal);
+    line.text(" blocks stranded -- the 162 of 199 the fsck unit measured are now recorded by the root that freed ");
+    line.text("them and reclaimed at mount");
+    KernelLog.send(LogLevel.Info, line);
+    var b2 = [0u8; 160];
+    var l2 = TextWriter.create(mut b2[..]);
+    l2.text("selftest: cosmofs-replay: ");
+    l2.decimal(writes as u64);
+    l2.text(" writes recorded over ");
+    l2.decimal(c.nrSyncs as u64);
+    l2.text(" sync points; ");
+    l2.decimal(checked as u64);
+    l2.text(" prefix images mounted and checked");
+    KernelLog.send(LogLevel.Info, l2);
+    var b3 = [0u8; 160];
+    var l3 = TextWriter.create(mut b3[..]);
+    l3.text("selftest: cosmofs-replay: ");
+    l3.decimal(c.deadSeen);
+    l3.text(" deadlist entries examined across those images, ");
+    l3.decimal(c.deadDups);
+    l3.text(" on two lists");
+    KernelLog.send(LogLevel.Info, l3);
+}
