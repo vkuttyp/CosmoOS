@@ -411,11 +411,11 @@ static int render_loadavg(char *out, size_t n)
      * (FIXED_1/200 added first), so this agrees with sysinfo's readers. */
     for (unsigned i = 0; i < 3; i++)
         l[i] += (1ul << 11) / 200;
+    unsigned threads = thread_count(), last = (unsigned)process_last_pid();   /* in this order, whatever the compiler */
 #define LOAD_INT(x)  ((x) >> 11)
 #define LOAD_FRAC(x) ((((x) & ((1ul << 11) - 1)) * 100) >> 11)
     return ksnprintf(out, n, "%lu.%02lu %lu.%02lu %lu.%02lu %u/%u %u\n", LOAD_INT(l[0]), LOAD_FRAC(l[0]),
-                     LOAD_INT(l[1]), LOAD_FRAC(l[1]), LOAD_INT(l[2]), LOAD_FRAC(l[2]), running, thread_count(),
-                     (unsigned)process_last_pid());
+                     LOAD_INT(l[1]), LOAD_FRAC(l[1]), LOAD_INT(l[2]), LOAD_FRAC(l[2]), running, threads, last);
 #undef LOAD_INT
 #undef LOAD_FRAC
 }
@@ -432,13 +432,15 @@ static int render_uptime(char *out, size_t n)
                      (unsigned long long)(idle / 10000000ull % 100));
 }
 
-/* Linux's first line, with what uname says: the release, the compiler,
- * then uname's version (shell completeness S3). Nobody here built it at
- * a known user@host, so that part of Linux's line is not invented. */
+/* Linux's first line, with what uname says: the release, the compiler, then uname's version (shell completeness
+ * S3). Nobody here built it at a known user@host, so that part of Linux's line is not invented. */
+#ifndef PROCFS_COMPILER
+#define PROCFS_COMPILER "clang " __clang_version__   /* the host test, which gcc may build, names its own */
+#endif
 static int render_version(char *out, size_t n)
 {
-    return ksnprintf(out, n, "Linux version %s (clang %s) %s %s %s\n", KERNEL_LINUX_RELEASE, __clang_version__,
-                     KERNEL_NAME, KERNEL_VERSION, COSMO_BUILD_ID);
+    return ksnprintf(out, n, "Linux version %s (%s) %s %s %s\n", KERNEL_LINUX_RELEASE, PROCFS_COMPILER, KERNEL_NAME,
+                     KERNEL_VERSION, COSMO_BUILD_ID);
 }
 
 /* A block per online CPU: its index, then the architecture's lines
@@ -775,8 +777,7 @@ static int proc_link_readlink(struct vnode *vn, char *buf, size_t len)
     int n = link_target(PROC_INO_KIND(vn->ino), PROC_INO_PID(vn->ino), tmp, sizeof(tmp));
     if (n < 0)
         return n;
-    if ((size_t)n > len)
-        n = (int)len;
+    n = (size_t)n > len ? (int)len : n;
     memcpy(buf, tmp, (size_t)n);
     return n;
 }
@@ -1090,19 +1091,18 @@ static const struct vnode_ops proc_net_dir_ops = {
 
 /* --- /proc itself ----------------------------------------------------------- */
 
-/* A decimal pid, or -1. Strict: "01" and "1x" are not pids, and a name
- * that is not a pid must miss rather than be rounded into one. */
+/* A decimal pid, or 0, no process's (pid_t is unsigned). Strict: "01" and "1x" are not pids, nor rounded into one. */
 static pid_t parse_pid(const char *name, size_t len)
 {
     if (len == 0 || len > 9 || (len > 1 && name[0] == '0'))
-        return -1;
+        return 0;
     pid_t v = 0;
     for (size_t i = 0; i < len; i++) {
         if (name[i] < '0' || name[i] > '9')
-            return -1;
-        v = v * 10 + (name[i] - '0');
+            return 0;
+        v = v * 10 + (pid_t)(name[i] - '0');
     }
-    return v > 0 ? v : -1;
+    return v;
 }
 
 /*
@@ -1174,7 +1174,7 @@ static int proc_root_lookup(struct vnode *dir, const char *name, size_t len, str
         return 0;
     }
     pid_t pid = parse_pid(name, len);
-    if (pid < 0)
+    if (pid == 0)
         return -ENOENT;
     return proc_pid_dir(dir->mnt, pid, out);
 }

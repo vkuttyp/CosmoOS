@@ -18,5 +18,7 @@ static inline unsigned arch_cpu_id(void) { return 0; }
 static inline void arch_cpu_relax(void) {}
 static inline void arch_cpu_wait_for_interrupt(void) {}
 static inline void arch_cpu_halt_forever(void) { abort(); }
+/* The CPU's identification lines for /proc/cpuinfo: the test that needs it defines it. */
+int arch_cpu_info(char *buf, size_t len);
 
 #endif /* HOST_SHIM_ARCH_CPU_H */

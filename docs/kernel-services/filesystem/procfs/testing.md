@@ -72,8 +72,24 @@ Confirmed against the bug: with the filter dropped from the lookup, the
 unprivileged process opens the root-owned directory and the user-mode
 test fails.
 
+On the host, `tests/host/test_procfs.c` (roadmap 2.0 SA7) runs `procfs.c`
+over random process tables: processes visible and not, running, stopped
+and exited, with threads, terminals, limits, privileges, command lines,
+environments, roots, namespaces and open handles of every kind. It walks
+the mount from its root: every directory listed, from the start and
+resumed where the callback stopped it, every listed name and the names
+that must miss (`01`, `1x`, ten digits, `.x`) looked up, every file read
+page by page, every link read into buffers of every size, `environ`
+opened once and twice, while allocations and the vnode cache fail now
+and then. Every call into the kernel, with its arguments, and every
+result go into a digest (0x750297368390729d, clang and gcc; every line),
+and every vnode, text, process, terminal, record and handle reference is
+given back. It found that `parse_pid`'s "not a pid", -1 in an unsigned
+`pid_t`, was looked up as pid 4294967295 rather than refused; it is 0
+now, which no process has.
+
 Not covered: concurrent readdir against process creation and exit (the
 listing is a snapshot taken under the table lock, so it can name a pid
 that exits before it is opened — which reads as `ESRCH`, the same
-answer as any other race with an exit); more than 256 visible processes
-in one listing.
+answer as any other race with an exit). More than 256 visible processes
+in one listing is covered on the host only.
