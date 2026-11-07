@@ -716,6 +716,17 @@ int cfs_snap_by_name(struct cfs *fs, const char *name, size_t len, struct cfs_sn
  * the pool to format 15 when it needs long names (-ENAMETOOLONG when it
  * cannot). Under the tree's write lock, before anything is allocated. */
 int cfs_names_allow(struct cfs *fs, size_t len);
+/* cosmofs_data.c, for the directories and the files: how many runs an
+ * inode has; run `ne` set over what was there (the displaced block of a
+ * one-block run in *old); a data or directory block written copy-on-write
+ * with its checksum or seal; and `n` blocks from `lblk0` written as plain
+ * runs or, with `compress`, as compressed records where they shrink. */
+int cfs_extents_count(struct cfs *fs, const struct cfs_inode *in, unsigned *out);
+int cfs_set_extent(struct cfs *fs, struct cfs_inode *in, struct cfs_extent ne, uint64_t *old);
+int cfs_data_write_block(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, const void *buf,
+                         enum cfs_alloc_class cls);
+int cfs_record_write(struct cfs *fs, struct cfs_inode *in, uint64_t lblk0, const uint8_t *data, unsigned n,
+                     bool compress);
 bool cfs_snap_in_use(struct mount *mnt, unsigned tag, const struct vnode *victim);
 int cfs_map(struct cfs *fs, const struct cfs_inode *in, uint64_t lblk, uint64_t *pblk);
 /* The run covering `lblk`, whether it is a plain run or a compressed

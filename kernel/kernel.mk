@@ -194,6 +194,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel-services/filesystem/cosmofs/cosmofs_snapctl.c \
 	kernel-services/filesystem/cosmofs/cosmofs_csum.c \
 	kernel-services/filesystem/cosmofs/cosmofs_csum_floor.c \
+	kernel-services/filesystem/cosmofs/cosmofs_data.c \
 	kernel-services/filesystem/cosmofs/cosmofs_snap_floor.c \
 	kernel-services/filesystem/cosmofs/cosmofs_reach.c \
 	kernel-services/filesystem/cosmofs/cosmofs_rollback.c \
