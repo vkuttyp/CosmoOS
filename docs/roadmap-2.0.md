@@ -1442,6 +1442,15 @@ moves the comparison in the `.cee`; `tools/analyzer-fix-probe.py`'s old
 mode for its cosmofs cases fails to compile its baseline against today's
 headers, as it did on `origin/main` before this (to be mended with the
 extent-fail probe once `cosmofs.c` is ported).
+`cosmofs_snapctl.cee`, the eighth and the first of `cosmofs.c`'s
+sections, snapshots through /dev/fsctl: `tests/host/test_cfssnapctl.c`
+runs every operation with good and bad names, listings of none to
+hundreds of snapshots, paged, sized or not, with a rollback record
+pending, held or absent (0x82439c542373f871, clang and gcc; every line
+and branch that can be reached). The two helpers it shares with the
+.snapshots directory's rmdir are `cfs_snap_by_name` and
+`cfs_snap_in_use`; the once-per-root mark says which count it feeds,
+since a field holding a function cannot be called.
 
 Size: about 4.5x.
 

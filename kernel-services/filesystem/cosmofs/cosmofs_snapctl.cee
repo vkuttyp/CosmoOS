@@ -1,0 +1,629 @@
+// cosmofs_snapctl.cee - Snapshots through /dev/fsctl (roadmap 1.2 B1), in CeeSafe: roadmap 2.0 SA7.
+// tests/host/test_cfssnapctl.c holds it to the digest of the C it replaced.
+//
+// design.md, "Format version 12". The .snapshots directory stays as it was; this is the operator's interface, and the
+// one that can say what a snapshot is worth and roll back to one.
+//
+// struct cfs, the snapshot entries, the rollback record and the request stay C (cosmofs_internal.h,
+// cosmofs_format.h, kernel/cosmofs.h). The entries and the record the C kept on the stack are kept in zeroed slots of
+// words, checked against their C sizes (tests/host/test_cfssnapctl.c): a CeeSafe local cannot hold C state. The C's
+// once-per-root mark called a function its argument named; a field holding a function cannot be called here, so the
+// mark says which of the two counts it feeds.
+
+@header("kernel/vfs.h", "kernel/kmalloc.h", "kernel/mutex.h", "kernel/string.h", "kernel/cosmofs.h",
+    "cosmofs_internal.h")
+extern "C" {
+    struct mount {
+        fs_priv: *mut void;
+        flags: u32;
+    }
+    struct cfs_super {
+        version: u32;
+        imap_root: u64;
+        next_ino: u64;
+        members: u64;
+    }
+    struct cfs_memstate {
+        alloc_root: u64;
+    }
+    struct cfs {
+        sb: cfs_super;
+        nblocks: u64;
+        free_blocks: u64;
+        mem: *mut cfs_memstate;
+        lock: mutex;
+        failed: i32;
+        rollback_error: i32;
+        reserve: u64;
+    }
+    struct cfs_snapshot {
+        generation: u64;
+        created_ns: u64;
+        id: u64;
+        uuid: [u8; 16];
+        origin_id: u64;
+        flags: u32;
+        name: [u8; 32];
+    }
+    struct cfs_rollback {
+        state: u32;
+        target_uuid: [u8; 16];
+        safety_uuid: [u8; 16];
+    }
+    struct cosmofs_snap_info {
+        id: u64;
+        generation: u64;
+        created_ns: u64;
+        origin_id: u64;
+        referenced: u64;
+        unique: u64;
+        uuid: [u8; 16];
+        flags: u32;
+        format: u32;
+        name: [u8; 32];
+    }
+    struct cosmofs_snap_req {
+        op: u32;
+        name: *CChar;
+        name2: *CChar;
+        out: *mut cosmofs_snap_info;
+        max: u32;
+        no_sizes: bool;
+        after: u64;
+        count: u32;
+        total: u32;
+        format: u32;
+        pool_flags: u32;
+        free_bytes: u64;
+        total_bytes: u64;
+        rollback_error: i32;
+    }
+
+    fn kzalloc(size: usize) -> *mut void;
+    fn cfs_rollback_read(fs: *mut cfs, out: *mut cfs_rollback) -> i32;
+    fn cfs_snapshot_list(fs: *mut cfs, out: *mut cfs_snapshot, max: u32, count: *mut u32) -> i32;
+    fn cfs_tree_walk(fs: *mut cfs, imapRoot: u64, nextIno: u64, mark: extern "C" fn(*mut void, u64), arg: *mut void)
+        -> i32;
+    fn cfs_alloc_walk(fs: *mut cfs, root: u64, mark: extern "C" fn(*mut void, u64), arg: *mut void) -> i32;
+    fn cfs_snapshot_walk_held(fs: *mut cfs, s: *cfs_snapshot, mark: extern "C" fn(*mut void, u64), arg: *mut void)
+        -> i32;
+    fn cfs_tree_roots(fs: *mut cfs, s: *cfs_snapshot, imapRoot: *mut u64, nextIno: *mut u64);
+    fn cfs_sync_vnodes(fs: *mut cfs) -> i32;
+    fn cfs_snapshot_create(fs: *mut cfs, name: *CChar, identity: bool, out: *mut cfs_snapshot) -> i32;
+    fn cfs_snap_by_name(fs: *mut cfs, name: *CChar, len: usize, out: *mut cfs_snapshot, tag: *mut u32) -> i32;
+    fn cfs_snap_in_use(mnt: *mut mount, tag: u32, victim: *vnode) -> bool;
+    fn cfs_snapshot_delete(fs: *mut cfs, name: *CChar) -> i32;
+    fn cfs_rollback_request(fs: *mut cfs, target: *CChar, safetyName: *CChar, safety: *mut cfs_snapshot) -> i32;
+    fn cfs_clone_create(fs: *mut cfs, origin: *CChar, name: *CChar, out: *mut cfs_snapshot) -> i32;
+    fn cfs_rollback_cancel(fs: *mut cfs) -> i32;
+    fn cfs_rollback_boot_ok(fs: *mut cfs, released: *mut bool) -> i32;
+    fn strlen(s: *CChar) -> usize;
+    fn strlcpy(dst: *mut CChar, src: *CChar, size: usize) -> usize;
+    fn strchr(s: *CChar, c: i32) -> *mut CChar;
+    fn strcmp(a: *CChar, b: *CChar) -> i32;
+    fn memcmp(a: *void, b: *void, n: usize) -> i32;
+    fn memcpy(dst: *mut void, src: *void, n: usize) -> *mut void;
+    fn memset(p: *mut void, c: i32, n: usize) -> *mut void;
+    struct vnode;
+}
+
+// ---- errno.h, vfs.h, cosmofs.h, cosmofs_format.h values (asserted in tests/host/test_cfssnapctl.c) ----
+
+const EIO: i32 = 5;
+const ENOMEM: i32 = 12;
+const EBUSY: i32 = 16;
+const EINVAL: i32 = 22;
+const EROFS: i32 = 30;
+const ENAMETOOLONG: i32 = 36;
+const EOPNOTSUPP: i32 = 95;
+const MOUNT_RDONLY: u32 = 1;
+const SNAP_CREATE: u32 = 1;
+const SNAP_LIST: u32 = 2;
+const SNAP_DELETE: u32 = 3;
+const SNAP_ROLLBACK: u32 = 4;
+const SNAP_CANCEL: u32 = 5;
+const SNAP_CLONE: u32 = 6;
+const SNAP_BOOT_OK: u32 = 7;
+const SNAP_I_CLONE: u32 = 1;
+const SNAP_I_TARGET: u32 = 2;
+const SNAP_I_SAFETY: u32 = 4;
+const SNAP_I_HELD: u32 = 8;
+const SNAP_I_LIVE: u32 = 16;
+const POOL_PENDING: u32 = 1;
+const POOL_HELD: u32 = 2;
+const CFS_BLOCK: u64 = 4096;
+const CFS_SNAP_NAME_MAX: usize = 31;
+const CFS_SNAP_F_CLONE: u32 = 1;
+const CFS_ROLLBACK_PENDING: u32 = 1;
+/// The size of a struct cfs_snapshot, an entry of `all`: checked by the test.
+const SNAP_SIZE: usize = 128;
+/// A byte per block, saturating: how many trees reach it. Chunked like the checker's maps, so a large pool does not
+/// need one large allocation: a page each.
+const TALLY_CHUNK: u64 = 4096;
+
+// ---- The tallies ----
+
+struct Tally {
+    chunk: *mut *mut u8;
+    nchunks: u32;
+}
+
+/// Safety: `t` holds what tallyAlloc made, or nothing.
+unsafe fn tallyFree(t: borrow mut Tally) {
+    for (i in 0u32..t.nchunks) {
+        kfree(t.chunk.add(i as usize).read() as *mut void);
+    }
+    kfree(t.chunk as *mut void);
+    t.chunk = 0 as *mut *mut u8;
+    t.nchunks = 0;
+}
+
+/// A zeroed count for each of `n` blocks.
+/// Safety: `t` holds nothing.
+unsafe fn tallyAlloc(t: borrow mut Tally, n: u64) -> i32 {
+    t.nchunks = truncate<u32>((n + TALLY_CHUNK - 1) / TALLY_CHUNK);
+    t.chunk = kzalloc(t.nchunks as usize * 8) as *mut *mut u8;
+    if (t.chunk.isNull()) {
+        t.nchunks = 0;
+        return -ENOMEM;
+    }
+    for (i in 0u32..t.nchunks) {
+        let c = kzalloc(TALLY_CHUNK as usize) as *mut u8;
+        t.chunk.add(i as usize).write(c);
+        if (c.isNull()) {
+            tallyFree(t);
+            return -ENOMEM;
+        }
+    }
+    return 0;
+}
+
+/// Block `lin`'s count, or null past the end.
+/// Safety: `t` was made by tallyAlloc.
+unsafe fn tallyAt(t: *mut Tally, lin: u64) -> *mut u8 {
+    let k = truncate<u32>(lin / TALLY_CHUNK);
+    let tt = Ptr.toBorrow(t as *Tally);
+    return if (k < tt.nchunks) tt.chunk.add(k as usize).read().add((lin % TALLY_CHUNK) as usize) else 0 as *mut u8;
+}
+
+/// One more tree reaches `lin`.
+/// Safety: as tallyAt.
+unsafe fn tallyCount(t: *mut Tally, lin: u64) {
+    let c = tallyAt(t, lin);
+    if (!c.isNull() && c.read() < 255) {
+        c.write(c.read() + 1);
+    }
+}
+
+struct TallySize {
+    t: *mut Tally;
+    referenced: u64;
+    unique: u64;
+}
+
+/// One more block a tree reaches; unique when nothing else reaches it.
+/// Safety: `s.t` was made by tallyAlloc.
+unsafe fn tallySize(s: *mut TallySize, lin: u64) {
+    let z = Ptr.toBorrowMut(s);
+    let c = tallyAt(z.t, lin);
+    z.referenced = z.referenced.wrappingAdd(1);
+    if (!c.isNull() && c.read() == 1) {
+        z.unique = z.unique.wrappingAdd(1);
+    }
+}
+
+/// A mark called once per block per root: `seen` is cleared per root. `sizes` says which count it feeds: tallySize's
+/// with `arg` a TallySize, or tallyCount's with `arg` the Tally.
+struct Once {
+    seen: *mut u8;
+    sizes: bool;
+    arg: *mut void;
+}
+
+/// Safety: `arg` is a Once whose `seen` holds bit `lin`.
+@callback
+unsafe fn onceMark(arg: *mut void, lin: u64) {
+    let o = Ptr.toBorrow(arg as *Once);
+    let at = o.seen.add((lin / 8) as usize);
+    let bit = 1u8 << truncate<u8>(lin % 8);
+    if ((at.read() & bit) != 0) {
+        return;
+    }
+    at.write(at.read() | bit);
+    if (o.sizes) {
+        tallySize(o.arg as *mut TallySize, lin);
+    } else {
+        tallyCount(o.arg as *mut Tally, lin);
+    }
+}
+
+// ---- The listing ----
+
+/// Safety: `fs` is a mounted filesystem's state; `o` writable; `s` a snapshot entry.
+unsafe fn snapInfoFill(fs: *mut cfs, o: *mut cosmofs_snap_info, s: *cfs_snapshot) {
+    memset(o as *mut void, 0, layoutOf<cosmofs_snap_info>().size);
+    let i = Ptr.toBorrowMut(o);
+    let e = Ptr.toBorrow(s);
+    i.id = e.id;
+    i.generation = e.generation;
+    i.created_ns = e.created_ns;
+    i.origin_id = e.origin_id;
+    i.uuid = e.uuid;
+    i.flags = if ((e.flags & CFS_SNAP_F_CLONE) != 0) SNAP_I_CLONE else 0;
+    i.format = Ptr.toBorrow(fs as *cfs).sb.version;
+    let _ = strlcpy(borrow mut i.name as *mut [u8; 32] as *mut CChar, borrow e.name as *[u8; 32] as *CChar, 32);
+}
+
+/// What a rollback record says about one snapshot, for the listing.
+/// Safety: `r` is a record when `have`; `s` a snapshot entry.
+unsafe fn snapRollbackFlags(r: *cfs_rollback, have: bool, s: *cfs_snapshot) -> u32 {
+    if (!have) {
+        return 0;
+    }
+    let rb = Ptr.toBorrow(r);
+    let uuid = borrow Ptr.toBorrow(s).uuid as *[u8; 16] as *void;
+    let target = memcmp(borrow rb.target_uuid as *[u8; 16] as *void, uuid, 16) == 0;
+    let safety = memcmp(borrow rb.safety_uuid as *[u8; 16] as *void, uuid, 16) == 0;
+    var f: u32 = 0;
+    if (rb.state == CFS_ROLLBACK_PENDING) {
+        f |= if (target) SNAP_I_TARGET else 0;
+        f |= if (safety) SNAP_I_SAFETY else 0;
+    } else {
+        f |= if (safety) SNAP_I_HELD else 0;
+        // The tree the live one was rolled back to, while the hold lasts: how init tells a package transaction undone
+        // from one still waiting to be (roadmap 1.2 B4).
+        f |= if (target) SNAP_I_LIVE else 0;
+    }
+    return f;
+}
+
+/// Snapshot `i` of `all`.
+/// Safety: `all` holds more than `i` entries.
+unsafe fn entry(all: *mut u8, i: u32) -> *mut cfs_snapshot => all.add(i as usize * SNAP_SIZE) as *mut cfs_snapshot;
+
+/// Say a walk did not finish: the live tree's (`what` null) or a snapshot's.
+/// Safety: `what` null or a terminated string.
+unsafe fn walkFailed(what: *CChar, rc: i32) {
+    var buffer = [0u8; 128];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("cosmofs: snapshot sizes: ");
+    if (what.isNull()) {
+        line.text("the live tree");
+    } else {
+        line.text("snapshot '");
+        line.bytes(Slice.fromRaw(what as *u8, strlen(what)));
+        line.text("'");
+    }
+    line.text(" does not walk (");
+    line.signed(rc as i64);
+    line.text(")");
+    KernelLog.send(LogLevel.Warn, line);
+}
+
+/// A snapshot's tree and what it holds, each block marked once.
+/// Safety: `fs` is a mounted filesystem's state, its lock held; `s` an entry; `o` a Once with a cleared `seen`.
+unsafe fn walkSnapshot(fs: *mut cfs, s: *mut cfs_snapshot, o: *mut Once) -> i32 {
+    var root: u64 = 0;
+    var nextIno: u64 = 0;
+    // A clone's roots as the open transaction has them.
+    cfs_tree_roots(fs, s as *cfs_snapshot, borrow mut root as *mut u64, borrow mut nextIno as *mut u64);
+    var rc = cfs_tree_walk(fs, root, nextIno, onceMark, o as *mut void);
+    if (rc == 0) {
+        rc = cfs_snapshot_walk_held(fs, s as *cfs_snapshot, onceMark, o as *mut void);
+    }
+    return rc;
+}
+
+/// Every snapshot, with what it reaches and what only it reaches. Two walks per snapshot and one of the live tree: the
+/// first pass counts, per block, how many trees reach it; the second sums each snapshot's blocks and the ones whose
+/// count is one. Under the mount's lock, as the check is. Oldest first.
+/// Safety: `fs` is a mounted filesystem's state, its lock held; `req` a listing request whose `out` has `max` records.
+unsafe fn snapListSized(fs: *mut cfs, req: *mut cosmofs_snap_req) -> i32 {
+    let f = Ptr.toBorrow(fs as *cfs);
+    let q = Ptr.toBorrowMut(req);
+    q.format = f.sb.version;
+    q.pool_flags = 0;
+    // Room, as data can use it (the reserve is the metadata's), and the pool's size: what a caller about to write asks
+    // before it does.
+    q.free_bytes = (if (f.free_blocks > f.reserve) f.free_blocks - f.reserve else 0).wrappingMul(CFS_BLOCK);
+    q.total_bytes = f.nblocks.wrappingMul(CFS_BLOCK);
+    var rbSlot = [0u64; 16];
+    let rb = borrow mut rbSlot as *mut [u64; 16] as *mut cfs_rollback;
+    let haveRb = cfs_rollback_read(fs, rb) == 0;
+    let pending = haveRb && Ptr.toBorrow(rb as *cfs_rollback).state == CFS_ROLLBACK_PENDING;
+    if (haveRb) {
+        q.pool_flags = if (pending) POOL_PENDING else POOL_HELD;
+    }
+    // Why this mount left a pending rollback pending (CFS-20); only while one is, so a later request does not inherit
+    // an old reason.
+    q.rollback_error = if (pending) f.rollback_error else 0;
+    var total: u32 = 0;
+    var rc = cfs_snapshot_list(fs, 0 as *mut cfs_snapshot, 0, borrow mut total as *mut u32);
+    if (rc != 0) {
+        return rc;
+    }
+    q.total = total;
+    q.count = 0;
+    if (total == 0) {
+        return 0;
+    }
+    let all = kmalloc(total as usize * SNAP_SIZE, 0) as *mut u8;
+    if (all.isNull()) {
+        return -ENOMEM;
+    }
+    var n: u32 = 0;
+    rc = cfs_snapshot_list(fs, all as *mut cfs_snapshot, total, borrow mut n as *mut u32);
+    if (rc == 0 && n != total) {
+        rc = -EIO;
+    }
+    // Oldest first: a short insertion sort by id, which only rises.
+    var tmp = [0u64; 16];
+    var i: u32 = 1;
+    while (rc == 0 && i < n) {
+        var j = i;
+        while (j > 0 && Ptr.toBorrow(entry(all, j - 1) as *cfs_snapshot).id > Ptr.toBorrow(entry(all, j) as
+            *cfs_snapshot).id) {
+            let t = borrow mut tmp as *mut [u64; 16] as *mut void;
+            memcpy(t, entry(all, j) as *void, SNAP_SIZE);
+            memcpy(entry(all, j) as *mut void, entry(all, j - 1) as *void, SNAP_SIZE);
+            memcpy(entry(all, j - 1) as *mut void, t as *void, SNAP_SIZE);
+            j -= 1;
+        }
+        i += 1;
+    }
+    if (q.no_sizes) {
+        i = 0;
+        while (rc == 0 && i < n && q.count < q.max) {
+            let s = entry(all, i);
+            if (Ptr.toBorrow(s as *cfs_snapshot).id > q.after) {
+                let o = q.out.add(q.count as usize);
+                snapInfoFill(fs, o, s as *cfs_snapshot);
+                let oi = Ptr.toBorrowMut(o);
+                oi.flags |= snapRollbackFlags(rb as *cfs_rollback, haveRb, s as *cfs_snapshot);
+                q.count += 1;
+            }
+            i += 1;
+        }
+        kfree(all as *mut void);
+        return rc;
+    }
+    // Each root counted once per block, whatever reaches the block twice inside it (a deadlist names blocks its own
+    // tree reaches).
+    var t = Tally { chunk: 0 as *mut *mut u8, nchunks: 0 };
+    let tp = borrow mut t as *mut Tally;
+    var o1 = Once { seen: 0 as *mut u8, sizes: false, arg: tp as *mut void };
+    let op = borrow mut o1 as *mut Once;
+    if (rc == 0) {
+        rc = tallyAlloc(mut t, f.nblocks);
+    }
+    let seenBytes = ((f.nblocks + 7) / 8) as usize;
+    if (rc == 0) {
+        o1.seen = kmalloc(seenBytes, 0) as *mut u8;
+        if (o1.seen.isNull()) {
+            rc = -ENOMEM;
+        }
+    }
+    if (rc == 0) {
+        memset(o1.seen as *mut void, 0, seenBytes);
+        rc = cfs_tree_walk(fs, f.sb.imap_root, f.sb.next_ino, onceMark, op as *mut void);
+        if (rc == 0) {
+            let root = if (f.sb.version >= 4) f.sb.members else Ptr.toBorrow(f.mem as *cfs_memstate).alloc_root;
+            rc = cfs_alloc_walk(fs, root, onceMark, op as *mut void);
+        }
+        if (rc != 0) {
+            walkFailed(0 as *CChar, rc);
+        }
+    }
+    i = 0;
+    while (rc == 0 && i < n) {
+        let s = entry(all, i);
+        memset(o1.seen as *mut void, 0, seenBytes);
+        rc = walkSnapshot(fs, s, op);
+        if (rc != 0) {
+            walkFailed(borrow Ptr.toBorrow(s as *cfs_snapshot).name as *[u8; 32] as *CChar, rc);
+        }
+        i += 1;
+    }
+    i = 0;
+    while (rc == 0 && i < n && q.count < q.max) {
+        let s = entry(all, i);
+        i += 1;
+        if (Ptr.toBorrow(s as *cfs_snapshot).id <= q.after) {
+            continue; // the caller's cursor: listed in an earlier page
+        }
+        var sz = TallySize { t: tp, referenced: 0, unique: 0 };
+        memset(o1.seen as *mut void, 0, seenBytes);
+        o1.sizes = true;
+        o1.arg = borrow mut sz as *mut TallySize as *mut void;
+        rc = walkSnapshot(fs, s, op);
+        let o = q.out.add(q.count as usize);
+        q.count += 1;
+        snapInfoFill(fs, o, s as *cfs_snapshot);
+        let oi = Ptr.toBorrowMut(o);
+        oi.flags |= snapRollbackFlags(rb as *cfs_rollback, haveRb, s as *cfs_snapshot);
+        oi.referenced = sz.referenced.wrappingMul(CFS_BLOCK);
+        oi.unique = sz.unique.wrappingMul(CFS_BLOCK);
+    }
+    kfree(o1.seen as *mut void);
+    tallyFree(mut t);
+    kfree(all as *mut void);
+    return rc;
+}
+
+// ---- The operations ----
+
+/// A name a snapshot can have: not empty, not too long, no '/', not "." or "..".
+/// Safety: `name` null or a terminated string.
+unsafe fn snapNameOk(name: *CChar) -> i32 {
+    if (name.isNull() || (name as *u8).read() == 0) {
+        return -EINVAL;
+    }
+    if (strlen(name) > CFS_SNAP_NAME_MAX) {
+        return -ENAMETOOLONG;
+    }
+    if (!strchr(name, 47).isNull() || strcmp(name, ".\0".ptr as *CChar) == 0 ||
+        strcmp(name, "..\0".ptr as *CChar) == 0) {
+        return -EINVAL;
+    }
+    return 0;
+}
+
+/// Say what was done to a snapshot.
+/// Safety: `name` a terminated string.
+unsafe fn said(name: *CChar, done: StringView) {
+    var buffer = [0u8; 128];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("cosmofs: snapshot '");
+    line.bytes(Slice.fromRaw(name as *u8, strlen(name)));
+    line.text("' ");
+    line.text(done);
+    KernelLog.send(LogLevel.Info, line);
+}
+
+/// The one record a CREATE, ROLLBACK or CLONE made, if the caller asked for it; `flags` added to its own.
+/// Safety: `fs` is a mounted filesystem's state; `req` a request; `s` an entry.
+unsafe fn giveOne(fs: *mut cfs, req: *mut cosmofs_snap_req, s: *cfs_snapshot, flags: u32) {
+    let q = Ptr.toBorrowMut(req);
+    if (!q.out.isNull() && q.max > 0) {
+        snapInfoFill(fs, q.out, s);
+        let o = Ptr.toBorrowMut(q.out);
+        o.flags |= flags;
+        q.count = 1;
+    }
+}
+
+/// /dev/fsctl's snapshot operations on a mount.
+/// Safety: `mnt` is a mount; `req` a request whose names are null or terminated strings and whose `out` has `max`
+/// records.
+@export("cosmofs_snapctl")
+unsafe fn snapctl(mnt: *mut mount, req: *mut cosmofs_snap_req) -> i32 {
+    let fs = Ptr.toBorrow(mnt as *mount).fs_priv as *mut cfs;
+    if (fs.isNull()) {
+        return -EINVAL;
+    }
+    if (Ptr.toBorrow(fs as *cfs).failed != 0) {
+        return -EIO;
+    }
+    let q = Ptr.toBorrowMut(req);
+    let writes = q.op != SNAP_LIST;
+    if (writes && (Ptr.toBorrow(mnt as *mount).flags & MOUNT_RDONLY) != 0) {
+        return -EROFS;
+    }
+    let lock = borrow mut Ptr.toBorrowMut(fs).lock as *mut mutex;
+    var sslot = [0u64; 16];
+    let s = borrow mut sslot as *mut [u64; 16] as *mut cfs_snapshot;
+    var rc: i32 = 0;
+    if (q.op == SNAP_CREATE) {
+        rc = snapNameOk(q.name);
+        if (rc != 0) {
+            return rc;
+        }
+        // What has been written is in the snapshot: dirty pages are the page cache's until written, and a commit
+        // alone does not.
+        rc = cfs_sync_vnodes(fs);
+        if (rc != 0) {
+            return rc;
+        }
+        mutex_lock(lock);
+        rc = cfs_snapshot_create(fs, q.name, true, s);
+        mutex_unlock(lock);
+        if (rc == 0) {
+            giveOne(fs, req, s as *cfs_snapshot, 0);
+            let e = Ptr.toBorrow(s as *cfs_snapshot);
+            var buffer = [0u8; 160];
+            var line = TextWriter.create(mut buffer[..]);
+            line.text("cosmofs: snapshot '");
+            let name = borrow e.name as *[u8; 32] as *CChar;
+            line.bytes(Slice.fromRaw(name as *u8, strlen(name)));
+            line.text("' taken (id ");
+            line.decimal(e.id);
+            line.text(", generation ");
+            line.decimal(e.generation);
+            line.text(")");
+            KernelLog.send(LogLevel.Info, line);
+        }
+        return rc;
+    }
+    if (q.op == SNAP_LIST) {
+        mutex_lock(lock);
+        rc = snapListSized(fs, req);
+        mutex_unlock(lock);
+        return rc;
+    }
+    if (q.op == SNAP_DELETE) {
+        rc = snapNameOk(q.name);
+        if (rc != 0) {
+            return rc;
+        }
+        mutex_lock(lock);
+        var tag: u32 = 0;
+        rc = cfs_snap_by_name(fs, q.name, strlen(q.name), s, borrow mut tag as *mut u32);
+        // Busy while anything inside it is in use, as rmdir on .snapshots answers (design.md, "When something goes
+        // wrong"): here no reference is the caller's own.
+        if (rc == 0 && cfs_snap_in_use(mnt, tag, 0 as *vnode)) {
+            rc = -EBUSY;
+        }
+        if (rc == 0) {
+            rc = cfs_snapshot_delete(fs, q.name);
+        }
+        mutex_unlock(lock);
+        if (rc == 0) {
+            said(q.name, "deleted");
+        }
+        return rc;
+    }
+    if (q.op == SNAP_ROLLBACK) {
+        rc = snapNameOk(q.name);
+        if (rc == 0 && !q.name2.isNull()) {
+            rc = snapNameOk(q.name2);
+        }
+        if (rc != 0) {
+            return rc;
+        }
+        // The safety snapshot is the tree as written so far, dirty pages included; what is written after the request
+        // is not in it, and the switch replaces it with the target (design.md, "Rollback").
+        rc = cfs_sync_vnodes(fs);
+        if (rc != 0) {
+            return rc;
+        }
+        mutex_lock(lock);
+        rc = cfs_rollback_request(fs, q.name, q.name2, s);
+        mutex_unlock(lock);
+        if (rc == 0) {
+            giveOne(fs, req, s as *cfs_snapshot, SNAP_I_SAFETY);
+        }
+        return rc;
+    }
+    if (q.op == SNAP_CLONE) {
+        rc = snapNameOk(q.name);
+        if (rc == 0) {
+            rc = if (!q.name2.isNull()) snapNameOk(q.name2) else -EINVAL;
+        }
+        if (rc != 0) {
+            return rc;
+        }
+        mutex_lock(lock);
+        rc = cfs_clone_create(fs, q.name, q.name2, s);
+        mutex_unlock(lock);
+        if (rc == 0) {
+            giveOne(fs, req, s as *cfs_snapshot, 0);
+        }
+        return rc;
+    }
+    if (q.op == SNAP_CANCEL) {
+        mutex_lock(lock);
+        rc = cfs_rollback_cancel(fs);
+        mutex_unlock(lock);
+        return rc;
+    }
+    if (q.op == SNAP_BOOT_OK) {
+        var released = false;
+        mutex_lock(lock);
+        rc = cfs_rollback_boot_ok(fs, borrow mut released as *mut bool);
+        mutex_unlock(lock);
+        q.count = 0;
+        q.total = if (released) 1 else 0; // fsctl does not report it; a test reads it
+        return rc;
+    }
+    return -EOPNOTSUPP;
+}

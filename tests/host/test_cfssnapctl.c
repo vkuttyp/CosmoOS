@@ -1,5 +1,5 @@
 /*
- * test_cfssnapctl.c - cosmofs's snapshots through /dev/fsctl (kernel-services/filesystem/cosmofs/cosmofs_snapctl.c)
+ * test_cfssnapctl.c - cosmofs's snapshots through /dev/fsctl (kernel-services/filesystem/cosmofs/cosmofs_snapctl.cee)
  * on the host: roadmap 2.0 SA7. A digest recorded from the C over every operation and some that are not, with names
  * good and bad, on mounts read-only or not, failed or not: listings of none, a few or hundreds of snapshots, clones
  * among them, in any order, paged by a cursor, with and without sizes, with a rollback record pending, held or absent,
@@ -22,6 +22,24 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* The values the CeeSafe port writes as its own constants. */
+_Static_assert(EIO == 5 && ENOMEM == 12 && EBUSY == 16 && EINVAL == 22 && EROFS == 30 && ENAMETOOLONG == 36 &&
+                   EOPNOTSUPP == 95 && MOUNT_RDONLY == 1,
+               "cosmofs_snapctl's errno.h and vfs.h values");
+_Static_assert(COSMOFS_SNAP_CREATE == 1 && COSMOFS_SNAP_LIST == 2 && COSMOFS_SNAP_DELETE == 3 &&
+                   COSMOFS_SNAP_ROLLBACK == 4 && COSMOFS_SNAP_CANCEL == 5 && COSMOFS_SNAP_CLONE == 6 &&
+                   COSMOFS_SNAP_BOOT_OK == 7 && COSMOFS_SNAP_I_CLONE == 1 && COSMOFS_SNAP_I_TARGET == 2 &&
+                   COSMOFS_SNAP_I_SAFETY == 4 && COSMOFS_SNAP_I_HELD == 8 && COSMOFS_SNAP_I_LIVE == 16 &&
+                   COSMOFS_POOL_PENDING == 1 && COSMOFS_POOL_HELD == 2 && sizeof(enum cosmofs_snap_op) == 4,
+               "cosmofs_snapctl's cosmofs.h values");
+_Static_assert(CFS_BLOCK == 4096 && CFS_SNAP_NAME_MAX == 31 && CFS_SNAP_F_CLONE == 1 && CFS_ROLLBACK_PENDING == 1 &&
+                   sizeof(struct cfs_snapshot) == 128 && sizeof(((struct cosmofs_snap_info *)0)->name) == 32 &&
+                   sizeof(((struct cfs_snapshot *)0)->name) == 32,
+               "cosmofs_snapctl's cosmofs_format.h values and sizes");
+/* cosmofs_snapctl.cee keeps a snapshot entry and a rollback record in stack slots of 16 words. */
+_Static_assert(sizeof(struct cfs_snapshot) <= 16 * 8 && sizeof(struct cfs_rollback) <= 16 * 8,
+               "cosmofs_snapctl.cee's stack slots");
 
 /* The digest of the C (cosmofs_snapctl.c, 2026-11-07), which the CeeSafe port gives. */
 #define SNAPCTL_DIGEST 0x82439c542373f871ull
