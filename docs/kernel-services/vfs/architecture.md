@@ -15,7 +15,7 @@ storage pool.
         │              (kernel/syscall/native.c → handles → struct file)
         ▼
    kernel-services/vfs/     vfs.c        mounts, path walk, vnodes, files, the fs_type registry
-                            pagecache.c  per-vnode page cache: read-through, dirty pages, writeback
+                            pagecache.cee  per-vnode page cache: read-through, dirty pages, writeback
                             ramfs.c      in-memory filesystem (the root, /tmp, /boot from the archive)
         │
         ▼
@@ -53,7 +53,7 @@ committed root describes a completely valid state.
   handle tables; the operations `open`, `close`, `read`, `write`,
   `seek`, `stat`, `mkdir`, `unlink`, `rmdir`, `rename`, `readdir`,
   `sync`, `mount`, `umount`.
-- **Page cache** (`pagecache.c`): per-vnode index-to-frame map, generic
+- **Page cache** (`pagecache.cee`): per-vnode index-to-frame map, generic
   `read`/`write` for regular files built on the filesystem's `readpage`
   and `writepage`, dirty tracking, writeback on `sync`, truncation.
   Filesystems that cache in memory only (ramfs) use it as their store.

@@ -5,7 +5,7 @@ code together. Each names how it is checked today and what is not yet
 covered.
 
 **V1. The VFS depends on no filesystem.** `kernel-services/vfs/vfs.c`
-and `pagecache.c` include no filesystem header and call filesystems only
+and `pagecache.cee` include no filesystem header and call filesystems only
 through `struct fs_type` and `struct vnode_ops`; ramfs is registered by
 name like any other filesystem. Check: review of includes; `vfs-ramfs`
 mounts a second ramfs and cosmofs through the same entry points. Gap:

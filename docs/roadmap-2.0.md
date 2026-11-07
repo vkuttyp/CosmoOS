@@ -1601,6 +1601,25 @@ and the operation table. The generated C redeclares
 array parameters, with pointers: clang accepts that, and gcc's
 `-Warray-parameter` warns.
 
+`pagecache.cee`, the page cache: `tests/host/test_pagecache.c` runs
+random sessions on six files of three mounts, one whose cache is its
+store under a page budget -- reads, writes, syncs whose writepage and
+writepages fail or report nonsense, dirty checks that refuse,
+truncations, drops, faults through mappings that execute and hold their
+frames, reclaim under a changing limit with busy locks and references
+that cannot be had, and the dirty bound's throttle with a write-back
+thread running while the writer sleeps -- over a frame arena smaller
+than the files (0x1c24149eb69a9ee7, clang and gcc; every line, the
+branches left being other threads' races). The statistics are an
+`IrqSpinLock` and the limits and counts atomics, in CeeSafe;
+`pagecache_floor.c` keeps the LRU, a static whose list head points into
+itself, and its lock, the dirty bound's waitqueue and lockdep class,
+whose calls name their caller's return address, the injected readpage
+failure and the lockdep assertion, which some builds make inline, and a
+frame's direct-map address. The hash buckets, an array of pointers no
+imported field may be, are reached at the cache's start, where the
+floor asserts they are.
+
 Size: about 4.5x.
 
 ### SA8 The Linux personality and the system-call layer
