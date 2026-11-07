@@ -712,6 +712,10 @@ int cfs_vnode_get(struct cfs *fs, uint64_t ino, struct vnode **out);
  * use beyond the one reference `victim` (or NULL) holds -- the
  * .snapshots directory's rmdir and fsctl's delete (cosmofs_snapctl.c). */
 int cfs_snap_by_name(struct cfs *fs, const char *name, size_t len, struct cfs_snapshot *out, unsigned *tag);
+/* cosmofs_csum.c: whether a name of `len` bytes may be written, raising
+ * the pool to format 15 when it needs long names (-ENAMETOOLONG when it
+ * cannot). Under the tree's write lock, before anything is allocated. */
+int cfs_names_allow(struct cfs *fs, size_t len);
 bool cfs_snap_in_use(struct mount *mnt, unsigned tag, const struct vnode *victim);
 int cfs_map(struct cfs *fs, const struct cfs_inode *in, uint64_t lblk, uint64_t *pblk);
 /* The run covering `lblk`, whether it is a plain run or a compressed
