@@ -72,8 +72,9 @@ Confirmed against the bug: with the filter dropped from the lookup, the
 unprivileged process opens the root-owned directory and the user-mode
 test fails.
 
-On the host, `tests/host/test_procfs.c` (roadmap 2.0 SA7) runs `procfs.c`
-over random process tables: processes visible and not, running, stopped
+On the host, `tests/host/test_procfs.c` (roadmap 2.0 SA7) runs /proc
+(`procfs.cee`, held to the digest of the C it replaced, and
+`procfs_floor.c`) over random process tables: processes visible and not, running, stopped
 and exited, with threads, terminals, limits, privileges, command lines,
 environments, roots, namespaces and open handles of every kind. It walks
 the mount from its root: every directory listed, from the start and
@@ -82,7 +83,8 @@ that must miss (`01`, `1x`, ten digits, `.x`) looked up, every file read
 page by page, every link read into buffers of every size, `environ`
 opened once and twice, while allocations and the vnode cache fail now
 and then. Every call into the kernel, with its arguments, and every
-result go into a digest (0x750297368390729d, clang and gcc; every line),
+result go into a digest (0x750297368390729d, clang and gcc; every line
+of the C),
 and every vnode, text, process, terminal, record and handle reference is
 given back. It found that `parse_pid`'s "not a pid", -1 in an unsigned
 `pid_t`, was looked up as pid 4294967295 rather than refused; it is 0

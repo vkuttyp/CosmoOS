@@ -1547,6 +1547,26 @@ The boot test passes every one (x86_64 debug, 2026-11-07); the
 analysis baselines lose the two `cosmofstest.c` entries whose functions
 moved.
 
+`procfs.cee`, /proc, the last of `kernel-services/filesystem/`'s C:
+`tests/host/test_procfs.c` walks the mount over random process tables
+-- processes visible and not, running, stopped and exited, with
+threads, terminals, limits, privileges, command lines, environments,
+roots, namespaces and handles of every kind -- every directory listed
+and resumed, every name looked up, every file read and every link read
+into buffers of every size, while allocations and the vnode cache fail
+(0x750297368390729d, clang and gcc; every line). The C step fixed what
+it found: `parse_pid`'s "not a pid", -1 in an unsigned `pid_t`, was
+looked up as pid 4294967295; and `render_loadavg` called two counters
+as arguments of one call, in an order the compiler chose. The port
+writes each text as `ksnprintf` did, a piece at a time from where the
+last ended, cut at the buffer's end and counted whole, so every text
+and length is the C's. `procfs_floor.c` keeps the operation tables and
+the file system type, the readdir callback's call, the compiler's name
+for /proc/version and the debug build's count of live texts, the
+threads' `container_of`, `sched_loadavg`'s unsigned longs, and
+`procnet_names`, a C array. `kernel-services/filesystem/` has no C left
+but floors.
+
 Size: about 4.5x.
 
 ### SA8 The Linux personality and the system-call layer

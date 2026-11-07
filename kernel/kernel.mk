@@ -173,6 +173,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel-services/vfs/blkctl.c \
 	kernel-services/vfs/mountns.c \
 	kernel-services/filesystem/procfs/procfs.c \
+	kernel-services/filesystem/procfs/procfs_floor.c \
 	kernel-services/vfs/pagecache.c \
 	kernel-services/vfs/ramfs.c \
 	kernel-services/vfs/memdev.c \

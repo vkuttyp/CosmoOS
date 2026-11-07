@@ -81,7 +81,7 @@ lockdep (the trylock takes no class edge), review.
 **S8. Information gates.** `klog` needs `PRIV_SYS_ADMIN`; `procinfo`
 returns to a caller without `PRIV_PROC` only processes whose real uid is
 its own; nothing in `/proc` or the sysctls renders a kernel address
-(handles are named by kind and inode, `procfs.c` `fd_target`; checked
+(handles are named by kind and inode, `procfs.cee` `fdTarget`; checked
 as uid 1000 by `make test-security` stage `priv`); `log` from a process
 without `PRIV_SYS_ADMIN` is limited to a bucket of 64 lines
 refilled at 16 per second (`-EAGAIN` beyond). Check: `init --unpriv-test`

@@ -86,7 +86,8 @@ HOST_PROCNET_SRCS := $(HOST_COMMON_SRCS) kernel-services/network/procnet.c kerne
 	tests/host/ceesafe_panic.c tests/host/test_procnet.c
 # /proc: the process table, terminals, handles, scheduler, clocks, memory figures, mounts, the network stack's
 # tables and the vnode cache are the test's.
-HOST_PROCFS_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/procfs/procfs.c kernel/core/printf.c \
+HOST_PROCFS_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/procfs/procfs.c \
+	kernel-services/filesystem/procfs/procfs_floor.c kernel/core/printf.c \
 	kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_procfs.c
 HOST_INET_SRCS := $(HOST_COMMON_SRCS) kernel-services/network/inet.c kernel/ceesafe/ceesafe_rt_core.c \
 	tests/host/ceesafe_panic.c tests/host/test_inet.c
