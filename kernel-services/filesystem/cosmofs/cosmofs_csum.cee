@@ -1,0 +1,658 @@
+// cosmofs_csum.cee - A file's checksums (docs/kernel-services/filesystem/cosmofs/design.md, version 2), in CeeSafe:
+// roadmap 2.0 SA7. tests/host/test_cfscsum.c holds it to the digest of the C it replaced.
+//
+// The one- and two-level checksum index, the CRC and authenticated entries, the verified read of a data block (and
+// its repair from a mirror), compressed records, the scrub's block check, and the raises to formats 14 and 15.
+//
+// struct cfs, the inodes, the buffers, the entries and the extents stay C (cosmofs_internal.h, cosmofs_format.h).
+// The authenticated entry the C kept on the stack is kept in a zeroed slot of words, checked against its C size
+// (tests/host/test_cfscsum.c): a CeeSafe local cannot hold C state. cosmofs_csum_floor.c keeps the fault-injection
+// seam, which a build without fault injection makes an inline function.
+
+@header("kernel/kmalloc.h", "kernel/string.h", "kernel/chacha20.h", "kernel/lz4.h", "kernel/crc32c.h",
+    "cosmofs_internal.h")
+extern "C" {
+    struct cfs_mhdr {
+        kind: u32;
+    }
+    struct cfs_super {
+        version: u32;
+        key_root: u64;
+    }
+    struct cfs {
+        sb: cfs_super;
+        csum_failures: u64;
+        have_key: bool;
+    }
+    struct cfs_buf {
+        blkno: u64;
+        data: *mut u8;
+    }
+    struct cfs_extent {
+        start: u64;
+        count: u32;
+        lblk: u32;
+    }
+    struct cfs_inode {
+        ino: u64;
+        csum_algo: u32;
+        csum_root: u64;
+    }
+    struct cfs_csum_aead {
+        tag: [u8; 16];
+        nonce: [u8; 12];
+        crc: u32;
+    }
+    struct cfs_block_aad {
+        ino: u64;
+        lblk: u64;
+    }
+
+    fn cfs_snap_raise(fs: *mut cfs) -> i32;
+    fn cfs_buf_new(fs: *mut cfs, kind: u32, out: *mut *mut cfs_buf) -> i32;
+    fn cfs_buf_get(fs: *mut cfs, blkno: u64, kind: u32, out: *mut *mut cfs_buf) -> i32;
+    fn cfs_buf_put(fs: *mut cfs, b: *mut cfs_buf);
+    fn cfs_buf_cow(fs: *mut cfs, bp: *mut *mut cfs_buf, slot: *mut u64) -> i32;
+    fn cfs_buf_hdr(b: *mut cfs_buf) -> *mut cfs_mhdr;
+    fn cfs_free_block_deferred(fs: *mut cfs, blk: u64);
+    fn cfs_dva_valid(fs: *cfs, dva: u64) -> bool;
+    fn cfs_read_repair(fs: *mut cfs, dva: u64, buf: *mut void, verify: extern "C" fn(*void, *mut void) -> bool,
+        arg: *mut void, repaired: *mut bool, readOk: *mut bool) -> i32;
+    fn cfs_verify_all(fs: *mut cfs, dva: u64, buf: *mut void, verify: extern "C" fn(*void, *mut void) -> bool,
+        arg: *mut void, repair: bool, bad: *mut u32, repaired: *mut u32) -> i32;
+    fn cfs_file_key(fs: *cfs, ino: u64, out: *mut u8);
+    fn chacha20_open(key: *u8, nonce: *u8, aad: *void, aadLen: usize, data: *mut void, len: usize, tag: *u8) -> bool;
+    fn lz4_decompress(src: *void, slen: usize, dst: *mut void, dcap: usize) -> usize;
+    fn crc32c(data: *void, len: usize) -> u32;
+    fn memset(p: *mut void, c: i32, n: usize) -> *mut void;
+    fn memcpy(dst: *mut void, src: *void, n: usize) -> *mut void;
+    /// cosmofs_csum_floor.c: faultinject_should_fail(FI_COSMOFS_CSUM_COW).
+    fn cfs_csum_floor_cow_fails() -> bool;
+}
+
+// ---- errno.h, cosmofs_format.h and cosmofs_internal.h values (asserted in tests/host/test_cfscsum.c) ----
+
+const ENOENT: i32 = 2;
+const EIO: i32 = 5;
+const ENOMEM: i32 = 12;
+const EFBIG: i32 = 27;
+const ENAMETOOLONG: i32 = 36;
+const ENOKEY: i32 = 126;
+const EKEYREJECTED: i32 = 129;
+const CFS_BLOCK: usize = 4096;
+const CFS_MHDR_SIZE: usize = 32;
+const CFS_PTRS_PER_BLOCK: u32 = 508;
+const CFS_CSUMIDX_SPAN: u32 = 508;
+const CFS_CSUMS_PER_BLOCK: u64 = 1016;
+const CFS_AEAD_PER_BLOCK: u64 = 127;
+const CFS_AEAD_SIZE: usize = 32;
+const CFS_KIND_CSUM: u32 = 8;
+const CFS_KIND_CSUMIDX: u32 = 7;
+const CFS_KIND_CSUMIDX2: u32 = 18;
+const CFS_CSUM_NONE: u32 = 0;
+const CFS_CSUM_POLY1305: u32 = 2;
+const CFS_NAME_MAX: usize = 47;
+const CFS_NAME_MAX_LONG: usize = 255;
+const CFS_RECORD_BLOCKS: u32 = 8;
+const CFS_COMPRESS_LZ4: u32 = 1;
+const CFS_EXT_COMPRESSED: u32 = 0x80000000;
+const CFS_EXT_COUNT_MASK: u32 = 0xFFFF;
+const CFS_EXT_PSIZE_SHIFT: u32 = 16;
+const CFS_EXT_PSIZE_MASK: u32 = 0xFF;
+const CFS_EXT_ALGO_SHIFT: u32 = 24;
+const CFS_EXT_ALGO_MASK: u32 = 0x7F;
+const CHACHA20_KEY_SIZE: usize = 32;
+
+// ---- Helpers ----
+
+/// Slot `i` of a block's payload of u64s.
+/// Safety: `b` holds a block; `i` below CFS_PTRS_PER_BLOCK.
+unsafe fn slotOf(b: *mut cfs_buf, i: u32) -> *mut u64 =>
+    (Ptr.toBorrow(b as *cfs_buf).data.add(CFS_MHDR_SIZE) as *mut u64).add(i as usize);
+
+/// Safety: `b` holds a block.
+unsafe fn payload(b: *mut cfs_buf) -> *mut u8 => Ptr.toBorrow(b as *cfs_buf).data.add(CFS_MHDR_SIZE);
+
+/// Safety: `fs` is a filesystem's state.
+unsafe fn fsOf(fs: *mut cfs) -> borrow mut(static) cfs => Ptr.toBorrowMut(fs);
+
+/// cosmofs_format.h's run accessors, from a run's count word.
+fn extCompressed(count: u32) -> bool => (count & CFS_EXT_COMPRESSED) != 0;
+
+fn extCount(count: u32) -> u32 => if (extCompressed(count)) count & CFS_EXT_COUNT_MASK else count;
+
+fn extPsize(count: u32) -> u32 =>
+    if (extCompressed(count)) ((count >> CFS_EXT_PSIZE_SHIFT) & CFS_EXT_PSIZE_MASK) + 1 else extCount(count);
+
+fn extAlgo(count: u32) -> u32 => if (extCompressed(count)) (count >> CFS_EXT_ALGO_SHIFT) & CFS_EXT_ALGO_MASK else 0;
+
+/// A format raise, said.
+fn raised(was: u32, to: u32, what: StringView, len: usize, older: StringView) {
+    var buffer = [0u8; 256];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("cosmofs: format version ");
+    line.decimal(was as u64);
+    line.text(" -> ");
+    line.decimal(to as u64);
+    line.text(what);
+    if (to == 15) {
+        line.decimal(len as u64);
+        line.text(" bytes");
+    }
+    line.text("; a kernel that reads format ");
+    line.decimal((to - 1) as u64);
+    line.text(" at most (CosmoOS ");
+    line.text(older);
+    line.text(" and older) cannot mount this pool");
+    KernelLog.send(LogLevel.Info, line);
+}
+
+/// "inode I block B: why", as an error.
+fn blockError(ino: u64, lblk: u64, why: StringView) {
+    var buffer = [0u8; 128];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("cosmofs: inode ");
+    line.decimal(ino);
+    line.text(" block ");
+    line.decimal(lblk);
+    line.text(": ");
+    line.text(why);
+    KernelLog.send(LogLevel.Error, line);
+}
+
+// ---- The raises ----
+
+/// A file outgrows the one-level checksum index (CFS-10; design.md, "The two-level checksum index"): the format must
+/// say a CSUMIDX2 may be met. A pool below 14 is raised, through 12 as a snapshot would raise it; one below 11, or one
+/// encrypted with a version-1 key block (which version 14 would read as MAC'd), keeps the old limit.
+/// Safety: `fs` is a mounted filesystem's state, its lock held.
+unsafe fn csumRaise14(fs: *mut cfs) -> i32 {
+    let f = fsOf(fs);
+    if (f.sb.version >= 14) {
+        return 0;
+    }
+    if (f.sb.version < 11 || f.sb.key_root != 0) {
+        return -EFBIG;
+    }
+    let was = f.sb.version;
+    let rc = cfs_snap_raise(fs);
+    if (rc != 0) {
+        return rc;
+    }
+    f.sb.version = 14;
+    raised(was, 14, " (two-level checksum index): a file outgrew the one-level index", 0, "1.0.12");
+    return 0;
+}
+
+/// A name longer than 47 bytes (design.md, "Format version 15"): the format must say an entry may take several slots.
+/// Raised as 14 is, through 12; a pool below 11, or one encrypted with a version-1 key block, keeps the old limit.
+/// Under the tree's write lock, before anything is allocated.
+/// Safety: as csumRaise14.
+@export("cfs_names_allow")
+unsafe fn namesAllow(fs: *mut cfs, len: usize) -> i32 {
+    let f = fsOf(fs);
+    if (len <= CFS_NAME_MAX || f.sb.version >= 15) {
+        return if (len > CFS_NAME_MAX_LONG) -ENAMETOOLONG else 0;
+    }
+    if (len > CFS_NAME_MAX_LONG || f.sb.version < 11 || (f.sb.key_root != 0 && f.sb.version < 14)) {
+        return -ENAMETOOLONG;
+    }
+    let was = f.sb.version;
+    let rc = cfs_snap_raise(fs);
+    if (rc != 0) {
+        return rc;
+    }
+    f.sb.version = 15;
+    raised(was, 15, " (long names): a name of ", len, "1.0.14");
+    return 0;
+}
+
+// ---- The index ----
+
+/// An index block below `*slot`: read (and CoW'd when `writable`), or made when there is none and `writable`; -ENOENT
+/// when there is none to read. On failure `*out` is null: the caller has nothing to release.
+/// Safety: as csumRaise14; `slot` is a word of a held block or of an inode; `out` writable.
+unsafe fn csumLevel(fs: *mut cfs, slot: *mut u64, kind: u32, writable: bool, out: *mut *mut cfs_buf) -> i32 {
+    var rc: i32 = 0;
+    if (slot.read() == 0) {
+        if (!writable) {
+            return -ENOENT;
+        }
+        rc = cfs_buf_new(fs, kind, out);
+        if (rc == 0) {
+            slot.write(Ptr.toBorrow(out.read() as *cfs_buf).blkno);
+        }
+        return rc;
+    }
+    rc = cfs_buf_get(fs, slot.read(), kind, out);
+    if (rc != 0) {
+        out.write(0 as *mut cfs_buf);
+        return rc;
+    }
+    if (writable) {
+        // The test seam (cosmofs-encrypted-root): an index block's copy cannot be had, as when the pool is full.
+        rc = if (kind == CFS_KIND_CSUMIDX && cfs_csum_floor_cow_fails()) -ENOMEM else cfs_buf_cow(fs, out, slot);
+        if (rc != 0) {
+            cfs_buf_put(fs, out.read());
+            out.write(0 as *mut cfs_buf); // a two-level walk's cleanup releases `mid` (Codex on #447)
+        }
+    }
+    return rc;
+}
+
+/// The kind of block an inode's csum_root names: CSUMIDX or, from version 14, CSUMIDX2. Anything else is a damaged
+/// inode.
+/// Safety: as csumRaise14; `kind` writable.
+unsafe fn csumRootKind(fs: *mut cfs, root: u64, kind: *mut u32) -> i32 {
+    var b = 0 as *mut cfs_buf;
+    let rc = cfs_buf_get(fs, root, 0, borrow mut b as *mut *mut cfs_buf);
+    if (rc != 0) {
+        return rc;
+    }
+    kind.write(Ptr.toBorrow(cfs_buf_hdr(b) as *cfs_mhdr).kind);
+    cfs_buf_put(fs, b);
+    let k = kind.read();
+    if (k == CFS_KIND_CSUMIDX || (k == CFS_KIND_CSUMIDX2 && fsOf(fs).sb.version >= 14)) {
+        return 0;
+    }
+    return -EIO;
+}
+
+/// The CSUM block at leaf `index` of the checksum index, created (and CoW'd) when `writable`. Up to CFS_CSUMIDX_SPAN
+/// leaves the root is a CSUMIDX; past it a CSUMIDX2 whose entries are CSUMIDX blocks, and the old root becomes its
+/// entry 0 so no checksum moves.
+/// Safety: as csumRaise14; `inp` an inode; `out` writable.
+unsafe fn csumBlockAt(fs: *mut cfs, inp: *mut cfs_inode, index: u32, writable: bool, out: *mut *mut cfs_buf) -> i32 {
+    if (index as u64 >= CFS_CSUMIDX_SPAN as u64 * CFS_CSUMIDX_SPAN as u64) {
+        return -EFBIG;
+    }
+    let i = Ptr.toBorrowMut(inp);
+    var kind = CFS_KIND_CSUMIDX;
+    var rc: i32 = 0;
+    if (i.csum_root != 0) {
+        rc = csumRootKind(fs, i.csum_root, borrow mut kind as *mut u32);
+        if (rc != 0) {
+            return rc;
+        }
+    }
+    var two = kind == CFS_KIND_CSUMIDX2;
+    if (!two && index >= CFS_CSUMIDX_SPAN) {
+        if (!writable) {
+            return -ENOENT; // past the one-level index: nothing was ever stored there
+        }
+        rc = csumRaise14(fs);
+        if (rc != 0) {
+            return rc;
+        }
+        // The new root's entry 0 is the old one-level index, as it is.
+        var top = 0 as *mut cfs_buf;
+        rc = cfs_buf_new(fs, CFS_KIND_CSUMIDX2, borrow mut top as *mut *mut cfs_buf);
+        if (rc != 0) {
+            return rc;
+        }
+        slotOf(top, 0).write(i.csum_root);
+        i.csum_root = Ptr.toBorrow(top as *cfs_buf).blkno;
+        cfs_buf_put(fs, top);
+        two = true;
+    }
+    var root = 0 as *mut cfs_buf;
+    var mid = 0 as *mut cfs_buf;
+    var cb = 0 as *mut cfs_buf;
+    rc = csumLevel(fs, borrow mut i.csum_root as *mut u64, if (two) CFS_KIND_CSUMIDX2 else CFS_KIND_CSUMIDX,
+        writable, borrow mut root as *mut *mut cfs_buf);
+    if (rc != 0) {
+        return rc;
+    }
+    var idx = root;
+    var at = index;
+    if (two) {
+        rc = csumLevel(fs, slotOf(root, index / CFS_CSUMIDX_SPAN), CFS_KIND_CSUMIDX, writable,
+            borrow mut mid as *mut *mut cfs_buf);
+        idx = mid;
+        at = index % CFS_CSUMIDX_SPAN;
+    }
+    if (rc == 0) {
+        rc = csumLevel(fs, slotOf(idx, at), CFS_KIND_CSUM, writable, borrow mut cb as *mut *mut cfs_buf);
+        if (rc == 0) {
+            out.write(cb);
+        }
+    }
+    if (!mid.isNull()) {
+        cfs_buf_put(fs, mid);
+    }
+    cfs_buf_put(fs, root);
+    return rc;
+}
+
+fn csumIndex(lblk: u64) -> u32 => truncate<u32>(lblk / CFS_CSUMS_PER_BLOCK);
+
+fn csumSlot(lblk: u64) -> usize => (lblk % CFS_CSUMS_PER_BLOCK) as usize;
+
+fn aeadIndex(lblk: u64) -> u32 => truncate<u32>(lblk / CFS_AEAD_PER_BLOCK);
+
+fn aeadSlot(lblk: u64) -> usize => (lblk % CFS_AEAD_PER_BLOCK) as usize;
+
+/// The authenticated entry for a block: the tag, the nonce it was sealed with, and a keyless CRC of the same
+/// ciphertext.
+/// Safety: as csumBlockAt; `e` an entry.
+@export("cfs_aead_put")
+unsafe fn aeadPut(fs: *mut cfs, inp: *mut cfs_inode, lblk: u64, e: *cfs_csum_aead) -> i32 {
+    var cb = 0 as *mut cfs_buf;
+    let rc = csumBlockAt(fs, inp, aeadIndex(lblk), true, borrow mut cb as *mut *mut cfs_buf);
+    if (rc != 0) {
+        return rc;
+    }
+    memcpy(payload(cb).add(aeadSlot(lblk) * CFS_AEAD_SIZE) as *mut void, e as *void, CFS_AEAD_SIZE);
+    cfs_buf_put(fs, cb);
+    return 0;
+}
+
+/// Safety: as csumBlockAt; `e` writable.
+@export("cfs_aead_get")
+unsafe fn aeadGet(fs: *mut cfs, inp: *mut cfs_inode, lblk: u64, e: *mut cfs_csum_aead) -> i32 {
+    var cb = 0 as *mut cfs_buf;
+    let rc = csumBlockAt(fs, inp, aeadIndex(lblk), false, borrow mut cb as *mut *mut cfs_buf);
+    if (rc != 0) {
+        return rc;
+    }
+    memcpy(e as *mut void, payload(cb).add(aeadSlot(lblk) * CFS_AEAD_SIZE) as *void, CFS_AEAD_SIZE);
+    cfs_buf_put(fs, cb);
+    return 0;
+}
+
+/// Safety: as csumBlockAt.
+@export("cfs_csum_put")
+unsafe fn csumPut(fs: *mut cfs, inp: *mut cfs_inode, lblk: u64, crc: u32) -> i32 {
+    var cb = 0 as *mut cfs_buf;
+    let rc = csumBlockAt(fs, inp, csumIndex(lblk), true, borrow mut cb as *mut *mut cfs_buf);
+    if (rc != 0) {
+        return rc;
+    }
+    ByteOrder.writeU32LE(SliceMut.fromRaw(payload(cb), CFS_BLOCK - CFS_MHDR_SIZE), csumSlot(lblk) * 4, crc);
+    cfs_buf_put(fs, cb);
+    return 0;
+}
+
+/// Safety: as csumBlockAt; `crc` writable.
+@export("cfs_csum_get")
+unsafe fn csumGet(fs: *mut cfs, inp: *mut cfs_inode, lblk: u64, crc: *mut u32) -> i32 {
+    var cb = 0 as *mut cfs_buf;
+    let rc = csumBlockAt(fs, inp, csumIndex(lblk), false, borrow mut cb as *mut *mut cfs_buf);
+    if (rc != 0) {
+        return rc;
+    }
+    crc.write(ByteOrder.readU32LE(Slice.fromRaw(payload(cb) as *u8, CFS_BLOCK - CFS_MHDR_SIZE), csumSlot(lblk) * 4));
+    cfs_buf_put(fs, cb);
+    return 0;
+}
+
+// ---- Reads ----
+
+/// What a data or directory block just read must match.
+struct DataWant {
+    crc: u32;
+    haveCrc: bool;
+}
+
+/// The verifier cfs_read_repair calls for a data or directory block: the checksum its inode recorded when the block
+/// was written. An inode with no checksums at all (csum_algo NONE) has nothing to compare, so the first copy is the
+/// answer and a mirror cannot help it.
+/// Safety: `block` is CFS_BLOCK bytes; `arg` a DataWant.
+@callback
+unsafe fn dataOk(block: *void, arg: *mut void) -> bool {
+    let w = Ptr.toBorrow(arg as *DataWant);
+    if (!w.haveCrc) {
+        return true;
+    }
+    return crc32c(block, CFS_BLOCK) == w.crc;
+}
+
+/// An encrypted block is verified by the CRC of its ciphertext -- which needs no key -- and then authenticated and
+/// decrypted with one. The order matters: a forged block is refused before its plaintext exists.
+/// Safety: as dataOk.
+@callback
+unsafe fn cipherCrcOk(block: *void, arg: *mut void) -> bool =>
+    crc32c(block, CFS_BLOCK) == Ptr.toBorrow(arg as *DataWant).crc;
+
+/// Safety: as csumBlockAt; `buf` CFS_BLOCK writable bytes.
+unsafe fn readEncrypted(fs: *mut cfs, inp: *mut cfs_inode, lblk: u64, dva: u64, buf: *mut void) -> i32 {
+    var eslot = [0u64; 4];
+    let e = borrow mut eslot as *mut [u64; 4] as *mut cfs_csum_aead;
+    var rc = aeadGet(fs, inp, lblk, e);
+    if (rc == -ENOENT) {
+        rc = -EIO; // a mapped block with no entry: the tree is damaged
+    }
+    if (rc != 0) {
+        return rc;
+    }
+    let ino = Ptr.toBorrow(inp as *cfs_inode).ino;
+    // Reading the ciphertext needs no key: the CRC beside the tag is what a mirror repairs against (design.md,
+    // "Integrity").
+    var w = DataWant { crc: Ptr.toBorrow(e as *cfs_csum_aead).crc, haveCrc: true };
+    rc = cfs_read_repair(fs, dva, buf, cipherCrcOk, borrow mut w as *mut DataWant as *mut void, 0 as *mut bool,
+        0 as *mut bool);
+    let f = fsOf(fs);
+    if (rc != 0) {
+        blockError(ino, lblk, "no copy matches its checksum");
+        f.csum_failures = f.csum_failures.wrappingAdd(1);
+        return rc;
+    }
+    if (!f.have_key) {
+        return -ENOKEY; // the metadata mounted; the contents did not
+    }
+    var key = [0u8; 32];
+    cfs_file_key(fs as *cfs, ino, borrow mut key as *mut [u8; 32] as *mut u8);
+    var aad = [ino, lblk];
+    let en = Ptr.toBorrow(e as *cfs_csum_aead);
+    let ok = chacha20_open(borrow key as *[u8; 32] as *u8, borrow en.nonce as *[u8; 12] as *u8,
+        borrow aad as *[u64; 2] as *void, 16, buf, CFS_BLOCK, borrow en.tag as *[u8; 16] as *u8);
+    key = [0u8; 32];
+    if (!ok) {
+        blockError(ino, lblk, "authentication failed");
+        f.csum_failures = f.csum_failures.wrappingAdd(1);
+        return -EKEYREJECTED; // the block is not the one that was written
+    }
+    return 0;
+}
+
+/// A data or directory block of an inode, read from whichever copy matches what its inode recorded.
+/// Safety: as csumBlockAt; `buf` CFS_BLOCK writable bytes.
+@export("cfs_data_read_verified")
+unsafe fn dataReadVerified(fs: *mut cfs, inp: *mut cfs_inode, lblk: u64, dva: u64, buf: *mut void) -> i32 {
+    let algo = Ptr.toBorrow(inp as *cfs_inode).csum_algo;
+    if (algo == CFS_CSUM_POLY1305) {
+        if (!cfs_dva_valid(fs as *cfs, dva)) {
+            return -EIO;
+        }
+        return readEncrypted(fs, inp, lblk, dva, buf);
+    }
+    var w = DataWant { crc: 0, haveCrc: false };
+    if (algo != CFS_CSUM_NONE) {
+        var rc = csumGet(fs, inp, lblk, borrow mut w.crc as *mut u32);
+        if (rc == -ENOENT) {
+            rc = -EIO; // a mapped block without a checksum: the tree is damaged
+        }
+        if (rc != 0) {
+            return rc;
+        }
+        w.haveCrc = true;
+    }
+    if (!cfs_dva_valid(fs as *cfs, dva)) {
+        return -EIO;
+    }
+    let rc = cfs_read_repair(fs, dva, buf, dataOk, borrow mut w as *mut DataWant as *mut void, 0 as *mut bool,
+        0 as *mut bool);
+    if (rc != 0 && w.haveCrc) {
+        blockError(Ptr.toBorrow(inp as *cfs_inode).ino, lblk, "no copy matches its checksum");
+        let f = fsOf(fs);
+        f.csum_failures = f.csum_failures.wrappingAdd(1);
+    }
+    return rc;
+}
+
+/// A compressed record, read and decompressed whole. Its checksums are checksums of what is on the disk, so they cover
+/// its physical blocks: entry i of the record's logical range is the i'th physical block. That is what lets a mirrored
+/// copy be checked and repaired without decompressing anything.
+/// Safety: as csumBlockAt; `e` a run; `out` the run's logical blocks, writable.
+@export("cfs_record_read")
+unsafe fn recordRead(fs: *mut cfs, inp: *mut cfs_inode, e: *cfs_extent, out: *mut u8) -> i32 {
+    let r = Ptr.toBorrow(e);
+    let psize = extPsize(r.count);
+    let count = extCount(r.count);
+    if (count == 0 || count > CFS_RECORD_BLOCKS || psize == 0 || psize > count) {
+        return -EIO;
+    }
+    if (extAlgo(r.count) != CFS_COMPRESS_LZ4) {
+        return -EIO; // an algorithm this kernel does not have
+    }
+    let packed = kmalloc(psize as usize * CFS_BLOCK, 0) as *mut u8;
+    if (packed.isNull()) {
+        return -ENOMEM;
+    }
+    var rc: i32 = 0;
+    var i: u32 = 0;
+    while (i < psize && rc == 0) {
+        rc = dataReadVerified(fs, inp, r.lblk.wrappingAdd(i) as u64, r.start.wrappingAdd(i as u64),
+            packed.add(i as usize * CFS_BLOCK) as *mut void);
+        i += 1;
+    }
+    if (rc == 0) {
+        // The compressed length is not stored: the record occupies whole blocks and the codec stops when it has
+        // produced the logical length, so the padding after it is never read.
+        let got = lz4_decompress(packed as *void, psize as usize * CFS_BLOCK, out as *mut void,
+            count as usize * CFS_BLOCK);
+        if (got != count as usize * CFS_BLOCK) {
+            var buffer = [0u8; 128];
+            var line = TextWriter.create(mut buffer[..]);
+            line.text("cosmofs: inode ");
+            line.decimal(Ptr.toBorrow(inp as *cfs_inode).ino);
+            line.text(" record at ");
+            line.decimal(r.lblk as u64);
+            line.text(": ");
+            line.decimal(got as u64);
+            line.text(" bytes out of a ");
+            line.decimal(count as u64);
+            line.text("-block record");
+            KernelLog.send(LogLevel.Error, line);
+            rc = -EIO;
+        }
+    }
+    kfree(packed as *mut void);
+    return rc;
+}
+
+/// Every copy of a data block checked, and with `repair` the bad ones written back from a good one.
+/// Safety: as csumBlockAt; `buf` CFS_BLOCK writable bytes; `bad` and `repaired` writable.
+@export("cfs_data_scrub_block")
+unsafe fn dataScrubBlock(fs: *mut cfs, inp: *mut cfs_inode, lblk: u64, dva: u64, buf: *mut void, repair: bool,
+    bad: *mut u32, repaired: *mut u32) -> i32 {
+    let f = fsOf(fs);
+    if (Ptr.toBorrow(inp as *cfs_inode).csum_algo == CFS_CSUM_POLY1305) {
+        // The keyless CRC of the ciphertext: a scrub runs, and repairs, on a machine that cannot decrypt any of this.
+        var eslot = [0u64; 4];
+        let e = borrow mut eslot as *mut [u64; 4] as *mut cfs_csum_aead;
+        var rc = aeadGet(fs, inp, lblk, e);
+        if (rc != 0) {
+            return if (rc == -ENOENT) -EIO else rc;
+        }
+        if (!cfs_dva_valid(fs as *cfs, dva)) {
+            return -EIO;
+        }
+        var w = DataWant { crc: Ptr.toBorrow(e as *cfs_csum_aead).crc, haveCrc: true };
+        rc = cfs_verify_all(fs, dva, buf, cipherCrcOk, borrow mut w as *mut DataWant as *mut void, repair, bad,
+            repaired);
+        if (rc != 0) {
+            f.csum_failures = f.csum_failures.wrappingAdd(1);
+        }
+        return rc;
+    }
+    var w = DataWant { crc: 0, haveCrc: false };
+    if (Ptr.toBorrow(inp as *cfs_inode).csum_algo != CFS_CSUM_NONE) {
+        var rc = csumGet(fs, inp, lblk, borrow mut w.crc as *mut u32);
+        if (rc == -ENOENT) {
+            rc = -EIO;
+        }
+        if (rc != 0) {
+            return rc;
+        }
+        w.haveCrc = true;
+    }
+    if (!cfs_dva_valid(fs as *cfs, dva)) {
+        return -EIO;
+    }
+    let rc = cfs_verify_all(fs, dva, buf, dataOk, borrow mut w as *mut DataWant as *mut void, repair, bad, repaired);
+    if (rc != 0 && w.haveCrc) {
+        f.csum_failures = f.csum_failures.wrappingAdd(1);
+    }
+    return rc;
+}
+
+/// A block about to be used checked against the CRC its inode recorded.
+/// Safety: as csumBlockAt; `block` CFS_BLOCK bytes.
+@export("cfs_csum_verify")
+unsafe fn csumVerify(fs: *mut cfs, inp: *mut cfs_inode, lblk: u64, block: *void) -> i32 {
+    if (Ptr.toBorrow(inp as *cfs_inode).csum_algo == CFS_CSUM_NONE) {
+        return 0;
+    }
+    var want: u32 = 0;
+    var rc = csumGet(fs, inp, lblk, borrow mut want as *mut u32);
+    if (rc == -ENOENT) {
+        rc = -EIO; // a mapped block without a checksum: the tree is damaged
+    }
+    if (rc != 0) {
+        return rc;
+    }
+    if (crc32c(block, CFS_BLOCK) != want) {
+        blockError(Ptr.toBorrow(inp as *cfs_inode).ino, lblk, "data checksum mismatch");
+        let f = fsOf(fs);
+        f.csum_failures = f.csum_failures.wrappingAdd(1);
+        return -EIO;
+    }
+    return 0;
+}
+
+// ---- Freeing ----
+
+/// Release a one-level index and its CSUM blocks.
+/// Safety: as csumRaise14.
+unsafe fn csumFreeIndex(fs: *mut cfs, blk: u64) {
+    var idx = 0 as *mut cfs_buf;
+    if (cfs_buf_get(fs, blk, CFS_KIND_CSUMIDX, borrow mut idx as *mut *mut cfs_buf) == 0) {
+        for (i in 0u32..CFS_PTRS_PER_BLOCK) {
+            let s = slotOf(idx, i).read();
+            if (s != 0) {
+                cfs_free_block_deferred(fs, s);
+            }
+        }
+        cfs_buf_put(fs, idx);
+    }
+    cfs_free_block_deferred(fs, blk);
+}
+
+/// Release the whole checksum tree (the inode is being emptied): a one-level index and its CSUM blocks, or a two-level
+/// root, its index blocks and theirs.
+/// Safety: as csumBlockAt.
+@export("cfs_csum_free")
+unsafe fn csumFree(fs: *mut cfs, inp: *mut cfs_inode) {
+    let i = Ptr.toBorrowMut(inp);
+    if (i.csum_root == 0) {
+        return;
+    }
+    var kind: u32 = 0;
+    if (csumRootKind(fs, i.csum_root, borrow mut kind as *mut u32) == 0 && kind == CFS_KIND_CSUMIDX2) {
+        var top = 0 as *mut cfs_buf;
+        if (cfs_buf_get(fs, i.csum_root, CFS_KIND_CSUMIDX2, borrow mut top as *mut *mut cfs_buf) == 0) {
+            for (k in 0u32..CFS_PTRS_PER_BLOCK) {
+                let s = slotOf(top, k).read();
+                if (s != 0) {
+                    csumFreeIndex(fs, s);
+                }
+            }
+            cfs_buf_put(fs, top);
+        }
+        cfs_free_block_deferred(fs, i.csum_root);
+    } else {
+        csumFreeIndex(fs, i.csum_root);
+    }
+    i.csum_root = 0;
+}

@@ -1451,6 +1451,15 @@ and branch that can be reached). The two helpers it shares with the
 .snapshots directory's rmdir are `cfs_snap_by_name` and
 `cfs_snap_in_use`; the once-per-root mark says which count it feeds,
 since a field holding a function cannot be called.
+`cosmofs_csum.cee`, the ninth, a file's checksums: the one- and
+two-level index, CRC and authenticated entries, verified reads and their
+repair, compressed records, the scrub's block check and the raises to 14
+and 15. `tests/host/test_cfscsum.c` runs it with the real CRC32C over
+files of every checksum kind on pools of versions 9 to 15, entries near
+the start and past each index, good, rotten and unreadable copies, tags
+that open and do not (0x807c60c6070274a7, clang and gcc; every line and
+branch that can be reached). `cosmofs_csum_floor.c` keeps the fault
+seam, an inline function where fault injection is off.
 
 Size: about 4.5x.
 

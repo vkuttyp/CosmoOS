@@ -1,5 +1,5 @@
 /*
- * test_cfscsum.c - cosmofs's file checksums (kernel-services/filesystem/cosmofs/cosmofs_csum.c) on the host: roadmap
+ * test_cfscsum.c - cosmofs's file checksums (kernel-services/filesystem/cosmofs/cosmofs_csum.cee) on the host: roadmap
  * 2.0 SA7. A digest recorded from the C over files whose checksums are none, CRC32C or authenticated, on pools of
  * every version from 9 to 15, in the clear or with a version-1 key: entries put and got near the start of a file,
  * past the one-level index (the raise to 14 and the two-level index) and past the two-level one; verified reads,
@@ -25,6 +25,23 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* The values the CeeSafe port writes as its own constants. */
+_Static_assert(ENOENT == 2 && EIO == 5 && ENOMEM == 12 && EFBIG == 27 && ENAMETOOLONG == 36 && ENOKEY == 126 &&
+                   EKEYREJECTED == 129,
+               "cosmofs_csum's errno.h values");
+_Static_assert(CFS_BLOCK == 4096 && CFS_MHDR_SIZE == 32 && CFS_PTRS_PER_BLOCK == 508 && CFS_CSUMIDX_SPAN == 508 &&
+                   CFS_CSUMS_PER_BLOCK == 1016 && CFS_AEAD_PER_BLOCK == 127 &&
+                   sizeof(struct cfs_csum_aead) == 32 && CFS_KIND_CSUM == 8 && CFS_KIND_CSUMIDX == 7 &&
+                   CFS_KIND_CSUMIDX2 == 18 && CFS_CSUM_NONE == 0 && CFS_CSUM_POLY1305 == 2 && CFS_NAME_MAX == 47 &&
+                   CFS_NAME_MAX_LONG == 255 && CFS_RECORD_BLOCKS == 8 && CFS_COMPRESS_LZ4 == 1 &&
+                   CFS_EXT_COMPRESSED == 0x80000000u && CFS_EXT_COUNT_MASK == 0xFFFF && CFS_EXT_PSIZE_SHIFT == 16 &&
+                   CFS_EXT_PSIZE_MASK == 0xFF && CFS_EXT_ALGO_SHIFT == 24 && CFS_EXT_ALGO_MASK == 0x7F &&
+                   CHACHA20_KEY_SIZE == 32 && sizeof(struct cfs_block_aad) == 16 &&
+                   offsetof(struct cfs_block_aad, lblk) == 8,
+               "cosmofs_csum's cosmofs_format.h and cosmofs_internal.h values");
+/* cosmofs_csum.cee keeps an authenticated entry in a stack slot of 4 words. */
+_Static_assert(sizeof(struct cfs_csum_aead) <= 4 * 8, "cosmofs_csum.cee's stack slot");
 
 /* The digest of the C (cosmofs_csum.c, 2026-11-07), which the CeeSafe port gives. */
 #define CSUM_DIGEST 0x807c60c6070274a7ull

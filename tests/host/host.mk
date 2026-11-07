@@ -206,6 +206,7 @@ HOST_CFSSNAPCTL_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/c
 	kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_cfssnapctl.c
 # cosmofs's file checksums with the real CRC32C: the buffer cache, the copies, the cipher and the codec are the test's.
 HOST_CFSCSUM_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/cosmofs_csum.c kernel/core/crc32c.c \
+	kernel-services/filesystem/cosmofs/cosmofs_csum_floor.c \
 	kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_cfscsum.c
 HOST_CFSPARSE_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/cfsparse.c kernel/core/crc32c.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_cfsparse.c
 HOST_HANDLES_SRCS := $(HOST_COMMON_SRCS) kernel/object/object.c kernel/object/object_floor.c kernel/object/handle.c kernel/object/handle_floor.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_handles.c
