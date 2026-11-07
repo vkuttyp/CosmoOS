@@ -184,6 +184,9 @@ KERNEL_GENERIC_SRCS := \
 	kernel-services/vfs/memdev.c \
 	kernel-services/vfs/memdev_floor.c \
 	kernel-services/vfs/vfstest.c \
+	kernel-services/vfs/vfstest_base.c \
+	kernel-services/vfs/vfstest_mount.c \
+	kernel-services/vfs/vfstest_floor.c \
 	kernel-services/storage/pool.c \
 	kernel-services/storage/pool_floor.c \
 	kernel-services/filesystem/cosmofs/cosmofs_core.c \

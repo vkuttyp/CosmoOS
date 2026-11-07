@@ -1,0 +1,848 @@
+// vfstest_mount.cee - The VFS's self-tests of page budgets, cache limits, the last put and mounts' names and pins, in
+// CeeSafe: roadmap 2.0 SA7. cache-budget-race, cache-limits, vfs-put-race, vfs-mount-id and vfs-mount-pin. Each is an
+// exported function the selftest table names, failing with the condition that did not hold and its line here.
+// vfstest_floor.c asserts the values this file writes as its own constants.
+
+@header("kernel/cosmofs.h", "kernel/kmalloc.h", "kernel/log.h", "kernel/mountns.h", "kernel/pagecache.h",
+    "kernel/percpu.h", "kernel/ramblk.h", "kernel/sched.h", "kernel/string.h", "kernel/thread.h", "kernel/timer.h",
+    "kernel/vfs.h", "kernel/wait.h", "uapi/cosmo/syscall.h")
+extern "C" {
+    struct vnode_ops;
+    struct mount {
+        id: u64;
+        flags: u32;
+        cache_pages: AtomicU64;
+        cache_limit_pages: u64;
+    }
+    struct vnode {
+        obj: kobject;
+        mnt: *mut mount;
+        @cname("type") kind: u32;
+        ops: *vnode_ops;
+    }
+    struct file;
+    struct pagecache_stats {
+        pages: u64;
+        reclaimed: u64;
+        budget_refusals: u64;
+    }
+    struct mount_ns;
+    struct thread;
+    struct blkdev;
+
+    fn memset(p: *mut void, c: i32, n: usize) -> *mut void;
+    fn vfs_open(start: *mut vnode, path: *CChar, flags: u32, mode: u32, out: *mut *mut file) -> i32;
+    fn vfs_lookup(start: *mut vnode, path: *CChar, out: *mut *mut vnode) -> i32;
+    fn vfs_mkdir(start: *mut vnode, path: *CChar, mode: u32) -> i32;
+    fn vfs_unlink(start: *mut vnode, path: *CChar) -> i32;
+    fn vfs_rmdir(start: *mut vnode, path: *CChar) -> i32;
+    fn vfs_mount(path: *CChar, fsname: *CChar, bdev: *mut blkdev, flags: u32) -> i32;
+    fn vfs_umount2(path: *CChar, flags: u32) -> i32;
+    fn vfs_mount_count() -> u32;
+    fn vfs_vnode_count() -> u32;
+    fn vfs_mount_acquire(id: u64, out: *mut *mut mount) -> i32;
+    fn vfs_mount_release(mnt: *mut mount);
+    fn vnode_alloc(mnt: *mut mount, ino: u64) -> *mut vnode;
+    fn vnode_hash_insert(vn: *mut vnode);
+    fn vnode_put(vn: *mut vnode);
+    fn file_write(f: *mut file, buf: *void, len: usize) -> i64;
+    fn file_pread(f: *mut file, buf: *mut void, len: usize, off: u64) -> i64;
+    fn file_pwrite(f: *mut file, buf: *void, len: usize, off: u64) -> i64;
+    fn file_sync(f: *mut file) -> i32;
+    fn pagecache_get_stats(out: *mut pagecache_stats);
+    fn pagecache_limit() -> u64;
+    fn pagecache_set_limit(pages: u64);
+    fn ramblk_create(nblocks: u64) -> *mut blkdev;
+    fn ramblk_destroy(bd: *mut blkdev);
+    fn cosmofs_format(bd: *mut blkdev) -> i32;
+    fn mountns_initial() -> *mut mount_ns;
+    fn mountns_create(parent: *mut mount_ns, out: *mut *mut mount_ns) -> i32;
+    fn mountns_put(ns: *mut mount_ns);
+    fn mountns_sees(ns: *mount_ns, mnt: *mount) -> bool;
+    fn cpu_count() -> u32;
+    fn clock_now_ns() -> u64;
+    fn sched_yield();
+    fn thread_create(entry: extern "C" fn(*mut void), arg: *mut void, name: *CChar, priority: i32) -> *mut thread;
+    fn thread_create_on(entry: extern "C" fn(*mut void), arg: *mut void, name: *CChar, priority: i32, affinity: u64)
+        -> *mut thread;
+    fn thread_join(t: *mut thread) -> i32;
+    fn thread_sleep_ns(ns: u64);
+}
+
+// errno.h, syscall.h, vfs.h and thread.h, which vfstest_floor.c checks.
+const ENOENT: i32 = 2;
+const EBUSY: i32 = 16;
+const EEXIST: i32 = 17;
+const EINVAL: i32 = 22;
+const ENOSPC: i32 = 28;
+const O_RDWR: u32 = 0x0002;
+const O_CREAT: u32 = 0x0040;
+const O_TRUNC: u32 = 0x0200;
+const VNODE_REG: u32 = 1;
+const MOUNT_CACHE_IS_STORE: u32 = 2;
+const SCHED_PRIO_DEFAULT: i32 = 32;
+const PAGE: usize = 4096;
+const PAGE_I: i64 = 4096;
+const PAGE_U: u64 = 4096;
+const MODE_DIR: u32 = 0x1ED; // 0755
+const MODE_FILE: u32 = 0x1A4; // 0644
+const MS: u64 = 1000000;
+
+/// Safety: `reason` is writable; `why` ends in a zero byte.
+unsafe fn failed(reason: *mut *CChar, why: StringView) -> bool {
+    reason.write(why.ptr as *CChar);
+    return false;
+}
+
+/// A reason too long for one line, in two pieces, the second ending in a zero byte.
+/// Safety: `reason` is writable; the text stays valid until the next failure.
+unsafe fn failed2(reason: *mut *CChar, a: StringView, b: StringView) -> bool {
+    let buf = SliceMut.fromRaw(borrow mut REASON as *mut [u8; 256] as *mut u8, 256);
+    var line = TextWriter.create(buf);
+    line.text(a);
+    line.text(b);
+    reason.write(line.cText());
+    return false;
+}
+
+static mut REASON: [u8; 256] = [0; 256];
+
+/// A literal's C string: the literal ends in a zero byte.
+fn c(s: StringView) -> *CChar => s.ptr as *CChar;
+
+/// Safety: `f` is an open file.
+unsafe fn filePut(f: *mut file) {
+    kobject_put(f as *mut kobject);
+}
+
+/// Safety: `p` ends in a zero byte.
+unsafe fn umount(p: StringView) -> i32 => vfs_umount2(c(p), 0);
+
+/// Safety: `p` ends in a zero byte.
+unsafe fn mkdir(p: StringView) -> i32 => vfs_mkdir(0 as *mut vnode, c(p), MODE_DIR);
+
+/// Safety: `p` ends in a zero byte.
+unsafe fn rmdir(p: StringView) -> i32 => vfs_rmdir(0 as *mut vnode, c(p));
+
+/// Safety: `p` ends in a zero byte.
+unsafe fn unlink(p: StringView) -> i32 => vfs_unlink(0 as *mut vnode, c(p));
+
+/// Safety: `p` ends in a zero byte.
+unsafe fn mountRamfs(p: StringView) -> i32 => vfs_mount(c(p), c("ramfs\0"), 0 as *mut blkdev, 0);
+
+/// The mount `path` is on, or null.
+/// Safety: `path` ends in a zero byte.
+unsafe fn mountAt(path: StringView) -> *mut mount {
+    var vn = 0 as *mut vnode;
+    if (vfs_lookup(0 as *mut vnode, c(path), borrow mut vn as *mut *mut vnode) != 0) {
+        return 0 as *mut mount;
+    }
+    let m = Ptr.toBorrow(vn as *vnode).mnt;
+    vnode_put(vn);
+    return m;
+}
+
+/// Safety: `m` is a live mount.
+unsafe fn mnt(m: *mut mount) -> borrow mut(static) mount => Ptr.toBorrowMut(m);
+
+fn line() -> [u8; 192] => [0; 192];
+
+// Two threads fill and free distinct files on a four-page mount while a third samples the mount's page count: the
+// reservation is the admission, so the count never exceeds the budget (Greptile on PR #21 found the earlier
+// read-then-charge window).
+
+/// One writer's file and its tallies.
+struct BudgetStress {
+    path: *CChar;
+    enospc: u32;
+    pages: u32;
+}
+
+static BUDGET_STOP: AtomicBool = AtomicBool.constant(false);
+static BUDGET_PEAK: AtomicU64 = AtomicU64.constant(0);
+static BUDGET_MNT: AtomicUSize = AtomicUSize.constant(0);
+static mut BUDGET_PAGE: [u8; 4096] = [0; 4096];
+
+/// Safety: `arg` is a BudgetStress that outlives the thread.
+@callback
+unsafe fn budgetWriter(arg: *mut void) {
+    let st = Ptr.toBorrowMut(arg as *mut BudgetStress);
+    let page = borrow BUDGET_PAGE as *[u8; 4096] as *void;
+    for (round in 0..40) {
+        var f = 0 as *mut file;
+        if (vfs_open(0 as *mut vnode, st.path, O_RDWR | O_CREAT | O_TRUNC, MODE_FILE, borrow mut f as *mut *mut file)
+            != 0) {
+            continue;
+        }
+        for (i in 0..6) {
+            let n = file_write(f, page, PAGE);
+            if (n == PAGE_I) {
+                st.pages += 1;
+            } else if (n == -ENOSPC as i64) {
+                st.enospc += 1;
+            }
+        }
+        filePut(f);
+        let _ = vfs_unlink(0 as *mut vnode, st.path);
+    }
+}
+
+/// Safety: BUDGET_MNT names a live mount until BUDGET_STOP.
+@callback
+unsafe fn budgetSampler(arg: *mut void) {
+    let m = BUDGET_MNT.load() as *mut mount;
+    while (!BUDGET_STOP.load()) {
+        let n = mnt(m).cache_pages.loadWith(LoadOrdering.Relaxed);
+        if (n > BUDGET_PEAK.load()) {
+            BUDGET_PEAK.store(n);
+        }
+        sched_yield();
+    }
+}
+
+/// Safety: `reason` is writable; runs at boot, alone.
+@export("selftest_cache_budget_race")
+unsafe fn selftestCacheBudgetRace(reason: *mut *CChar) -> bool {
+    let mk = mkdir("/mnt/rrace\0");
+    if (!(mk == 0 || mk == -EEXIST)) {
+        return failed(reason, "check failed: mk == 0 || mk == -EEXIST at line 208\0");
+    }
+    if (!(mountRamfs("/mnt/rrace\0") == 0)) {
+        return failed(reason, "check failed: vfs_mount(\"/mnt/rrace\", \"ramfs\", NULL, 0) == 0 at line 211\0");
+    }
+    let m = mountAt("/mnt/rrace\0");
+    if (!(!m.isNull())) {
+        return failed(reason, "check failed: vfs_lookup(NULL, \"/mnt/rrace\", &rv) == 0 at line 215\0");
+    }
+    BUDGET_MNT.store(m as usize);
+    let budget = mnt(m);
+    budget.cache_limit_pages = 4;
+    BUDGET_STOP.store(false);
+    BUDGET_PEAK.store(0);
+    var a = BudgetStress { path: c("/mnt/rrace/a\0"), enospc: 0, pages: 0 };
+    var b = BudgetStress { path: c("/mnt/rrace/b\0"), enospc: 0, pages: 0 };
+    let sampler = thread_create(budgetSampler, 0 as *mut void, c("budget-sampler\0"), SCHED_PRIO_DEFAULT);
+    let ta = thread_create(budgetWriter, borrow mut a as *mut BudgetStress as *mut void, c("budget-a\0"),
+        SCHED_PRIO_DEFAULT);
+    let tb = thread_create(budgetWriter, borrow mut b as *mut BudgetStress as *mut void, c("budget-b\0"),
+        SCHED_PRIO_DEFAULT);
+    if (!(!sampler.isNull() && !ta.isNull() && !tb.isNull())) {
+        return failed(reason, "check failed: sampler && ta && tb at line 230\0");
+    }
+    let _ = thread_join(ta);
+    let _ = thread_join(tb);
+    BUDGET_STOP.store(true);
+    let _ = thread_join(sampler);
+    if (!(a.enospc + b.enospc > 0)) { // twelve pages wanted per round, four allowed
+        return failed(reason, "check failed: a.enospc + b.enospc > 0 at line 237\0");
+    }
+    if (!(a.pages + b.pages > 0)) {
+        return failed(reason, "check failed: a.pages + b.pages > 0 at line 240\0");
+    }
+    if (!(BUDGET_PEAK.load() <= 4)) {
+        return failed(reason, "check failed: g_budget_peak <= 4 at line 243\0");
+    }
+    if (!(mnt(m).cache_pages.load() == 0)) { // every reservation was charged or returned
+        return failed(reason, "check failed: g_budget_mnt->cache_pages == 0 at line 246\0");
+    }
+    if (!(umount("/mnt/rrace\0") == 0)) {
+        return failed(reason, "check failed: vfs_umount(\"/mnt/rrace\") == 0 at line 249\0");
+    }
+    if (!(rmdir("/mnt/rrace\0") == 0)) {
+        return failed(reason, "check failed: vfs_rmdir(NULL, \"/mnt/rrace\") == 0 at line 252\0");
+    }
+    var buffer = line();
+    var w = TextWriter.create(mut buffer[..]);
+    w.text("selftest: cache-budget-race: ");
+    w.decimal((a.pages + b.pages) as u64);
+    w.text(" pages admitted, ");
+    w.decimal((a.enospc + b.enospc) as u64);
+    w.text(" refused across two writers; peak ");
+    w.decimal(BUDGET_PEAK.load());
+    w.text(" of a budget of 4");
+    KernelLog.send(LogLevel.Info, w);
+    return true;
+}
+
+static mut LIMIT_BUF: [u8; 4096] = [0; 4096];
+
+/// Byte `i` of `p`.
+/// Safety: `p` holds more than `i` bytes.
+unsafe fn at(p: *u8, i: usize) -> u8 => *Ptr.toBorrow(p.add(i));
+
+/// Safety: `reason` is writable; runs at boot, alone.
+@export("selftest_cache_limits")
+unsafe fn selftestCacheLimits(reason: *mut *CChar) -> bool {
+    let buf = borrow mut LIMIT_BUF as *mut [u8; 4096] as *mut void;
+    let bp = buf as *u8;
+    var s0: [u64; 11] = [0; 11]; // struct pagecache_stats
+    var s1: [u64; 11] = [0; 11];
+    let p0 = borrow mut s0 as *mut [u64; 11] as *mut pagecache_stats;
+    let p1 = borrow mut s1 as *mut [u64; 11] as *mut pagecache_stats;
+    let none = 0 as *mut vnode;
+
+    // 1. A ramfs mount with a budget of four pages: the fifth page is -ENOSPC, the write before it is short, freeing
+    // a file makes room.
+    var mk = mkdir("/mnt/rcap\0");
+    if (!(mk == 0 || mk == -EEXIST)) {
+        return failed(reason, "check failed: mk == 0 || mk == -EEXIST at line 288\0");
+    }
+    if (!(mountRamfs("/mnt/rcap\0") == 0)) {
+        return failed(reason, "check failed: vfs_mount(\"/mnt/rcap\", \"ramfs\", NULL, 0) == 0 at line 291\0");
+    }
+    let rm = mountAt("/mnt/rcap\0");
+    if (!(!rm.isNull() && (mnt(rm).flags & MOUNT_CACHE_IS_STORE) != 0 && mnt(rm).cache_limit_pages == 16384)) {
+        return failed2(reason, "check failed: rm != NULL && (rm->flags & MOUNT_CACHE_IS_STORE) && ",
+            "rm->cache_limit_pages == 16384 at line 296\0");
+    }
+    let capped = mnt(rm);
+    capped.cache_limit_pages = 4;
+    var f = 0 as *mut file;
+    if (!(vfs_open(none, c("/mnt/rcap/a\0"), O_RDWR | O_CREAT, MODE_FILE, borrow mut f as *mut *mut file) == 0)) {
+        return failed2(reason, "check failed: vfs_open(NULL, \"/mnt/rcap/a\", COSMO_O_RDWR | COSMO_O_CREAT, 0644, &f) ",
+            "== 0 at line 303\0");
+    }
+    let _ = memset(buf, 0x5a, PAGE);
+    for (i in 0..4) {
+        if (!(file_write(f, buf as *void, PAGE) == PAGE_I)) {
+            return failed(reason, "check failed: file_write(f, buf, PAGE_SIZE) == PAGE_SIZE at line 308\0");
+        }
+    }
+    if (!(mnt(rm).cache_pages.load() == 4)) {
+        return failed(reason, "check failed: rm->cache_pages == 4 at line 312\0");
+    }
+    pagecache_get_stats(p0);
+    if (!(file_write(f, buf as *void, PAGE) == -ENOSPC as i64)) {
+        return failed(reason, "check failed: file_write(f, buf, PAGE_SIZE) == -ENOSPC at line 316\0");
+    }
+    if (!(file_write(f, buf as *void, 16) == -ENOSPC as i64)) {
+        return failed(reason, "check failed: file_write(f, buf, 16) == -ENOSPC at line 319\0");
+    }
+    pagecache_get_stats(p1);
+    let refused0 = Ptr.toBorrow(p0 as *pagecache_stats).budget_refusals;
+    if (!(Ptr.toBorrow(p1 as *pagecache_stats).budget_refusals == refused0 + 2)) {
+        return failed(reason, "check failed: s1.budget_refusals == s0.budget_refusals + 2 at line 324\0");
+    }
+    filePut(f);
+    var g = 0 as *mut file;
+    if (!(vfs_open(none, c("/mnt/rcap/b\0"), O_RDWR | O_CREAT, MODE_FILE, borrow mut g as *mut *mut file) == 0)) {
+        return failed2(reason, "check failed: vfs_open(NULL, \"/mnt/rcap/b\", COSMO_O_RDWR | COSMO_O_CREAT, 0644, &g) ",
+            "== 0 at line 330\0");
+    }
+    if (!(file_write(g, buf as *void, PAGE) == -ENOSPC as i64)) { // the budget is the mount's, not the file's
+        return failed(reason, "check failed: file_write(g, buf, PAGE_SIZE) == -ENOSPC at line 333\0");
+    }
+    if (!(unlink("/mnt/rcap/a\0") == 0)) {
+        return failed(reason, "check failed: vfs_unlink(NULL, \"/mnt/rcap/a\") == 0 at line 336\0");
+    }
+    if (!(mnt(rm).cache_pages.load() == 0)) {
+        return failed(reason, "check failed: rm->cache_pages == 0 at line 339\0");
+    }
+    if (!(file_write(g, buf as *void, 2 * PAGE) == 2 * PAGE_I)) {
+        return failed(reason, "check failed: file_write(g, buf, 2 * PAGE_SIZE) == 2 * PAGE_SIZE at line 342\0");
+    }
+    filePut(g);
+    if (!(unlink("/mnt/rcap/b\0") == 0)) {
+        return failed(reason, "check failed: vfs_unlink(NULL, \"/mnt/rcap/b\") == 0 at line 346\0");
+    }
+    if (!(umount("/mnt/rcap\0") == 0)) {
+        return failed(reason, "check failed: vfs_umount(\"/mnt/rcap\") == 0 at line 349\0");
+    }
+    if (!(rmdir("/mnt/rcap\0") == 0)) {
+        return failed(reason, "check failed: vfs_rmdir(NULL, \"/mnt/rcap\") == 0 at line 352\0");
+    }
+
+    // 2. cosmofs on a RAM device: a 2 MiB file read back under a global limit that forces reclaim of its clean pages.
+    // ramfs pages (the root's) are never touched.
+    let bd = ramblk_create(1024);
+    if (!(!bd.isNull())) {
+        return failed(reason, "check failed: bd != NULL at line 359\0");
+    }
+    if (!(cosmofs_format(bd) == 0)) {
+        return failed(reason, "check failed: cosmofs_format(bd) == 0 at line 362\0");
+    }
+    mk = mkdir("/mnt/rcl\0");
+    if (!(mk == 0 || mk == -EEXIST)) {
+        return failed(reason, "check failed: mk == 0 || mk == -EEXIST at line 366\0");
+    }
+    if (!(vfs_mount(c("/mnt/rcl\0"), c("cosmofs\0"), bd, 0) == 0)) {
+        return failed(reason, "check failed: vfs_mount(\"/mnt/rcl\", \"cosmofs\", bd, 0) == 0 at line 369\0");
+    }
+    let rootMnt = mountAt("/\0");
+    let rootPages0 = mnt(rootMnt).cache_pages.load();
+    if (!(vfs_open(none, c("/mnt/rcl/big\0"), O_RDWR | O_CREAT, MODE_FILE, borrow mut f as *mut *mut file) == 0)) {
+        return failed2(reason, "check failed: vfs_open(NULL, \"/mnt/rcl/big\", COSMO_O_RDWR | COSMO_O_CREAT, 0644, ",
+            "&f) == 0 at line 375\0");
+    }
+    let npages: u32 = 512;
+    for (i in 0..npages) {
+        let _ = memset(buf, truncate<i32>(i & 0xff), PAGE);
+        if (!(file_write(f, buf as *void, PAGE) == PAGE_I)) {
+            return failed(reason, "check failed: file_write(f, buf, PAGE_SIZE) == PAGE_SIZE at line 381\0");
+        }
+        if ((i + 1) % 64 == 0) {
+            let src = file_sync(f); // every page clean: all reclaimable
+            if (src != 0) {
+                var b2 = line();
+                var w = TextWriter.create(mut b2[..]);
+                w.text("cache-limits: sync after ");
+                w.decimal((i + 1) as u64);
+                w.text(" pages: ");
+                w.signed(src as i64);
+                KernelLog.send(LogLevel.Error, w);
+            }
+            if (!(src == 0)) {
+                return failed(reason, "check failed: src == 0 at line 395\0");
+            }
+        }
+    }
+    pagecache_get_stats(p0);
+    let st0 = Ptr.toBorrow(p0 as *pagecache_stats);
+    if (!(st0.pages >= npages as u64)) {
+        return failed(reason, "check failed: s0.pages >= NPAGES at line 402\0");
+    }
+    let saved = pagecache_limit();
+    pagecache_set_limit(st0.pages - (npages / 2) as u64); // below what is cached: reads must evict
+    for (i in 0..npages) {
+        if (!(file_pread(f, buf, PAGE, i as u64 * PAGE_U) == PAGE_I)) {
+            return failed2(reason, "check failed: file_pread(f, buf, PAGE_SIZE, (uint64_t)i * PAGE_SIZE) == PAGE_SIZE ",
+                "at line 409\0");
+        }
+        let v = truncate<u8>(i & 0xff);
+        if (!(at(bp, 0) == v && at(bp, PAGE - 1) == v)) {
+            return failed2(reason, "check failed: buf[0] == (uint8_t)(i & 0xff) && buf[PAGE_SIZE - 1] == (uint8_t)(i ",
+                "& 0xff) at line 414\0");
+        }
+    }
+    pagecache_get_stats(p1);
+    pagecache_set_limit(saved);
+    let st1 = Ptr.toBorrow(p1 as *pagecache_stats);
+    if (!(st1.reclaimed > st0.reclaimed)) {
+        return failed(reason, "check failed: s1.reclaimed > s0.reclaimed at line 421\0");
+    }
+    if (!(st1.pages <= st0.pages - (npages / 2) as u64 + 64)) { // at most one reclaim batch over the limit
+        return failed(reason, "check failed: s1.pages <= s0.pages - NPAGES / 2 + 64 at line 424\0");
+    }
+    if (!(mnt(rootMnt).cache_pages.load() == rootPages0)) { // nothing of ramfs was evicted
+        return failed(reason, "check failed: root_mnt->cache_pages == root_pages0 at line 427\0");
+    }
+    let reclaimed = st1.reclaimed - st0.reclaimed;
+    let refusals = st1.budget_refusals;
+    // A dirty page is not reclaimable: writes beyond the limit stay cached.
+    pagecache_get_stats(p0);
+    pagecache_set_limit(1);
+    let _ = memset(buf, 0x77, PAGE);
+    if (!(file_pwrite(f, buf as *void, PAGE, 0) == PAGE_I)) {
+        return failed(reason, "check failed: file_pwrite(f, buf, PAGE_SIZE, 0) == PAGE_SIZE at line 436\0");
+    }
+    if (!(file_pread(f, buf, PAGE, 0) == PAGE_I && at(bp, 10) == 0x77)) {
+        return failed2(reason, "check failed: file_pread(f, buf, PAGE_SIZE, 0) == PAGE_SIZE && buf[10] == 0x77 at ",
+            "line 419\0");
+    }
+    pagecache_set_limit(saved);
+    filePut(f);
+    if (!(unlink("/mnt/rcl/big\0") == 0)) {
+        return failed(reason, "check failed: vfs_unlink(NULL, \"/mnt/rcl/big\") == 0 at line 445\0");
+    }
+    if (!(umount("/mnt/rcl\0") == 0)) {
+        return failed(reason, "check failed: vfs_umount(\"/mnt/rcl\") == 0 at line 448\0");
+    }
+    if (!(rmdir("/mnt/rcl\0") == 0)) {
+        return failed(reason, "check failed: vfs_rmdir(NULL, \"/mnt/rcl\") == 0 at line 451\0");
+    }
+    ramblk_destroy(bd);
+    var buffer = line();
+    var w = TextWriter.create(mut buffer[..]);
+    w.text("selftest: cache-limits: ramfs budget refused ");
+    w.decimal(refusals);
+    w.text(" misses; ");
+    w.decimal(reclaimed);
+    w.text(" clean pages reclaimed under the global limit");
+    KernelLog.send(LogLevel.Info, w);
+    return true;
+}
+
+// ---- vfs-put-race: the last references of one vnode, dropped at once ----
+//
+// One vnode, one reference per CPU, every CPU told to drop at the same moment, thousands of times. The version of
+// vnode_put that read the count before deciding lets two of those drops both read 2 and neither unhash, and the
+// release then asserts on a vnode still in the hash. The vnode is a bare one on the root mount with no ops, so the
+// release has nothing to sync or evict: this is a test of the cache protocol alone.
+//
+// The handshake is release/acquire, not volatile: the driver publishes `vn` and then bumps `generation` with a
+// release, and a racer that acquires the new generation is thereby guaranteed to see the new `vn` and not the previous
+// round's, which has been freed. The first version used volatile loads, which order nothing on a weakly ordered
+// machine and passed only because QEMU's TCG does not reorder loads as silicon does -- a test of vnode_put's ordering
+// with an ordering bug of its own.
+
+/// The racers' shared state.
+struct PutRacer {
+    vn: AtomicUSize; // the vnode to drop; published before `generation`
+    generation: AtomicU32; // bumped (release) by the driver for each round
+    acks: AtomicU32; // racers that have dropped this round
+    stop: AtomicU32;
+}
+
+/// Safety: `arg` is a PutRacer that outlives the thread.
+@callback
+unsafe fn putRacerMain(arg: *mut void) {
+    let r = Ptr.toBorrow(arg as *PutRacer);
+    var seen: u32 = 0;
+    while (r.stop.loadWith(LoadOrdering.Acquire) == 0) {
+        let g = r.generation.loadWith(LoadOrdering.Acquire);
+        if (g == seen) {
+            // Spin, not yield: the point is to arrive at the drop at the same instant as the others, and a yield
+            // hands that instant away.
+            continue;
+        }
+        seen = g;
+        let vn = r.vn.loadWith(LoadOrdering.Acquire) as *mut vnode;
+        vnode_put(vn);
+        let _ = r.acks.fetchAddWith(1, Ordering.Release);
+    }
+}
+
+/// The racers spin, so each needs a CPU of its own and the driver needs one too: racers on CPUs 1..n-1, the driver
+/// left CPU 0. The first version put a spinning racer on every CPU and the driver ran only on preemption ticks -- 51
+/// seconds for what takes a fraction of one. Two racers is enough to race; fewer than three CPUs is a skip.
+/// Safety: `reason` is writable; runs at boot, alone.
+@export("selftest_vfs_put_race")
+unsafe fn selftestVfsPutRace(reason: *mut *CChar) -> bool {
+    let ncpu = cpu_count();
+    if (ncpu < 3) {
+        var buffer = line();
+        var w = TextWriter.create(mut buffer[..]);
+        w.text("selftest: vfs-put-race: ");
+        w.decimal(ncpu as u64);
+        w.text(" CPU(s); skipping");
+        KernelLog.send(LogLevel.Info, w);
+        return true;
+    }
+    let racers = if (ncpu - 1 > 8) 8 else ncpu - 1;
+    let vnodes0 = vfs_vnode_count();
+    var rootv = 0 as *mut vnode;
+    if (!(vfs_lookup(0 as *mut vnode, c("/\0"), borrow mut rootv as *mut *mut vnode) == 0)) {
+        return failed(reason, "check failed: vfs_lookup(NULL, \"/\", &rootv) == 0 at line 525\0");
+    }
+    let m = Ptr.toBorrow(rootv as *vnode).mnt; // held through rootv for the whole test
+
+    var r = PutRacer {
+        vn: AtomicUSize.create(0),
+        generation: AtomicU32.create(0),
+        acks: AtomicU32.create(0),
+        stop: AtomicU32.create(0),
+    };
+    let rp = borrow mut r as *mut PutRacer as *mut void;
+    var t: [usize; 8] = [0; 8];
+    for (i in 0..racers) {
+        t[i as usize] = thread_create_on(putRacerMain, rp, c("put-racer\0"), SCHED_PRIO_DEFAULT, (1 as u64) << (i + 1))
+            as usize;
+    }
+
+    // Bounded by time as well as count, so a slow host runs fewer rounds rather than a long test.
+    let maxRounds: u32 = 4000;
+    let stopAt = clock_now_ns() + 500 * MS;
+    var round: u32 = 0;
+    var ok = true;
+    while (round < maxRounds && clock_now_ns() < stopAt) {
+        // A fresh hashed vnode holding exactly one reference per racer: the creator's reference and racers-1 more.
+        let vn = vnode_alloc(m, 0x7f000000 + round as u64);
+        if (vn.isNull()) {
+            ok = false;
+            let _ = failed(reason, "check failed: vn != NULL at line 552\0");
+            break;
+        }
+        let v = Ptr.toBorrowMut(vn);
+        v.kind = VNODE_REG;
+        v.ops = 0 as *vnode_ops;
+        vnode_hash_insert(vn);
+        for (i in 1..racers) {
+            kobject_get(borrow mut v.obj as *mut kobject);
+        }
+        r.vn.storeWith(vn as usize, StoreOrdering.Release);
+        r.acks.storeWith(0, StoreOrdering.Release);
+        let _ = r.generation.fetchAddWith(1, Ordering.Release);
+        let deadline = clock_now_ns() + 2000 * MS;
+        while (r.acks.loadWith(LoadOrdering.Acquire) < racers && clock_now_ns() < deadline) {
+            sched_yield();
+        }
+        if (!(r.acks.loadWith(LoadOrdering.Acquire) == racers)) {
+            ok = false;
+            let _ = failed(reason, "check failed: __atomic_load_n(&r.acks, __ATOMIC_ACQUIRE) == racers at line 571\0");
+            break;
+        }
+        round += 1;
+    }
+    r.stop.storeWith(1, StoreOrdering.Release);
+    for (i in 0..racers) {
+        if (t[i as usize] != 0) {
+            let _ = thread_join(t[i as usize] as *mut thread);
+        }
+    }
+    if (!ok) {
+        return false; // the racers are stopped first: they hold a pointer to this frame
+    }
+    vnode_put(rootv);
+    // Every vnode was released exactly once and left the hash: the census is back where it started.
+    if (!(vfs_vnode_count() == vnodes0)) {
+        return failed(reason, "check failed: vfs_vnode_count() == vnodes0 at line 588\0");
+    }
+    var buffer = line();
+    var w = TextWriter.create(mut buffer[..]);
+    w.text("selftest: vfs-put-race: ");
+    w.decimal(round as u64);
+    w.text(" rounds of ");
+    w.decimal(racers as u64);
+    w.text(" concurrent last drops, every vnode released once");
+    KernelLog.send(LogLevel.Info, w);
+    return true;
+}
+
+/// A mount's name (docs/audit/next-subsystem-fsctl.md). The assertion that matters is the third: an id is not an
+/// index. A filesystem unmounted and another mounted at the same path must not inherit the first one's name, or an
+/// operator holding a stale id commands a filesystem they never listed.
+/// Safety: `reason` is writable; runs at boot, alone.
+@export("selftest_vfs_mount_id")
+unsafe fn selftestVfsMountId(reason: *mut *CChar) -> bool {
+    let _ = mkdir("/tmp/idA\0");
+    let _ = umount("/tmp/idA\0");
+    var mk = mkdir("/tmp/idA\0");
+    if (!(mk == 0 || mk == -EEXIST)) {
+        return failed(reason, "check failed: mk == 0 || mk == -EEXIST at line 611\0");
+    }
+    mk = mkdir("/tmp/idB\0");
+    if (!(mk == 0 || mk == -EEXIST)) {
+        return failed(reason, "check failed: mk == 0 || mk == -EEXIST at line 615\0");
+    }
+
+    // Every mount has one, and no two share it.
+    if (!(mountRamfs("/tmp/idA\0") == 0)) {
+        return failed(reason, "check failed: vfs_mount(\"/tmp/idA\", \"ramfs\", NULL, 0) == 0 at line 620\0");
+    }
+    if (!(mountRamfs("/tmp/idB\0") == 0)) {
+        return failed(reason, "check failed: vfs_mount(\"/tmp/idB\", \"ramfs\", NULL, 0) == 0 at line 623\0");
+    }
+    let a = mountAt("/tmp/idA\0");
+    let b = mountAt("/tmp/idB\0");
+    if (!(!a.isNull() && !b.isNull())) {
+        return failed(reason, "check failed: a != NULL && b != NULL at line 628\0");
+    }
+    if (!(mnt(a).id != 0 && mnt(b).id != 0)) {
+        return failed(reason, "check failed: a->id != 0 && b->id != 0 at line 631\0");
+    }
+    if (!(mnt(a).id != mnt(b).id)) {
+        return failed(reason, "check failed: a->id != b->id at line 634\0");
+    }
+    let first = mnt(a).id;
+    let bid = mnt(b).id;
+
+    // The root filesystem has one too, and it is not either of these.
+    let root = mountAt("/\0");
+    if (!(!root.isNull() && mnt(root).id != 0)) {
+        return failed(reason, "check failed: root != NULL && root->id != 0 at line 642\0");
+    }
+    if (!(mnt(root).id != first && mnt(root).id != bid)) {
+        return failed(reason, "check failed: root->id != a->id && root->id != b->id at line 645\0");
+    }
+
+    // A number is never handed out twice: unmount and mount again at the same path, and the new filesystem is a new
+    // name. An index would give the freed slot back and fail here.
+    if (!(umount("/tmp/idA\0") == 0)) {
+        return failed(reason, "check failed: vfs_umount(\"/tmp/idA\") == 0 at line 651\0");
+    }
+    if (!(mountRamfs("/tmp/idA\0") == 0)) {
+        return failed(reason, "check failed: vfs_mount(\"/tmp/idA\", \"ramfs\", NULL, 0) == 0 at line 654\0");
+    }
+    let again = mountAt("/tmp/idA\0");
+    if (!(!again.isNull())) {
+        return failed(reason, "check failed: again != NULL at line 658\0");
+    }
+    let againId = mnt(again).id;
+    if (!(againId != first)) {
+        return failed(reason, "check failed: again->id != first at line 662\0");
+    }
+    if (!(againId != bid)) {
+        return failed(reason, "check failed: again->id != b->id at line 665\0");
+    }
+
+    if (!(umount("/tmp/idA\0") == 0)) {
+        return failed(reason, "check failed: vfs_umount(\"/tmp/idA\") == 0 at line 669\0");
+    }
+    if (!(umount("/tmp/idB\0") == 0)) {
+        return failed(reason, "check failed: vfs_umount(\"/tmp/idB\") == 0 at line 672\0");
+    }
+    if (!(rmdir("/tmp/idA\0") == 0)) {
+        return failed(reason, "check failed: vfs_rmdir(NULL, \"/tmp/idA\") == 0 at line 675\0");
+    }
+    if (!(rmdir("/tmp/idB\0") == 0)) {
+        return failed(reason, "check failed: vfs_rmdir(NULL, \"/tmp/idB\") == 0 at line 678\0");
+    }
+    var buffer = line();
+    var w = TextWriter.create(mut buffer[..]);
+    w.text("selftest: vfs-mount-id: ids ");
+    w.decimal(first);
+    w.text(", ");
+    w.decimal(bid);
+    w.text(", then ");
+    w.decimal(againId);
+    w.text(" at the same path");
+    KernelLog.send(LogLevel.Info, w);
+    return true;
+}
+
+// ---- the pin: a mount stays alive while a pass walks it ----
+
+static PIN_UMOUNT_RC: AtomicU32 = AtomicU32.constant(0);
+static PIN_UMOUNT_DONE: AtomicBool = AtomicBool.constant(false);
+
+/// Safety: runs on its own thread while /tmp/pin is mounted.
+@callback
+unsafe fn pinUnmounter(arg: *mut void) {
+    PIN_UMOUNT_RC.store(truncate<u32>(umount("/tmp/pin\0")));
+    PIN_UMOUNT_DONE.storeWith(true, StoreOrdering.Release);
+}
+
+fn pinDone() -> bool => PIN_UMOUNT_DONE.loadWith(LoadOrdering.Acquire);
+
+/// An unmount waits for a pass rather than tearing the filesystem down under it, and the wait terminates because no
+/// new pass can start once the unmount has begun. Both halves matter: without the wait a pass walks freed buffers, and
+/// without the refusal the wait never ends.
+/// Safety: `reason` is writable; runs at boot, alone.
+@export("selftest_vfs_mount_pin")
+unsafe fn selftestVfsMountPin(reason: *mut *CChar) -> bool {
+    let mk = mkdir("/tmp/pin\0");
+    if (!(mk == 0 || mk == -EEXIST)) {
+        return failed(reason, "check failed: mk == 0 || mk == -EEXIST at line 715\0");
+    }
+    if (!(mountRamfs("/tmp/pin\0") == 0)) {
+        return failed(reason, "check failed: vfs_mount(\"/tmp/pin\", \"ramfs\", NULL, 0) == 0 at line 718\0");
+    }
+    let m = mountAt("/tmp/pin\0");
+    if (!(!m.isNull())) {
+        return failed(reason, "check failed: m != NULL at line 722\0");
+    }
+    let pinId = mnt(m).id;
+
+    // Acquire by name, as a pass does.
+    var held = 0 as *mut mount;
+    if (!(vfs_mount_acquire(pinId, borrow mut held as *mut *mut mount) == 0)) {
+        return failed(reason, "check failed: vfs_mount_acquire(g_pin_id, &held) == 0 at line 729\0");
+    }
+    if (!(held == m)) {
+        return failed(reason, "check failed: held == m at line 732\0");
+    }
+    var other = 0 as *mut mount;
+    let op = borrow mut other as *mut *mut mount;
+    if (!(vfs_mount_acquire(0, op) == -EINVAL)) {
+        return failed(reason, "check failed: vfs_mount_acquire(0, &held) == -EINVAL at line 737\0");
+    }
+    if (!(vfs_mount_acquire(0xffffffffffffffff, op) == -ENOENT)) { // no such name anywhere
+        return failed(reason, "check failed: vfs_mount_acquire(~0ull, &held) == -ENOENT at line 740\0");
+    }
+
+    // An unmount now blocks. Run it elsewhere so this thread can let go.
+    PIN_UMOUNT_RC.store(1234);
+    PIN_UMOUNT_DONE.storeWith(false, StoreOrdering.Release);
+    let t = thread_create(pinUnmounter, 0 as *mut void, c("pin-umount\0"), SCHED_PRIO_DEFAULT);
+    if (!(!t.isNull())) {
+        return failed(reason, "check failed: t != NULL at line 748\0");
+    }
+
+    // It has not finished, and it will not until the pass is done. Once the unmount has begun, a second acquisition
+    // must be *refused* -- that is what makes the drain terminate, so the test requires it to happen rather than
+    // accepting whichever answer comes back. Before the unmount begins, acquiring still succeeds; the loop waits for
+    // the transition and fails if it never comes.
+    var refused = false;
+    var i: u32 = 0;
+    while (i < 500 && !refused) {
+        if (!(!pinDone())) {
+            return failed(reason, "check failed: !__atomic_load_n(&g_pin_umount_done, __ATOMIC_ACQUIRE) at line 759\0");
+        }
+        var second = 0 as *mut mount;
+        let rc = vfs_mount_acquire(pinId, borrow mut second as *mut *mut mount);
+        if (!(rc == 0 || rc == -EBUSY)) {
+            return failed(reason, "check failed: rc == 0 || rc == -EBUSY at line 764\0");
+        }
+        if (rc == 0) {
+            vfs_mount_release(second);
+        } else {
+            refused = true;
+        }
+        thread_sleep_ns(2 * MS);
+        i += 1;
+    }
+    if (!(refused)) { // a pass that could start here would never let the drain end
+        return failed(reason, "check failed: refused at line 775\0");
+    }
+    if (!(!pinDone())) {
+        return failed(reason, "check failed: !__atomic_load_n(&g_pin_umount_done, __ATOMIC_ACQUIRE) at line 778\0");
+    }
+
+    // And one unmount at a time. Note what this does and does not prove: the refusal comes from `follow_mount`, which
+    // will not walk to a mount that is unmounting, so the second unmount fails while resolving its path and never
+    // reaches the guard inside vfs_umount2. That guard is still there, for a caller that reaches the mount by a
+    // relative path from inside it rather than through the mountpoint -- a narrow door this test does not open.
+    // Removing the guard does not fail this assertion, and the as-built section says so rather than letting the test
+    // look like proof it is not.
+    if (!(umount("/tmp/pin\0") == -EBUSY)) {
+        return failed(reason, "check failed: vfs_umount(\"/tmp/pin\") == -EBUSY at line 788\0");
+    }
+    if (!(!pinDone())) { // and it changed nothing
+        return failed(reason, "check failed: !__atomic_load_n(&g_pin_umount_done, __ATOMIC_ACQUIRE) at line 791\0");
+    }
+
+    // A namespace made *during the drain* copies its parent's view, this mount included -- a copy that skipped it
+    // would be permanently short a mount its parent has if the unmount later failed and was restored. Which means the
+    // unmount's "I am the last namespace out" is no longer true, and it must find that out: the mount survives, and the
+    // unmount becomes this namespace forgetting it.
+    var racer = 0 as *mut mount_ns;
+    let mountsBefore = vfs_mount_count();
+    if (!(mountns_create(mountns_initial(), borrow mut racer as *mut *mut mount_ns) == 0)) {
+        return failed(reason, "check failed: mountns_create(mountns_initial(), &racer) == 0 at line 801\0");
+    }
+    if (!(mountns_sees(racer as *mount_ns, m as *mount))) {
+        return failed(reason, "check failed: mountns_sees(racer, m) at line 804\0");
+    }
+    if (!(!pinDone())) {
+        return failed(reason, "check failed: !__atomic_load_n(&g_pin_umount_done, __ATOMIC_ACQUIRE) at line 807\0");
+    }
+
+    // Let go. The drain wakes, re-counts, and steps down.
+    vfs_mount_release(held);
+    let _ = thread_join(t);
+    if (!(pinDone())) {
+        return failed(reason, "check failed: __atomic_load_n(&g_pin_umount_done, __ATOMIC_ACQUIRE) at line 814\0");
+    }
+    if (!(PIN_UMOUNT_RC.load() == 0)) { // the unmount's rc, as a u32
+        return failed(reason, "check failed: g_pin_umount_rc == 0 at line 817\0");
+    }
+    // The filesystem is still there, because the new namespace holds it; this namespace no longer does. The count is
+    // the assertion that survives an unmount which wrongly went ahead: it would have torn the filesystem down and taken
+    // it with it.
+    if (!(vfs_mount_count() == mountsBefore)) {
+        return failed(reason, "check failed: vfs_mount_count() == mounts_before at line 823\0");
+    }
+    if (!(mountns_sees(racer as *mount_ns, m as *mount))) {
+        return failed(reason, "check failed: mountns_sees(racer, m) at line 826\0");
+    }
+    if (!(vfs_mount_acquire(pinId, op) == -ENOENT)) { // not ours any more
+        return failed(reason, "check failed: vfs_mount_acquire(g_pin_id, &still) == -ENOENT at line 829\0");
+    }
+    mountns_put(racer); // the last one out takes it
+    if (!(vfs_mount_count() == mountsBefore - 1)) {
+        return failed(reason, "check failed: vfs_mount_count() == mounts_before - 1 at line 833\0");
+    }
+    if (!(vfs_mount_acquire(pinId, op) == -ENOENT)) {
+        return failed(reason, "check failed: vfs_mount_acquire(g_pin_id, &after) == -ENOENT at line 836\0");
+    }
+    if (!(rmdir("/tmp/pin\0") == 0)) {
+        return failed(reason, "check failed: vfs_rmdir(NULL, \"/tmp/pin\") == 0 at line 839\0");
+    }
+    var buffer = line();
+    var w = TextWriter.create(mut buffer[..]);
+    w.text("selftest: vfs-mount-pin: mount ");
+    w.decimal(pinId);
+    w.text(" held a pass; a second unmount was refused; the first waited and then took it");
+    KernelLog.send(LogLevel.Info, w);
+    return true;
+}
