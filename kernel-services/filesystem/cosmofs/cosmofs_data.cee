@@ -1,0 +1,1227 @@
+// cosmofs_data.cee - A file's blocks, in CeeSafe: roadmap 2.0 SA7. tests/host/test_cfsdata.c holds it to the digest
+// of the C it replaced.
+//
+// A run maps logical blocks [lblk, lblk + count) to pool blocks [start, start + count). Runs are kept sorted by lblk;
+// a logical block no run covers is a hole. The inode holds CFS_DIRECT runs and the head of a chain of CFS_KIND_EXTENTS
+// blocks (253 runs each) for the rest. On that map: lookups, counts, a run or a compressed record set over what was
+// there, truncation, the copy-on-write write of a data or directory block with its checksum or seal, and the write of
+// a record's worth of blocks, compressed where it shrinks.
+//
+// struct cfs, the inodes, the runs, the buffers and the set-asides stay C (cosmofs_internal.h, cosmofs_format.h). The
+// runs are handled through pointers to C arrays, the inode, entry and saved entries the C kept on the stack in zeroed
+// slots of words, checked against their C sizes (tests/host/test_cfsdata.c): a CeeSafe local cannot hold C state.
+// cosmofs_data_floor.c keeps what a build configuration decides -- the fault seams, the debug build's note, and the run
+// bound a self-test may lower -- and cfs_set_extent, whose run comes by value, as CeeSafe cannot take a C struct.
+
+@header("kernel/kmalloc.h", "kernel/string.h", "kernel/chacha20.h", "kernel/lz4.h", "kernel/crc32c.h",
+    "cosmofs_internal.h")
+extern "C" {
+    struct cfs_mhdr {
+        generation: u64;
+    }
+    struct cfs_super {
+        version: u32;
+    }
+    struct cfs {
+        sb: cfs_super;
+        gen: u64;
+        have_key: bool;
+        map_stores: u64;
+        last_store_in: *cfs_inode;
+        last_store_n: u32;
+    }
+    struct cfs_buf {
+        blkno: u64;
+        data: *mut u8;
+    }
+    struct cfs_extent {
+        start: u64;
+        count: u32;
+        lblk: u32;
+    }
+    struct cfs_inode {
+        ino: u64;
+        direct: [cfs_extent; 10];
+        indirect: u64;
+        compress_algo: u32;
+        csum_algo: u32;
+    }
+    struct cfs_csum_aead {
+        tag: [u8; 16];
+        nonce: [u8; 12];
+        crc: u32;
+    }
+    struct cfs_prep {
+        n: u32;
+        used: u32;
+    }
+
+    fn krealloc(p: *mut void, size: usize, flags: u32) -> *mut void;
+    fn kzalloc(size: usize) -> *mut void;
+    fn cfs_dva_valid(fs: *cfs, dva: u64) -> bool;
+    fn cfs_extents_valid(fs: *cfs, ext: *cfs_extent, n: u32) -> bool;
+    fn cfs_direct_valid(fs: *cfs, inode: *cfs_inode) -> bool;
+    fn cfs_buf_get(fs: *mut cfs, blkno: u64, kind: u32, out: *mut *mut cfs_buf) -> i32;
+    fn cfs_buf_put(fs: *mut cfs, b: *mut cfs_buf);
+    fn cfs_buf_hdr(b: *mut cfs_buf) -> *mut cfs_mhdr;
+    fn cfs_prep_meta(fs: *mut cfs, p: *mut cfs_prep, n: u32) -> i32;
+    fn cfs_prep_release(fs: *mut cfs, p: *mut cfs_prep);
+    fn cfs_buf_cow_prep(fs: *mut cfs, bp: *mut *mut cfs_buf, slot: *mut u64, p: *mut cfs_prep);
+    fn cfs_buf_new_prep(fs: *mut cfs, kind: u32, p: *mut cfs_prep) -> *mut cfs_buf;
+    fn cfs_free_block_deferred(fs: *mut cfs, blk: u64);
+    fn cfs_fail(fs: *mut cfs, rc: i32);
+    fn cfs_alloc_run(fs: *mut cfs, cls: u32, hint: u64, want: u32, start: *mut u64, got: *mut u64) -> i32;
+    fn cfs_data_write(fs: *mut cfs, blk: u64, buf: *void) -> i32;
+    fn cfs_csum_put(fs: *mut cfs, inode: *mut cfs_inode, lblk: u64, crc: u32) -> i32;
+    fn cfs_csum_get(fs: *mut cfs, inode: *mut cfs_inode, lblk: u64, crc: *mut u32) -> i32;
+    fn cfs_aead_put(fs: *mut cfs, inode: *mut cfs_inode, lblk: u64, e: *cfs_csum_aead) -> i32;
+    fn cfs_aead_get(fs: *mut cfs, inode: *mut cfs_inode, lblk: u64, e: *mut cfs_csum_aead) -> i32;
+    fn cfs_record_read(fs: *mut cfs, inode: *mut cfs_inode, e: *cfs_extent, out: *mut u8) -> i32;
+    fn cfs_data_read_verified(fs: *mut cfs, inode: *mut cfs_inode, lblk: u64, dva: u64, buf: *mut void) -> i32;
+    fn cfs_inode_write(fs: *mut cfs, ino: u64, inode: *cfs_inode) -> i32;
+    fn cfs_csum_free(fs: *mut cfs, inode: *mut cfs_inode);
+    fn cfs_file_key(fs: *cfs, ino: u64, out: *mut u8);
+    fn cfs_block_nonce(nonce: *mut u8);
+    fn chacha20_seal(key: *u8, nonce: *u8, aad: *void, aadLen: usize, data: *mut void, len: usize, tag: *mut u8);
+    fn lz4_compress(src: *void, slen: usize, dst: *mut void, dcap: usize, work: *mut void) -> usize;
+    fn crc32c(data: *void, len: usize) -> u32;
+    fn memset(p: *mut void, c: i32, n: usize) -> *mut void;
+    fn memcpy(dst: *mut void, src: *void, n: usize) -> *mut void;
+    /// cosmofs_data_floor.c: the map change's fault seam (and, in a debug build, its note); the map store's; and the
+    /// run bound.
+    fn cfs_data_floor_set_extent_fault(fs: *mut cfs) -> i32;
+    fn cfs_data_floor_chain_nomem() -> bool;
+    fn cfs_data_floor_max_extents(fs: *cfs) -> u32;
+}
+
+// ---- errno.h, kmalloc.h, lz4.h, cosmofs_format.h and cosmofs_internal.h values (asserted in
+// tests/host/test_cfsdata.c) ----
+
+const EIO: i32 = 5;
+const ENOMEM: i32 = 12;
+const EFBIG: i32 = 27;
+const ENOSPC: i32 = 28;
+const ENOKEY: i32 = 126;
+const KMEM_ZERO: u32 = 1;
+const LZ4_WORK_BYTES: usize = 16384;
+const CFS_BLOCK: usize = 4096;
+const CFS_MHDR_SIZE: usize = 32;
+const CFS_DIRECT: u32 = 10;
+const CFS_EXTENTS_PER_BLOCK: u32 = 253;
+const CFS_MAX_EXTENTS: u32 = 4096;
+const CFS_PREP_MAX: u32 = 18;
+const CFS_KIND_EXTENTS: u32 = 6;
+const CFS_RECORD_BLOCKS: u32 = 8;
+const CFS_COMPRESS_LZ4: u32 = 1;
+const CFS_CSUM_POLY1305: u32 = 2;
+const CFS_ALLOC_DATA: u32 = 1;
+const CFS_ALLOC_META: u32 = 0;
+const CFS_EXT_COMPRESSED: u32 = 0x80000000;
+const CFS_EXT_COUNT_MASK: u32 = 0xFFFF;
+const CFS_EXT_PSIZE_SHIFT: u32 = 16;
+const CFS_EXT_PSIZE_MASK: u32 = 0xFF;
+const CFS_EXT_ALGO_SHIFT: u32 = 24;
+const CFS_EXT_ALGO_MASK: u32 = 0x7F;
+const CHACHA20_KEY_SIZE: usize = 32;
+/// The sizes of a run, an authenticated entry and a set-aside (struct cfs_prep): checked by the test.
+const EXT: usize = 16;
+const AEAD: usize = 32;
+const PREP_SIZE: usize = 296;
+/// Where a chain block's runs are, after its `next`.
+const EB_EXT: usize = 8;
+
+// ---- Runs ----
+
+fn extCompressed(count: u32) -> bool => (count & CFS_EXT_COMPRESSED) != 0;
+
+fn extCount(count: u32) -> u32 => if (extCompressed(count)) count & CFS_EXT_COUNT_MASK else count;
+
+fn extPsize(count: u32) -> u32 =>
+    if (extCompressed(count)) ((count >> CFS_EXT_PSIZE_SHIFT) & CFS_EXT_PSIZE_MASK) + 1 else extCount(count);
+
+/// cosmofs_format.h's cfs_ext_pack: the count word of a compressed record.
+fn extPack(algo: u32, psize: u32, count: u32) -> u32 =>
+    CFS_EXT_COMPRESSED | ((algo & CFS_EXT_ALGO_MASK) << CFS_EXT_ALGO_SHIFT) |
+    (((psize - 1) & CFS_EXT_PSIZE_MASK) << CFS_EXT_PSIZE_SHIFT) | (count & CFS_EXT_COUNT_MASK);
+
+/// Run `i` of an array.
+/// Safety: `ext` holds more than `i` runs.
+unsafe fn at(ext: *mut cfs_extent, i: u32) -> *mut cfs_extent => ext.add(i as usize);
+
+/// Safety: as at.
+unsafe fn run(ext: *mut cfs_extent, i: u32) -> borrow mut(static) cfs_extent => Ptr.toBorrowMut(at(ext, i));
+
+/// Copy run `from` to `to`.
+/// Safety: both are runs.
+unsafe fn extCopy(to: *mut cfs_extent, from: *cfs_extent) { memcpy(to as *mut void, from as *void, EXT); }
+
+/// Set run `to`.
+/// Safety: `to` is a run.
+unsafe fn extSet(to: *mut cfs_extent, start: u64, count: u32, lblk: u32) {
+    let e = Ptr.toBorrowMut(to);
+    e.start = start;
+    e.count = count;
+    e.lblk = lblk;
+}
+
+/// The inode's direct runs.
+/// Safety: `inp` is an inode.
+unsafe fn directOf(inp: *cfs_inode) -> *mut cfs_extent =>
+    borrow Ptr.toBorrow(inp).direct as *[cfs_extent; 10] as *mut cfs_extent;
+
+/// A chain block's runs and its `next`.
+/// Safety: `b` holds a chain block.
+unsafe fn ebExt(b: *mut cfs_buf) -> *mut cfs_extent =>
+    Ptr.toBorrow(b as *cfs_buf).data.add(CFS_MHDR_SIZE + EB_EXT) as *mut cfs_extent;
+
+/// Safety: as ebExt.
+unsafe fn ebNext(b: *mut cfs_buf) -> *mut u64 => Ptr.toBorrow(b as *cfs_buf).data.add(CFS_MHDR_SIZE) as *mut u64;
+
+/// cosmofs_format.h's cfs_map_block: map `lblk` through `n` sorted runs: 1 and the pool block, 0 for a hole, -1 for a
+/// compressed record (its blocks mean nothing apart from each other).
+/// Safety: `ext` holds `n` runs; `pblk` writable.
+unsafe fn mapBlock(ext: *mut cfs_extent, n: u32, lblk: u64, pblk: *mut u64) -> i32 {
+    for (i in 0u32..n) {
+        let e = run(ext, i);
+        if (lblk >= e.lblk as u64 && lblk < e.lblk as u64 + extCount(e.count) as u64) {
+            if (extCompressed(e.count)) {
+                return -1;
+            }
+            pblk.write(e.start.wrappingAdd(lblk - e.lblk as u64));
+            return 1;
+        }
+        if (e.lblk as u64 > lblk) {
+            break;
+        }
+    }
+    return 0;
+}
+
+// ---- Loading and storing the map ----
+
+/// Gather the inode's runs into a kmalloc'd array (the caller frees).
+/// Safety: `fs` is a mounted filesystem's state, its lock held; `inp` an inode; `out` and `n` writable.
+unsafe fn extentsLoad(fs: *mut cfs, inp: *cfs_inode, out: *mut *mut cfs_extent, n: *mut u32) -> i32 {
+    var cap = CFS_DIRECT + CFS_EXTENTS_PER_BLOCK;
+    var k: u32 = 0;
+    var ext = kmalloc(cap as usize * EXT, 0) as *mut cfs_extent;
+    if (ext.isNull()) {
+        return -ENOMEM;
+    }
+    let direct = directOf(inp);
+    var i: u32 = 0;
+    while (i < CFS_DIRECT && extCount(run(direct, i).count) != 0) {
+        extCopy(at(ext, k), at(direct, i) as *cfs_extent);
+        k += 1;
+        i += 1;
+    }
+    var next = Ptr.toBorrow(inp).indirect;
+    var chain: u32 = 0;
+    while (next != 0) {
+        chain += 1;
+        if (chain > CFS_MAX_EXTENTS / CFS_EXTENTS_PER_BLOCK + 1 || !cfs_dva_valid(fs as *cfs, next)) {
+            kfree(ext as *mut void);
+            return -EIO; // a cycle or a wild pointer
+        }
+        var b = 0 as *mut cfs_buf;
+        let rc = cfs_buf_get(fs, next, CFS_KIND_EXTENTS, borrow mut b as *mut *mut cfs_buf);
+        if (rc != 0) {
+            kfree(ext as *mut void);
+            return rc;
+        }
+        let eb = ebExt(b);
+        i = 0;
+        while (i < CFS_EXTENTS_PER_BLOCK && extCount(run(eb, i).count) != 0) {
+            if (k == cap) {
+                let max = cfs_data_floor_max_extents(fs as *cfs);
+                if (cap >= max) {
+                    cfs_buf_put(fs, b);
+                    kfree(ext as *mut void);
+                    return -EFBIG;
+                }
+                let ncap = if (cap * 2 > cfs_data_floor_max_extents(fs as *cfs)) cfs_data_floor_max_extents(fs as
+                    *cfs) else cap * 2;
+                let grown = krealloc(ext as *mut void, ncap as usize * EXT, 0) as *mut cfs_extent;
+                if (grown.isNull()) {
+                    cfs_buf_put(fs, b);
+                    kfree(ext as *mut void);
+                    return -ENOMEM;
+                }
+                ext = grown;
+                cap = ncap;
+            }
+            extCopy(at(ext, k), at(eb, i) as *cfs_extent);
+            k += 1;
+            i += 1;
+        }
+        next = ebNext(b).read();
+        cfs_buf_put(fs, b);
+    }
+    if (!cfs_extents_valid(fs as *cfs, ext as *cfs_extent, k)) {
+        kfree(ext as *mut void);
+        return -EIO; // out of range, unsorted or overlapping
+    }
+    out.write(ext);
+    n.write(k);
+    return 0;
+}
+
+/// Store runs back: the first CFS_DIRECT in the inode, the rest in the chain (existing blocks copy-on-write, new ones
+/// allocated, surplus blocks freed).
+///
+/// In two halves (CF17; CFS-6). The first does everything that can fail -- reads the old chain, sets aside every block
+/// the copies and the new blocks need -- and changes nothing, so a failure there is an ordinary error the caller can
+/// retry: cfs_set_extent frees nothing it displaced, and cfs_data_write_block puts its checksum back. The second
+/// rewrites the inode's runs and the chain and cannot fail. It used to be one loop that abandoned the transaction when
+/// the chain's next block could not be had, half the map new and half old.
+/// Safety: as extentsLoad; `inp` writable; `ext` holds `n` runs.
+unsafe fn extentsStore(fs: *mut cfs, inp: *mut cfs_inode, ext: *mut cfs_extent, n: u32) -> i32 {
+    if (n > cfs_data_floor_max_extents(fs as *cfs)) {
+        return -EFBIG;
+    }
+    var left = if (n > CFS_DIRECT) n - CFS_DIRECT else 0;
+    let need = (left + CFS_EXTENTS_PER_BLOCK - 1) / CFS_EXTENTS_PER_BLOCK;
+    // The set-aside, the old chain's blocks the new one reuses (held), and the rest of it (freed once the new map is
+    // in).
+    let w = kzalloc(PREP_SIZE + CFS_PREP_MAX as usize * 16) as *mut u8;
+    if (w.isNull()) {
+        return -ENOMEM;
+    }
+    let prep = w as *mut cfs_prep;
+    let keep = w.add(PREP_SIZE) as *mut *mut cfs_buf;
+    let drops = w.add(PREP_SIZE + CFS_PREP_MAX as usize * 8) as *mut u64;
+
+    // The first half: read and set aside, change nothing.
+    var nkeep: u32 = 0;
+    var ndrop: u32 = 0;
+    var cows: u32 = 0;
+    var guard: u32 = 0;
+    let i = Ptr.toBorrowMut(inp);
+    var cur = i.indirect;
+    var rc: i32 = 0;
+    while (cur != 0 && rc == 0) {
+        guard += 1;
+        if (guard > CFS_PREP_MAX) {
+            rc = -EIO; // a cycle: extentsLoad refuses one too
+            break;
+        }
+        var b = 0 as *mut cfs_buf;
+        rc = cfs_buf_get(fs, cur, CFS_KIND_EXTENTS, borrow mut b as *mut *mut cfs_buf);
+        if (rc != 0) {
+            break;
+        }
+        let after = ebNext(b).read();
+        if (nkeep < need) {
+            keep.add(nkeep as usize).write(b);
+            nkeep += 1;
+            if (Ptr.toBorrow(cfs_buf_hdr(b) as *cfs_mhdr).generation != Ptr.toBorrow(fs as *cfs).gen) {
+                cows += 1;
+            }
+        } else {
+            drops.add(ndrop as usize).write(cur);
+            ndrop += 1;
+            cfs_buf_put(fs, b);
+        }
+        cur = after;
+    }
+    // The test seam (cosmofs-nomem): the chain block cannot be had.
+    if (rc == 0 && (cows != 0 || need > nkeep) && cfs_data_floor_chain_nomem()) {
+        rc = -ENOMEM;
+    }
+    if (rc == 0) {
+        rc = cfs_prep_meta(fs, prep, cows + (need - nkeep));
+    }
+    if (rc != 0) {
+        for (k in 0u32..nkeep) {
+            cfs_buf_put(fs, keep.add(k as usize).read());
+        }
+        kfree(w as *mut void);
+        return rc;
+    }
+
+    // The second half: nothing below can fail.
+    let direct = directOf(inp as *cfs_inode);
+    memset(direct as *mut void, 0, CFS_DIRECT as usize * EXT);
+    var k: u32 = 0;
+    while (k < n && k < CFS_DIRECT) {
+        extCopy(at(direct, k), at(ext, k) as *cfs_extent);
+        k += 1;
+    }
+    var rest = CFS_DIRECT;
+    var slot = borrow mut i.indirect as *mut u64; // the pointer to the block we are about to fill
+    for (j in 0u32..need) {
+        var b = 0 as *mut cfs_buf;
+        if (j < nkeep) {
+            b = keep.add(j as usize).read();
+            cfs_buf_cow_prep(fs, borrow mut b as *mut *mut cfs_buf, slot, prep);
+        } else {
+            b = cfs_buf_new_prep(fs, CFS_KIND_EXTENTS, prep);
+            slot.write(Ptr.toBorrow(b as *cfs_buf).blkno);
+        }
+        let eb = ebExt(b);
+        let take = if (left < CFS_EXTENTS_PER_BLOCK) left else CFS_EXTENTS_PER_BLOCK;
+        memset(eb as *mut void, 0, CFS_EXTENTS_PER_BLOCK as usize * EXT);
+        memcpy(eb as *mut void, at(ext, rest) as *void, take as usize * EXT);
+        rest += take;
+        left -= take;
+        if (j + 1 == need) {
+            ebNext(b).write(0); // the rest of an old chain is retired below
+        }
+        slot = ebNext(b); // stays valid: the buffer is cached and dirty for this transaction
+        cfs_buf_put(fs, b);
+    }
+    if (need == 0) {
+        i.indirect = 0;
+    }
+    for (d in 0u32..ndrop) {
+        cfs_free_block_deferred(fs, drops.add(d as usize).read());
+    }
+    cfs_prep_release(fs, prep); // nothing, unless a kept block needed no copy after all
+    kfree(w as *mut void);
+    let f = Ptr.toBorrowMut(fs);
+    let stores = Ptr.toBorrow(borrow mut f.map_stores as *mut u64 as *AtomicU64);
+    stores.storeWith(f.map_stores.wrappingAdd(1), StoreOrdering.Release);
+    f.last_store_in = inp as *cfs_inode;
+    f.last_store_n = n;
+    return 0;
+}
+
+/// The runs an inode's map holds, counted without gathering them: the direct slots in use and each chain block's,
+/// bounded as extentsLoad bounds the chain. Under fs->lock.
+/// Safety: as extentsLoad; `out` writable.
+@export("cfs_extents_count")
+unsafe fn extentsCount(fs: *mut cfs, inp: *cfs_inode, out: *mut u32) -> i32 {
+    var k: u32 = 0;
+    let direct = directOf(inp);
+    var i: u32 = 0;
+    while (i < CFS_DIRECT && extCount(run(direct, i).count) != 0) {
+        k += 1;
+        i += 1;
+    }
+    var next = Ptr.toBorrow(inp).indirect;
+    var chain: u32 = 0;
+    while (next != 0) {
+        chain += 1;
+        if (chain > CFS_MAX_EXTENTS / CFS_EXTENTS_PER_BLOCK + 1 || !cfs_dva_valid(fs as *cfs, next)) {
+            return -EIO; // a cycle or a wild pointer, as extentsLoad says
+        }
+        var b = 0 as *mut cfs_buf;
+        let rc = cfs_buf_get(fs, next, CFS_KIND_EXTENTS, borrow mut b as *mut *mut cfs_buf);
+        if (rc != 0) {
+            return rc;
+        }
+        let eb = ebExt(b);
+        i = 0;
+        while (i < CFS_EXTENTS_PER_BLOCK && extCount(run(eb, i).count) != 0) {
+            k += 1;
+            i += 1;
+        }
+        next = ebNext(b).read();
+        cfs_buf_put(fs, b);
+    }
+    out.write(k);
+    return 0;
+}
+
+// ---- Lookups ----
+
+/// The pool block of logical block `lblk`: 1, 0 for a hole, -1 for a compressed record's, or an error.
+/// Safety: as extentsLoad; `pblk` writable.
+@export("cfs_map")
+unsafe fn map(fs: *mut cfs, inp: *cfs_inode, lblk: u64, pblk: *mut u64) -> i32 {
+    // The direct runs answer most lookups without loading the chain; they get the same checks the chain gets, so a
+    // crafted inode cannot map a block of another file or turn data into a hole (Greptile, PR #22).
+    if (!cfs_direct_valid(fs as *cfs, inp)) {
+        return -EIO;
+    }
+    if (mapBlock(directOf(inp), CFS_DIRECT, lblk, pblk) == 1) {
+        return 1;
+    }
+    if (Ptr.toBorrow(inp).indirect == 0) {
+        return 0;
+    }
+    var ext = 0 as *mut cfs_extent;
+    var n: u32 = 0;
+    var rc = extentsLoad(fs, inp, borrow mut ext as *mut *mut cfs_extent, borrow mut n as *mut u32);
+    if (rc != 0) {
+        return rc;
+    }
+    rc = mapBlock(ext, n, lblk, pblk);
+    kfree(ext as *mut void);
+    return rc;
+}
+
+/// The run that covers logical block `lblk`: 1, or 0 for a hole, or an error.
+/// Safety: as extentsLoad; `out` writable.
+@export("cfs_map_ext")
+unsafe fn mapExt(fs: *mut cfs, inp: *cfs_inode, lblk: u64, out: *mut cfs_extent) -> i32 {
+    if (!cfs_direct_valid(fs as *cfs, inp)) {
+        return -EIO;
+    }
+    let direct = directOf(inp);
+    for (i in 0u32..CFS_DIRECT) {
+        let e = run(direct, i);
+        let count = extCount(e.count);
+        if (count != 0 && lblk >= e.lblk as u64 && lblk < e.lblk as u64 + count as u64) {
+            extCopy(out, at(direct, i) as *cfs_extent);
+            return 1;
+        }
+    }
+    if (Ptr.toBorrow(inp).indirect == 0) {
+        return 0;
+    }
+    var ext = 0 as *mut cfs_extent;
+    var n: u32 = 0;
+    var rc = extentsLoad(fs, inp, borrow mut ext as *mut *mut cfs_extent, borrow mut n as *mut u32);
+    if (rc != 0) {
+        return rc;
+    }
+    rc = 0;
+    for (i in 0u32..n) {
+        let e = run(ext, i);
+        if (lblk >= e.lblk as u64 && lblk < e.lblk as u64 + extCount(e.count) as u64) {
+            extCopy(out, at(ext, i) as *cfs_extent);
+            rc = 1;
+            break;
+        }
+        if (e.lblk as u64 > lblk) {
+            break;
+        }
+    }
+    kfree(ext as *mut void);
+    return rc;
+}
+
+// ---- Changing the map ----
+
+/// Merge runs that are adjacent both logically and physically, in place. A compressed record is one object -- its
+/// blocks mean nothing apart from each other -- so it neither merges nor is merged into.
+/// Safety: `ext` holds `n` runs.
+unsafe fn extentsMerge(ext: *mut cfs_extent, n: u32) -> u32 {
+    var w: u32 = 0;
+    for (i in 0u32..n) {
+        let e = run(ext, i);
+        if (extCount(e.count) == 0) {
+            continue;
+        }
+        if (w > 0) {
+            let p = run(ext, w - 1);
+            if (!extCompressed(p.count) && !extCompressed(e.count) && p.start.wrappingAdd(p.count as u64) == e.start
+                && p.lblk as u64 + p.count as u64 == e.lblk as u64 && p.count as u64 + e.count as u64 < 0x7fffffff) {
+                p.count = p.count + e.count;
+                continue;
+            }
+        }
+        extCopy(at(ext, w), at(ext, i) as *cfs_extent);
+        w += 1;
+    }
+    return w;
+}
+
+/// The displaced blocks of one change: noted here and released only once the new map is stored.
+struct Freed {
+    blk: *mut u64;
+    n: u64;
+    cap: u64;
+}
+
+/// Note a displaced block, as long as there is room for it.
+/// Safety: `f.blk` holds `f.cap` words.
+unsafe fn noteFreed(f: borrow mut Freed, blk: u64) -> bool {
+    if (f.n >= f.cap) {
+        return false;
+    }
+    f.blk.add(f.n as usize).write(blk);
+    f.n += 1;
+    return true;
+}
+
+/// Put `ne` into the map, displacing whatever covered its logical range. A plain run that overlaps is split; a
+/// compressed record that overlaps is displaced whole and its blocks freed, because a record is one object and half of
+/// one is nothing. Records are aligned to CFS_RECORD_BLOCKS and so is every range written over them, so a record that
+/// hangs out of the range is a map this code did not write: it is refused rather than half-freed.
+///
+/// Blocks that stop being referenced are freed here, except for the one block a single-block write replaces, which the
+/// caller frees after its own bookkeeping (that is what `old` is for).
+/// Safety: as extentsLoad; `inp` writable; `nep` a run; `old` null or writable.
+@export("cfs_data_set_extent")
+unsafe fn setExtent(fs: *mut cfs, inp: *mut cfs_inode, nep: *cfs_extent, old: *mut u64) -> i32 {
+    var rc = cfs_data_floor_set_extent_fault(fs);
+    if (rc != 0) {
+        return rc;
+    }
+    let lblk = Ptr.toBorrow(nep).lblk as u64;
+    let count = extCount(Ptr.toBorrow(nep).count) as u64;
+    if (lblk + count > (1u64 << 32)) {
+        return -EFBIG;
+    }
+    var ext = 0 as *mut cfs_extent;
+    var n: u32 = 0;
+    rc = extentsLoad(fs, inp as *cfs_inode, borrow mut ext as *mut *mut cfs_extent, borrow mut n as *mut u32);
+    if (rc != 0) {
+        return rc;
+    }
+    if (!old.isNull()) {
+        old.write(0);
+    }
+    let out = kmalloc((n as usize + 2) * EXT, 0) as *mut cfs_extent;
+    // Displaced blocks are noted here and released only once the new map is stored. Releasing them as they are found
+    // would hand them to the next commit while the inode still pointed at them, if storing the map then failed -- and a
+    // block freed while something references it is the one mistake this filesystem must never make. A range of
+    // `count` logical blocks displaces at most `count` physical ones: a plain run uses one each, and a record uses
+    // fewer than it covers.
+    var freed = Freed { blk: kmalloc(count as usize * 8, 0) as *mut u64, n: 0, cap: count };
+    if (out.isNull() || freed.blk.isNull()) {
+        kfree(out as *mut void);
+        kfree(freed.blk as *mut void);
+        kfree(ext as *mut void);
+        return -ENOMEM;
+    }
+    var m: u32 = 0;
+    var placed = false;
+    let end = lblk + count;
+    for (i in 0u32..n) {
+        if (rc != 0) {
+            break;
+        }
+        let e = run(ext, i);
+        let ecount = extCount(e.count) as u64;
+        let elblk = e.lblk as u64;
+        let eend = elblk + ecount;
+        if (!placed && lblk < elblk) {
+            extCopy(at(out, m), nep as *cfs_extent);
+            m += 1;
+            placed = true;
+        }
+        if (eend <= lblk || elblk >= end) {
+            extCopy(at(out, m), at(ext, i) as *cfs_extent); // no overlap
+            m += 1;
+            continue;
+        }
+        if (extCompressed(e.count)) {
+            if (elblk < lblk || eend > end) {
+                rc = -EIO; // a record straddling the range: not ours to cut
+                continue;
+            }
+            var k: u32 = 0;
+            while (k < extPsize(e.count) && noteFreed(mut freed, e.start.wrappingAdd(k as u64))) {
+                k += 1;
+            }
+            continue; // displaced whole
+        }
+        // In logical order: what of this run lies before the new extent, the new extent itself, then what lies after.
+        if (elblk < lblk) {
+            extSet(at(out, m), e.start, truncate<u32>(lblk - elblk), e.lblk);
+            m += 1;
+        }
+        if (!placed) {
+            extCopy(at(out, m), nep as *cfs_extent);
+            m += 1;
+            placed = true;
+        }
+        let from = if (lblk > elblk) lblk else elblk;
+        let to = if (end < eend) end else eend;
+        if (count == 1 && !old.isNull() && from == lblk) {
+            old.write(e.start.wrappingAdd(lblk - elblk)); // the caller frees this one
+        } else {
+            var k = from;
+            while (k < to && noteFreed(mut freed, e.start.wrappingAdd(k - elblk))) {
+                k += 1;
+            }
+        }
+        if (eend > end) {
+            extSet(at(out, m), e.start.wrappingAdd(end - elblk), truncate<u32>(eend - end), truncate<u32>(end));
+            m += 1;
+        }
+    }
+    if (rc == 0) {
+        if (!placed) {
+            extCopy(at(out, m), nep as *cfs_extent); // beyond every run
+            m += 1;
+        }
+        m = extentsMerge(out, m);
+        rc = extentsStore(fs, inp, out, m);
+        if (rc == 0) {
+            for (k in 0u64..freed.n) {
+                cfs_free_block_deferred(fs, freed.blk.add(k as usize).read());
+            }
+        }
+    }
+    kfree(freed.blk as *mut void);
+    kfree(out as *mut void);
+    kfree(ext as *mut void);
+    return rc;
+}
+
+/// Map logical block `lblk` to `pblk`, replacing a previous mapping (its block is returned in *old) or filling a hole.
+/// Safety: as setExtent.
+@export("cfs_set_block")
+unsafe fn setBlock(fs: *mut cfs, inp: *mut cfs_inode, lblk: u64, pblk: u64, old: *mut u64) -> i32 {
+    var slot = [0u64; 2];
+    let ne = borrow mut slot as *mut [u64; 2] as *mut cfs_extent;
+    extSet(ne, pblk, 1, truncate<u32>(lblk));
+    return setExtent(fs, inp, ne as *cfs_extent, old);
+}
+
+/// Remove every mapping of [lblk, lblk+count) and free what it named. A plain run is split; a compressed record inside
+/// the range goes whole, because half a record is nothing. Unlike cfs_set_extent this puts nothing back: it is how a
+/// record stops existing before its surviving blocks are written again one at a time.
+/// Safety: as setExtent.
+unsafe fn dropRange(fs: *mut cfs, inp: *mut cfs_inode, lblk: u64, count: u64) -> i32 {
+    var ext = 0 as *mut cfs_extent;
+    var n: u32 = 0;
+    var rc = extentsLoad(fs, inp as *cfs_inode, borrow mut ext as *mut *mut cfs_extent, borrow mut n as *mut u32);
+    if (rc != 0) {
+        return rc;
+    }
+    let out = kmalloc((n as usize + 2) * EXT, 0) as *mut cfs_extent;
+    var freed = Freed { blk: kmalloc(count as usize * 8, 0) as *mut u64, n: 0, cap: count };
+    if (out.isNull() || freed.blk.isNull()) {
+        kfree(out as *mut void);
+        kfree(freed.blk as *mut void);
+        kfree(ext as *mut void);
+        return -ENOMEM;
+    }
+    let end = lblk + count;
+    var m: u32 = 0;
+    for (i in 0u32..n) {
+        if (rc != 0) {
+            break;
+        }
+        let e = run(ext, i);
+        let elblk = e.lblk as u64;
+        let eend = elblk + extCount(e.count) as u64;
+        if (eend <= lblk || elblk >= end) {
+            extCopy(at(out, m), at(ext, i) as *cfs_extent);
+            m += 1;
+            continue;
+        }
+        if (extCompressed(e.count)) {
+            if (elblk < lblk || eend > end) {
+                rc = -EIO; // a record hanging out of the range: not ours to cut
+                continue;
+            }
+            var k: u32 = 0;
+            while (k < extPsize(e.count) && noteFreed(mut freed, e.start.wrappingAdd(k as u64))) {
+                k += 1;
+            }
+            continue;
+        }
+        if (elblk < lblk) {
+            extSet(at(out, m), e.start, truncate<u32>(lblk - elblk), e.lblk);
+            m += 1;
+        }
+        let from = if (lblk > elblk) lblk else elblk;
+        let to = if (end < eend) end else eend;
+        var k = from;
+        while (k < to && noteFreed(mut freed, e.start.wrappingAdd(k - elblk))) {
+            k += 1;
+        }
+        if (eend > end) {
+            extSet(at(out, m), e.start.wrappingAdd(end - elblk), truncate<u32>(eend - end), truncate<u32>(end));
+            m += 1;
+        }
+    }
+    if (rc == 0) {
+        m = extentsMerge(out, m);
+        rc = extentsStore(fs, inp, out, m);
+        if (rc == 0) {
+            for (k in 0u64..freed.n) {
+                cfs_free_block_deferred(fs, freed.blk.add(k as usize).read());
+            }
+        }
+    }
+    kfree(freed.blk as *mut void);
+    kfree(out as *mut void);
+    kfree(ext as *mut void);
+    return rc;
+}
+
+/// A compressed record that straddles the new end of the file cannot be cut: it is one object. It is read, dropped
+/// whole, and the part that survives is written back as ordinary blocks -- which is what makes the blocks past the end
+/// unreachable rather than merely unread. Doing it the other way round, writing over the record block by block, would
+/// ask cfs_set_extent to cut the record it is standing on.
+/// Safety: as setExtent.
+unsafe fn truncateRecord(fs: *mut cfs, inp: *mut cfs_inode, keep: u64) -> i32 {
+    var eslot = [0u64; 2];
+    let e = borrow mut eslot as *mut [u64; 2] as *mut cfs_extent;
+    var rc = mapExt(fs, inp as *cfs_inode, keep, e);
+    let r = Ptr.toBorrow(e as *cfs_extent);
+    if (rc != 1 || !extCompressed(r.count) || r.lblk as u64 >= keep) {
+        return if (rc < 0) rc else 0;
+    }
+    let count = extCount(r.count);
+    let rec = kmalloc(count as usize * CFS_BLOCK, 0) as *mut u8;
+    if (rec.isNull()) {
+        return -ENOMEM;
+    }
+    rc = cfs_record_read(fs, inp, e as *cfs_extent, rec);
+    if (rc == 0) {
+        rc = dropRange(fs, inp, r.lblk as u64, count as u64);
+    }
+    if (rc == 0) {
+        let survives = truncate<u32>(keep - r.lblk as u64);
+        var i: u32 = 0;
+        while (i < survives && rc == 0) {
+            rc = dataWriteBlock(fs, inp, r.lblk as u64 + i as u64, rec.add(i as usize * CFS_BLOCK) as *void,
+                CFS_ALLOC_DATA);
+            i += 1;
+        }
+        if (rc != 0) {
+            cfs_fail(fs, rc); // as in cfs_record_write: the dropped record's survivors would read as holes
+        }
+    }
+    kfree(rec as *mut void);
+    return rc;
+}
+
+/// Keep logical blocks below `keep`; free the rest.
+/// Safety: as setExtent.
+@export("cfs_truncate_blocks")
+unsafe fn truncateBlocks(fs: *mut cfs, inp: *mut cfs_inode, keep: u64) -> i32 {
+    var rc = if (keep > 0) truncateRecord(fs, inp, keep) else 0;
+    if (rc != 0) {
+        return rc;
+    }
+    var ext = 0 as *mut cfs_extent;
+    var n: u32 = 0;
+    rc = extentsLoad(fs, inp as *cfs_inode, borrow mut ext as *mut *mut cfs_extent, borrow mut n as *mut u32);
+    if (rc != 0) {
+        return rc;
+    }
+    // The shortened map in `out`, the old one kept in `ext`: the blocks past the end are released only once the new
+    // map is stored, as cfs_set_extent and dropRange release theirs. extentsStore can fail as an ordinary error since
+    // CFS-6, and frees queued before it would have a later commit release blocks the old map still names (Codex on
+    // #433).
+    let out = kmalloc((if (n != 0) n else 1) as usize * EXT, 0) as *mut cfs_extent;
+    if (out.isNull()) {
+        kfree(ext as *mut void);
+        return -ENOMEM;
+    }
+    var m: u32 = 0;
+    for (i in 0u32..n) {
+        let e = run(ext, i);
+        let count = extCount(e.count);
+        if (e.lblk as u64 >= keep) {
+            continue;
+        }
+        extCopy(at(out, m), at(ext, i) as *cfs_extent);
+        if (e.lblk as u64 + count as u64 > keep) {
+            let o = run(out, m);
+            o.count = truncate<u32>(keep - e.lblk as u64); // truncateRecord left only a plain run straddling the end
+        }
+        m += 1;
+    }
+    rc = extentsStore(fs, inp, out, m);
+    var i: u32 = 0;
+    while (rc == 0 && i < n) {
+        let e = run(ext, i);
+        let count = extCount(e.count);
+        let psize = extPsize(e.count);
+        if (e.lblk as u64 >= keep) {
+            for (k in 0u32..psize) {
+                cfs_free_block_deferred(fs, e.start.wrappingAdd(k as u64));
+            }
+        } else if (e.lblk as u64 + count as u64 > keep) {
+            for (k in truncate<u32>(keep - e.lblk as u64)..count) {
+                cfs_free_block_deferred(fs, e.start.wrappingAdd(k as u64));
+            }
+        }
+        i += 1;
+    }
+    kfree(out as *mut void);
+    kfree(ext as *mut void);
+    if (rc == 0 && keep == 0) {
+        cfs_csum_free(fs, inp);
+    }
+    return rc;
+}
+
+// ---- Directory blocks by inode ----
+
+/// Read directory block `lblk` into buf (zeros for a hole). By inode: the VFS path has a vnode, the structural check
+/// has only the inode it read out of the map, and both want the same bytes.
+/// Safety: as extentsLoad; `buf` CFS_BLOCK writable bytes.
+@export("cfs_dir_read_block_at")
+unsafe fn dirReadBlockAt(fs: *mut cfs, dir: *cfs_inode, lblk: u64, buf: *mut u8) -> i32 {
+    var pblk: u64 = 0;
+    let rc = map(fs, dir, lblk, borrow mut pblk as *mut u64);
+    if (rc < 0) {
+        return rc;
+    }
+    if (rc == 0) {
+        memset(buf as *mut void, 0, CFS_BLOCK);
+        return 0;
+    }
+    // The verified read takes a mutable inode because it may repair a checksum entry; a caller that owns only a copy
+    // gives it the copy, which is what the structural check has.
+    var tmp = [0u64; 32];
+    let t = borrow mut tmp as *mut [u64; 32] as *mut cfs_inode;
+    memcpy(t as *mut void, dir as *void, layoutOf<cfs_inode>().size);
+    return cfs_data_read_verified(fs, t, lblk, pblk, buf as *mut void);
+}
+
+/// By inode, for the test hook that manufactures a bad entry: writes the block and the inode that names it, in the
+/// open transaction.
+/// Safety: as setExtent; `buf` CFS_BLOCK bytes.
+@export("cfs_dir_write_block_at")
+unsafe fn dirWriteBlockAt(fs: *mut cfs, dir: *mut cfs_inode, lblk: u64, buf: *u8) -> i32 {
+    let rc = dataWriteBlock(fs, dir, lblk, buf as *void, CFS_ALLOC_META);
+    if (rc != 0) {
+        return rc;
+    }
+    return cfs_inode_write(fs, Ptr.toBorrow(dir as *cfs_inode).ino, dir as *cfs_inode);
+}
+
+// ---- Writing blocks ----
+
+/// The block after the file's previous logical block, when it is mapped: the allocation hint that keeps a sequentially
+/// written file in one run.
+/// Safety: as extentsLoad.
+unsafe fn nextBlockHint(fs: *mut cfs, inp: *cfs_inode, lblk: u64) -> u64 {
+    var prev: u64 = 0;
+    if (lblk > 0 && map(fs, inp, lblk - 1, borrow mut prev as *mut u64) == 1) {
+        return prev.wrappingAdd(1);
+    }
+    return 0;
+}
+
+/// Encrypt a block into `out` and record what a reader needs: the tag that authenticates it, the nonce it was sealed
+/// with, and a keyless CRC of the ciphertext for whoever has no key.
+/// Safety: as extentsLoad; `plain` CFS_BLOCK bytes, `out` CFS_BLOCK writable bytes, `e` an entry.
+unsafe fn sealBlock(fs: *mut cfs, inp: *cfs_inode, lblk: u64, plain: *void, out: *mut u8, e: *mut cfs_csum_aead)
+    -> i32 {
+    if (!Ptr.toBorrow(fs as *cfs).have_key) {
+        return -ENOKEY;
+    }
+    memcpy(out as *mut void, plain, CFS_BLOCK);
+    let ino = Ptr.toBorrow(inp).ino;
+    var key = [0u8; 32];
+    cfs_file_key(fs as *cfs, ino, borrow mut key as *mut [u8; 32] as *mut u8);
+    memset(e as *mut void, 0, AEAD);
+    let en = Ptr.toBorrowMut(e);
+    cfs_block_nonce(borrow mut en.nonce as *mut [u8; 12] as *mut u8);
+    // The position is authenticated with the block, so a valid block cannot be moved to another offset and opened
+    // there.
+    var aad = [ino, lblk];
+    chacha20_seal(borrow key as *[u8; 32] as *u8, borrow en.nonce as *[u8; 12] as *u8,
+        borrow aad as *[u64; 2] as *void, 16, out as *mut void, CFS_BLOCK,
+        borrow mut en.tag as *mut [u8; 16] as *mut u8);
+    key = [0u8; 32];
+    en.crc = crc32c(out as *void, CFS_BLOCK);
+    return 0;
+}
+
+/// A checksum entry a write is about to replace (CF16). A block's entry is stored before the mapping that names the
+/// block, so when the mapping fails the old block is still mapped and must get its own entry back. An entry never
+/// stored (-ENOENT) has nothing to put back: no block was mapped there, since a mapped block without one is a damaged
+/// tree. In a slot of words: have, aead, crc, and the authenticated entry.
+const SAVED_WORDS: usize = 6;
+
+/// Safety: as extentsLoad; `s` a saved entry's SAVED_WORDS words.
+unsafe fn csumSave(fs: *mut cfs, inp: *mut cfs_inode, lblk: u64, aead: bool, s: *mut u64) -> i32 {
+    var crc: u32 = 0;
+    let rc = if (aead) cfs_aead_get(fs, inp, lblk, s.add(2) as *mut cfs_csum_aead)
+        else cfs_csum_get(fs, inp, lblk, borrow mut crc as *mut u32);
+    s.write(if (rc == 0) 1 else 0);
+    s.add(1).write((if (aead) 1u64 else 0) | ((crc as u64) << 32));
+    return if (rc == -2) 0 else rc; // -ENOENT
+}
+
+/// Put a saved entry back. The put lands in a CSUM block this transaction already copied; if it fails anyway, a mapped
+/// block is left under a checksum that is not its own, which no commit may publish, so the transaction is abandoned.
+/// Safety: as csumSave, `s` saved by it.
+unsafe fn csumRestore(fs: *mut cfs, inp: *mut cfs_inode, lblk: u64, s: *mut u64) {
+    if (s.read() == 0) {
+        return;
+    }
+    let w = s.add(1).read();
+    let rc = if ((w & 1) != 0) cfs_aead_put(fs, inp, lblk, s.add(2) as *cfs_csum_aead)
+        else cfs_csum_put(fs, inp, lblk, truncate<u32>(w >> 32));
+    if (rc != 0) {
+        cfs_fail(fs, rc);
+    }
+}
+
+/// Write a data block copy-on-write: a new pool block near the previous one (file data from the data class, directory
+/// blocks from the metadata class so a deletion on a full disk still has a block to write), its checksum recorded, the
+/// mapping replaced.
+/// Safety: as setExtent; `buf` CFS_BLOCK bytes.
+@export("cfs_data_write_block")
+unsafe fn dataWriteBlock(fs: *mut cfs, inp: *mut cfs_inode, lblk: u64, buf: *void, cls: u32) -> i32 {
+    var cipher = 0 as *mut u8;
+    var entry = [0u64; 4];
+    let e = borrow mut entry as *mut [u64; 4] as *mut cfs_csum_aead;
+    var data = buf;
+    if (Ptr.toBorrow(inp as *cfs_inode).csum_algo == CFS_CSUM_POLY1305) {
+        cipher = kmalloc(CFS_BLOCK, 0) as *mut u8;
+        if (cipher.isNull()) {
+            return -ENOMEM;
+        }
+        let rc = sealBlock(fs, inp as *cfs_inode, lblk, buf, cipher, e);
+        if (rc != 0) {
+            kfree(cipher as *mut void);
+            return rc;
+        }
+        data = cipher as *void;
+    }
+    var nblk: u64 = 0;
+    var got: u64 = 0;
+    var old: u64 = 0;
+    var rc = cfs_alloc_run(fs, cls, nextBlockHint(fs, inp as *cfs_inode, lblk), 1, borrow mut nblk as *mut u64,
+        borrow mut got as *mut u64);
+    if (rc != 0) {
+        kfree(cipher as *mut void);
+        return rc;
+    }
+    // The entry is stored before the mapping (the mapping is what makes the block readable), so the one it replaces is
+    // kept: a mapping that fails leaves the old block mapped, under its own checksum (CF16).
+    var prev = [0u64; 6];
+    let pp = borrow mut prev as *mut [u64; 6] as *mut u64;
+    rc = cfs_data_write(fs, nblk, data);
+    if (rc == 0) {
+        rc = csumSave(fs, inp, lblk, !cipher.isNull(), pp);
+    }
+    if (rc == 0) {
+        rc = if (!cipher.isNull()) cfs_aead_put(fs, inp, lblk, e as *cfs_csum_aead)
+            else cfs_csum_put(fs, inp, lblk, crc32c(data, CFS_BLOCK));
+    }
+    kfree(cipher as *mut void);
+    if (rc == 0) {
+        rc = setBlock(fs, inp, lblk, nblk, borrow mut old as *mut u64);
+        if (rc != 0) {
+            csumRestore(fs, inp, lblk, pp);
+        }
+    }
+    if (rc != 0) {
+        cfs_free_block_deferred(fs, nblk);
+        return rc;
+    }
+    if (old != 0) {
+        cfs_free_block_deferred(fs, old);
+    }
+    return 0;
+}
+
+/// Write `n` blocks at `start`.. as their entries say: sealed (with `cipher`) or with their CRC32C, from `data`.
+/// Safety: as setExtent; `data` `n` blocks; `cipher` null or a block; `prev` `n` saved entries.
+unsafe fn writeBlocks(fs: *mut cfs, inp: *mut cfs_inode, lblk0: u64, start: u64, data: *u8, n: u32, cipher: *mut u8)
+    -> i32 {
+    var rc: i32 = 0;
+    var i: u32 = 0;
+    while (i < n && rc == 0) {
+        let blk = data.add(i as usize * CFS_BLOCK);
+        if (!cipher.isNull()) {
+            var entry = [0u64; 4];
+            let e = borrow mut entry as *mut [u64; 4] as *mut cfs_csum_aead;
+            rc = sealBlock(fs, inp as *cfs_inode, lblk0 + i as u64, blk as *void, cipher, e);
+            if (rc == 0) {
+                rc = cfs_data_write(fs, start.wrappingAdd(i as u64), cipher as *void);
+            }
+            if (rc == 0) {
+                rc = cfs_aead_put(fs, inp, lblk0 + i as u64, e as *cfs_csum_aead);
+            }
+        } else {
+            rc = cfs_data_write(fs, start.wrappingAdd(i as u64), blk as *void);
+            if (rc == 0) {
+                rc = cfs_csum_put(fs, inp, lblk0 + i as u64, crc32c(blk as *void, CFS_BLOCK));
+            }
+        }
+        i += 1;
+    }
+    return rc;
+}
+
+/// A record's blocks as one plain run: `n` consecutive blocks allocated together, written and checksummed as
+/// cfs_data_write_block does each one, and mapped by one cfs_set_extent, which merges the run into the one before it
+/// when they are adjacent on the disk. -ENOSPC when no run of `n` is free next to the hint, which leaves everything as
+/// it was and the caller to write the blocks one at a time.
+/// Safety: as setExtent; `data` `n` blocks, `n` at most CFS_RECORD_BLOCKS.
+unsafe fn plainRunWrite(fs: *mut cfs, inp: *mut cfs_inode, lblk0: u64, data: *u8, n: u32) -> i32 {
+    var start: u64 = 0;
+    var got: u64 = 0;
+    var rc = cfs_alloc_run(fs, CFS_ALLOC_DATA, nextBlockHint(fs, inp as *cfs_inode, lblk0), n,
+        borrow mut start as *mut u64, borrow mut got as *mut u64);
+    if (rc != 0) {
+        return rc;
+    }
+    if (got < n as u64) {
+        for (k in 0u64..got) {
+            cfs_free_block_deferred(fs, start.wrappingAdd(k));
+        }
+        return -ENOSPC;
+    }
+    var cipher = 0 as *mut u8;
+    if (Ptr.toBorrow(inp as *cfs_inode).csum_algo == CFS_CSUM_POLY1305) {
+        cipher = kmalloc(CFS_BLOCK, 0) as *mut u8;
+        if (cipher.isNull()) {
+            rc = -ENOMEM;
+        }
+    }
+    // As cfs_record_write's: the entries the range holds now are the map's until cfs_set_extent succeeds, kept and put
+    // back on a failure (CF16).
+    var prev = [0u64; 48]; // CFS_RECORD_BLOCKS saved entries
+    let pp = borrow mut prev as *mut [u64; 48] as *mut u64;
+    var saved: u32 = 0;
+    while (saved < n && rc == 0) {
+        rc = csumSave(fs, inp, lblk0 + saved as u64, !cipher.isNull(), pp.add(saved as usize * SAVED_WORDS));
+        saved += 1;
+    }
+    if (rc == 0) {
+        rc = writeBlocks(fs, inp, lblk0, start, data, n, cipher);
+    }
+    kfree(cipher as *mut void);
+    if (rc == 0) {
+        var slot = [0u64; 2];
+        let ne = borrow mut slot as *mut [u64; 2] as *mut cfs_extent;
+        extSet(ne, start, n, truncate<u32>(lblk0));
+        rc = setExtent(fs, inp, ne as *cfs_extent, 0 as *mut u64);
+    }
+    if (rc != 0) {
+        for (i in 0u32..saved) {
+            csumRestore(fs, inp, lblk0 + i as u64, pp.add(i as usize * SAVED_WORDS));
+        }
+        for (i in 0u32..n) {
+            cfs_free_block_deferred(fs, start.wrappingAdd(i as u64));
+        }
+    }
+    return rc;
+}
+
+/// A record compressed into `psize` blocks of `packed`, written and mapped. Whatever fails is undone; -ENOSPC, from
+/// the allocator or anything after it, sends the caller on to plain blocks.
+/// Safety: as setExtent; `packed` `psize` blocks.
+unsafe fn compressedWrite(fs: *mut cfs, inp: *mut cfs_inode, lblk0: u64, packed: *u8, psize: u32, n: u32) -> i32 {
+    var start: u64 = 0;
+    var got: u64 = 0;
+    var rc = cfs_alloc_run(fs, CFS_ALLOC_DATA, nextBlockHint(fs, inp as *cfs_inode, lblk0), psize,
+        borrow mut start as *mut u64, borrow mut got as *mut u64);
+    if (rc == 0 && got < psize as u64) {
+        // Not contiguous enough for a record; give it back.
+        for (k in 0u64..got) {
+            cfs_free_block_deferred(fs, start.wrappingAdd(k));
+        }
+        rc = -ENOSPC;
+    }
+    if (rc != 0) {
+        return rc;
+    }
+    // The tail of the last block is whatever kzalloc left: zeros, so the record's blocks are deterministic and a
+    // repeated write of the same data gives the same bytes. Compress, then encrypt: the other order would leave nothing
+    // worth compressing. Each physical block of the record is sealed on its own, so a mirror repairs one without the
+    // key and a reader authenticates it with one.
+    var cipher = 0 as *mut u8;
+    if (Ptr.toBorrow(inp as *cfs_inode).csum_algo == CFS_CSUM_POLY1305) {
+        cipher = kmalloc(CFS_BLOCK, 0) as *mut u8;
+        if (cipher.isNull()) {
+            rc = -ENOMEM;
+        }
+    }
+    // The record's entries replace the ones its range holds now, which are still the map's until cfs_set_extent below
+    // succeeds: kept, and put back on any failure (CF16).
+    var prev = [0u64; 48];
+    let pp = borrow mut prev as *mut [u64; 48] as *mut u64;
+    var saved: u32 = 0; // csumSave marks a failed save as nothing to restore
+    while (saved < psize && rc == 0) {
+        rc = csumSave(fs, inp, lblk0 + saved as u64, !cipher.isNull(), pp.add(saved as usize * SAVED_WORDS));
+        saved += 1;
+    }
+    if (rc == 0) {
+        rc = writeBlocks(fs, inp, lblk0, start, packed, psize, cipher);
+    }
+    kfree(cipher as *mut void);
+    if (rc == 0) {
+        var slot = [0u64; 2];
+        let ne = borrow mut slot as *mut [u64; 2] as *mut cfs_extent;
+        extSet(ne, start, extPack(CFS_COMPRESS_LZ4, psize, n), truncate<u32>(lblk0));
+        rc = setExtent(fs, inp, ne as *cfs_extent, 0 as *mut u64);
+    }
+    if (rc != 0) {
+        for (i in 0u32..saved) {
+            csumRestore(fs, inp, lblk0 + i as u64, pp.add(i as usize * SAVED_WORDS));
+        }
+        for (i in 0u32..psize) {
+            cfs_free_block_deferred(fs, start.wrappingAdd(i as u64));
+        }
+    }
+    return rc;
+}
+
+/// Write an aligned record's worth of logical blocks, compressed if `compress` and that makes it strictly smaller in
+/// whole blocks. Anything else -- it does not compress, the algorithm is off, the write policy says plain
+/// (cfs_writepages), there is no room for a contiguous run -- is written as ordinary blocks, which is always allowed
+/// and never wrong: one run when the policy chose it and a run of `n` is free, else a block at a time.
+/// Safety: as setExtent; `data` `n` blocks, `n` at most CFS_RECORD_BLOCKS.
+@export("cfs_record_write")
+unsafe fn recordWrite(fs: *mut cfs, inp: *mut cfs_inode, lblk0: u64, data: *u8, n: u32, compress: bool) -> i32 {
+    if (!compress && n == CFS_RECORD_BLOCKS && lblk0 % CFS_RECORD_BLOCKS as u64 == 0) {
+        let rc = plainRunWrite(fs, inp, lblk0, data, n);
+        if (rc != -ENOSPC) {
+            return rc;
+        }
+    }
+    // And the format again, for a file an older kernel of this family created with the flag on a pool below version 6
+    // (CFS-2).
+    if (compress && n > 1 && Ptr.toBorrow(inp as *cfs_inode).compress_algo == CFS_COMPRESS_LZ4 &&
+        Ptr.toBorrow(fs as *cfs).sb.version >= 6) {
+        // Room for one block less than it takes now: a record that compresses to the same number of blocks has cost
+        // work and saved nothing, and would have to be decompressed on every read for ever after.
+        let cap = (n - 1) as usize * CFS_BLOCK;
+        let packed = kmalloc(cap, KMEM_ZERO) as *mut u8;
+        let work = kmalloc(LZ4_WORK_BYTES, 0); // not the stack: see lz4.h
+        if (packed.isNull() || work.isNull()) {
+            kfree(packed as *mut void);
+            kfree(work);
+            return -ENOMEM;
+        }
+        let clen = lz4_compress(data as *void, n as usize * CFS_BLOCK, packed as *mut void, cap, work);
+        kfree(work);
+        if (clen > 0) {
+            let psize = truncate<u32>((clen + CFS_BLOCK - 1) / CFS_BLOCK);
+            let rc = compressedWrite(fs, inp, lblk0, packed as *u8, psize, n);
+            if (rc == 0) {
+                kfree(packed as *mut void);
+                return 0;
+            }
+            if (rc != -ENOSPC) {
+                kfree(packed as *mut void);
+                return rc; // a real failure, not "it did not fit"
+            }
+        }
+        kfree(packed as *mut void);
+    }
+    // Plain blocks. A record covering this range goes first, whole: the first block alone cannot displace it --
+    // cfs_set_extent refuses a one-block range that would cut a record, and cfs_data_write_block then left that block's
+    // checksum over the record's (until CF16), leaving the record unreadable (found in shell completeness S7: a record
+    // written while its last page was part empty, rewritten once that page was filled and no longer compressed).
+    // Records are aligned and so is this range, so a record here starts at lblk0.
+    var cur = [0u64; 2];
+    let cp = borrow mut cur as *mut [u64; 2] as *mut cfs_extent;
+    let mrc = mapExt(fs, inp as *cfs_inode, lblk0, cp);
+    if (mrc < 0) {
+        return mrc;
+    }
+    var dropped = false;
+    let c = Ptr.toBorrow(cp as *cfs_extent);
+    if (mrc == 1 && extCompressed(c.count)) {
+        let rc = dropRange(fs, inp, c.lblk as u64, extCount(c.count) as u64);
+        if (rc != 0) {
+            return rc;
+        }
+        dropped = true;
+    }
+    for (i in 0u32..n) {
+        let rc = dataWriteBlock(fs, inp, lblk0 + i as u64, data.add(i as usize * CFS_BLOCK) as *void,
+            CFS_ALLOC_DATA);
+        if (rc != 0) {
+            // The record is out of the map and its blocks are on the deferred list: what is not yet rewritten would
+            // read back as a hole. The committed record is the only good copy, so the transaction is abandoned rather
+            // than publish the holes.
+            if (dropped) {
+                cfs_fail(fs, rc);
+            }
+            return rc;
+        }
+    }
+    return 0;
+}

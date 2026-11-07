@@ -1,5 +1,5 @@
 /*
- * test_cfsdata.c - a cosmofs file's blocks (kernel-services/filesystem/cosmofs/cosmofs_data.c) on the host: roadmap
+ * test_cfsdata.c - a cosmofs file's blocks (kernel-services/filesystem/cosmofs/cosmofs_data.cee) on the host: roadmap
  * 2.0 SA7. A digest recorded from the C over inodes whose maps the test builds -- empty, a few runs in the direct
  * slots, chains of extent blocks of this generation or an older one, compressed records among the runs, chains of
  * thousands of runs up to and past the bound, and maps that are damaged (a cycle, a wild pointer, runs out of order)
@@ -25,6 +25,27 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* The values the CeeSafe port writes as its own constants. */
+_Static_assert(EIO == 5 && ENOMEM == 12 && EFBIG == 27 && ENOSPC == 28 && ENOKEY == 126 && KMEM_ZERO == 1 &&
+                   LZ4_WORK_BYTES == 16384,
+               "cosmofs_data's errno.h, kmalloc.h and lz4.h values");
+_Static_assert(CFS_BLOCK == 4096 && CFS_MHDR_SIZE == 32 && CFS_DIRECT == 10 && CFS_EXTENTS_PER_BLOCK == 253 &&
+                   CFS_MAX_EXTENTS == 4096 && CFS_PREP_MAX == 18 && CFS_KIND_EXTENTS == 6 && CFS_RECORD_BLOCKS == 8 &&
+                   CFS_COMPRESS_LZ4 == 1 && CFS_CSUM_POLY1305 == 2 && CFS_ALLOC_DATA == 1 && CFS_ALLOC_META == 0 &&
+                   CFS_EXT_COMPRESSED == 0x80000000u && CFS_EXT_COUNT_MASK == 0xFFFF && CFS_EXT_PSIZE_SHIFT == 16 &&
+                   CFS_EXT_PSIZE_MASK == 0xFF && CFS_EXT_ALGO_SHIFT == 24 && CFS_EXT_ALGO_MASK == 0x7F &&
+                   CHACHA20_KEY_SIZE == 32,
+               "cosmofs_data's cosmofs_format.h and cosmofs_internal.h values");
+_Static_assert(sizeof(struct cfs_extent) == 16 && sizeof(struct cfs_csum_aead) == 32 &&
+                   sizeof(struct cfs_prep) == 296 && offsetof(struct cfs_extent_block, next) == 0 &&
+                   offsetof(struct cfs_extent_block, ext) == 8 && sizeof(struct cfs_block_aad) == 16,
+               "cosmofs_data.cee's sizes and offsets");
+/* cosmofs_data.cee keeps a run in a stack slot of 2 words, an authenticated entry in one of 4 (a saved entry, 6 words:
+ * a flag, the CRC with the kind, the entry) and an inode in one of 32. */
+_Static_assert(sizeof(struct cfs_extent) <= 2 * 8 && sizeof(struct cfs_csum_aead) <= 4 * 8 &&
+                   sizeof(struct cfs_inode) <= 32 * 8,
+               "cosmofs_data.cee's stack slots");
 
 /* The digest of the C (cosmofs_data.c, 2026-11-07), which the CeeSafe port gives. */
 #define DATA_DIGEST 0xd968a547580d35fdull

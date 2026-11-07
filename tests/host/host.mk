@@ -210,6 +210,7 @@ HOST_CFSCSUM_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/cosm
 	kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_cfscsum.c
 # a cosmofs file's blocks with the real DVA and run checks and CRC32C: the cache, allocator, entries, cipher and codec are the test's.
 HOST_CFSDATA_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/cosmofs_data.c \
+	kernel-services/filesystem/cosmofs/cosmofs_data_floor.c \
 	kernel-services/filesystem/cosmofs/cfsparse.c kernel/core/crc32c.c kernel/ceesafe/ceesafe_rt_core.c \
 	tests/host/ceesafe_panic.c tests/host/test_cfsdata.c
 HOST_CFSPARSE_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/cfsparse.c kernel/core/crc32c.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_cfsparse.c

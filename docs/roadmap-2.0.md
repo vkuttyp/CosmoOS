@@ -1460,6 +1460,18 @@ the start and past each index, good, rotten and unreadable copies, tags
 that open and do not (0x807c60c6070274a7, clang and gcc; every line and
 branch that can be reached). `cosmofs_csum_floor.c` keeps the fault
 seam, an inline function where fault injection is off.
+`cosmofs_data.cee`, the tenth, a file's blocks: its runs and chain,
+lookups, runs and records set over what was there, truncation, and the
+copy-on-write writes of blocks and records, moved out of `cosmofs.c`
+with them. `tests/host/test_cfsdata.c` runs it with the real run checks
+and CRC32C over maps the test builds -- chains of this generation or an
+older one, compressed records, thousands of runs up to and past the
+bound, cycles, wild pointers, runs out of order -- with blocks written
+in the clear, CRC'd and sealed, compressed or not (0xd968a547580d35fd,
+clang and gcc; every line and branch that can be reached).
+`cosmofs_data_floor.c` keeps the fault seams, the debug build's note,
+the run bound a self-test lowers, and `cfs_set_extent`, whose run comes
+by value.
 
 Size: about 4.5x.
 
