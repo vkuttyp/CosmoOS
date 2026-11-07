@@ -1,0 +1,1373 @@
+// cosmofstest_b2.cee - The cosmofs self-tests of roadmap 1.2 B2's defects (docs/audit/2026-10-22-b2-fsck-report.md),
+// the check on an unmounted device and the scrub's modes, in CeeSafe: roadmap 2.0 SA7.
+//
+// cosmofs-ro-replay, cosmofs-version-compress, cosmofs-scrub-counts, cosmofs-scrub-open, cosmofs-root-type,
+// cosmofs-check-dev, cosmofs-scrub-modes and cosmofs-nomem, on RAM devices at /mnt/eng. A check's reason keeps the
+// C's form, "check failed: COND at line N", N its line here. cosmofstest_b2_floor.c keeps what a build configuration
+// decides -- the fault injection cosmofs-nomem arms, which only CONFIG_FAULTINJECT has, and these tests' stand-ins
+// without CONFIG_DEBUG -- reaches the scrub's bound, a variable, and asserts the values, offsets and sizes written
+// here as constants.
+
+@header("kernel/blk.h", "kernel/vfs.h", "kernel/kmalloc.h", "kernel/ramblk.h", "kernel/string.h", "kernel/storage.h",
+    "kernel/crc32c.h", "kernel/pagecache.h", "kernel/cosmofs.h", "uapi/cosmo/fsctl.h", "uapi/cosmo/syscall.h",
+    "cosmofs_internal.h")
+extern "C" {
+    struct blkdev;
+    struct spool;
+    struct cfs_mac;
+    struct mount {
+        id: u64;
+    }
+    struct vnode {
+        ino: u64;
+        uid: u32;
+        lock: mutex;
+    }
+    struct file {
+        vn: *mut vnode;
+    }
+    struct cosmofs_check_class {
+        count: u64;
+        repaired: u64;
+    }
+    struct cosmofs_check_report {
+        alloc_not_seen: cosmofs_check_class;
+        seen_not_alloc: cosmofs_check_class;
+        clean: bool;
+        boot_refused: bool;
+    }
+    struct cosmofs_dev_report {
+        flags: u32;
+        mount_error: i32;
+        mount_stage: u32;
+    }
+    struct cosmofs_scrub_stats {
+        blocks_read: u64;
+        repaired: u64;
+        unrecoverable: u64;
+        bad_copies: u64;
+        elapsed_ns: u64;
+        rate: u64;
+    }
+
+    fn kzalloc(size: usize) -> *mut void;
+    fn ramblk_create(nblocks: u64) -> *mut blkdev;
+    fn ramblk_destroy(bd: *mut blkdev);
+    fn vfs_open(start: *mut vnode, path: *CChar, flags: u32, mode: u32, out: *mut *mut file) -> i32;
+    fn file_read(f: *mut file, buf: *mut void, len: usize) -> i64;
+    fn file_write(f: *mut file, buf: *void, len: usize) -> i64;
+    fn file_pread(f: *mut file, buf: *mut void, len: usize, off: u64) -> i64;
+    fn file_pwrite(f: *mut file, buf: *void, len: usize, off: u64) -> i64;
+    fn file_sync(f: *mut file) -> i32;
+    fn vfs_lookup(start: *mut vnode, path: *CChar, out: *mut *mut vnode) -> i32;
+    fn vnode_put(vn: *mut vnode);
+    fn vfs_mkdir(start: *mut vnode, path: *CChar, mode: u32) -> i32;
+    fn vfs_rmdir(start: *mut vnode, path: *CChar) -> i32;
+    fn vfs_unlink(start: *mut vnode, path: *CChar) -> i32;
+    fn vfs_chown(vn: *mut vnode, uid: u32, gid: u32) -> i32;
+    fn vfs_truncate(start: *mut vnode, path: *CChar, size: u64) -> i32;
+    fn vfs_mount(path: *CChar, fsname: *CChar, bd: *mut blkdev, flags: u32) -> i32;
+    fn vfs_umount2(path: *CChar, flags: u32) -> i32;
+    fn vfs_sync() -> i32;
+    fn pagecache_sync(vn: *mut vnode) -> i32;
+    fn pool_open(bd: *mut blkdev, out: *mut *mut spool) -> i32;
+    fn pool_close(p: *mut spool);
+    fn pool_read(p: *mut spool, dva: u64, buf: *mut void) -> i32;
+    fn pool_write(p: *mut spool, dva: u64, buf: *void) -> i32;
+    fn pool_flush(p: *mut spool) -> i32;
+    fn crc32c(data: *void, len: usize) -> u32;
+    fn cfs_mhdr_seal_raw(mac: *cfs_mac, block: *mut void, kind: u32, dva: u64, generation: u64);
+    fn cosmofs_format(bd: *mut blkdev) -> i32;
+    fn cosmofs_format_mirror(bd: *mut *mut blkdev, n: u32, copies: u32) -> i32;
+    fn cosmofs_test_format_version(bd: *mut blkdev, version: u32) -> i32;
+    /// cosmofstest_b2_floor.c: cosmofs_stats into `out`, a struct cosmofs_stats (a name a struct has too).
+    fn cfst_b2_floor_stats(mnt: *mut mount, out: *mut void) -> i32;
+    fn cosmofs_check(mnt: *mut mount, out: *mut cosmofs_check_report, flags: u32) -> i32;
+    fn cosmofs_check_dev(bd: *mut blkdev, flags: u32, rep: *mut cosmofs_check_report, dev: *mut cosmofs_dev_report)
+        -> i32;
+    fn cosmofs_scrub(mnt: *mut mount, out: *mut cosmofs_scrub_stats, flags: u32) -> i32;
+    fn cosmofs_test_corrupt(mnt: *mut mount, kind: u32, ino: u64, what: *mut u64) -> i32;
+    fn cosmofs_test_block_of(mnt: *mut mount, ino: u64, lblk: u64, dva: *mut u64) -> i32;
+    fn cosmofs_test_set_writeback(mnt: *mut mount, on: bool);
+    fn memcmp(a: *void, b: *void, n: usize) -> i32;
+    fn memset(p: *mut void, c: i32, n: usize) -> *mut void;
+    // cosmofstest_lib.cee's (cosmofstest.h).
+    fn cfst_mount_of(path: *CChar) -> *mut mount;
+    fn cfst_write_file(path: *CChar, data: *void, len: usize) -> bool;
+    fn cfst_read_matches(path: *CChar, data: *void, len: usize) -> bool;
+    fn cfst_fill_incompressible(buf: *mut u8, len: usize, seed: u32);
+    fn cfst_engine_mount(bdp: *mut *mut blkdev, nblocks: u64, reason: *mut *CChar) -> bool;
+    fn cfst_engine_unmount(bd: *mut blkdev, reason: *mut *CChar) -> bool;
+    fn cfst_rot_copy(bd: *mut blkdev, blk: u64, fill: u8) -> bool;
+    fn cfst_snapctl(op: u32, name: *CChar, out: *mut void, max: u32, count: *mut u32) -> i32;
+    /// cosmofstest_b2_floor.c: the scrub's bound, g_cosmofs_scrub_rate (a variable), read and set.
+    fn cfst_b2_floor_scrub_rate() -> u32;
+    fn cfst_b2_floor_set_scrub_rate(rate: u32);
+    /// cosmofstest_b2_floor.c: arm the allocation failure `which` (0: a file's extent chain block, 1: an inode's map
+    /// path) once for this thread, with CONFIG_FAULTINJECT.
+    fn cfst_b2_floor_fail_set(which: u32);
+    /// cosmofstest_b2_floor.c: how often `which` fired, and disarmed.
+    fn cfst_b2_floor_fail_end(which: u32) -> u64;
+}
+
+// ---- Values (asserted in cosmofstest_b2_floor.c) ----
+
+const ENOENT: i32 = 2;
+const EIO: i32 = 5;
+const ENOMEM: i32 = 12;
+const EBUSY: i32 = 16;
+const ENOTDIR: i32 = 20;
+const EEXIST: i32 = 17;
+const EROFS: i32 = 30;
+const O_RDONLY: u32 = 0;
+const O_RDWR: u32 = 2;
+const O_CREAT: u32 = 0x40;
+const VFS_UMOUNT_FORCE: u32 = 1;
+const MOUNT_RDONLY: u32 = 1;
+const CHECK_REPAIR: u32 = 1;
+const CHECK_BOOT: u32 = 4;
+const SCRUB_REPAIR: u32 = 1;
+const SNAP_CREATE: u32 = 1;
+const SNAP_DELETE: u32 = 3;
+const CORRUPT_LEAK: u32 = 0;
+const CORRUPT_ROOT_TYPE: u32 = 19;
+const ROOT_INO: u64 = 1;
+const DEV_F_CHECKED: u32 = 1;
+const DEV_F_SUPER_DISAGREE: u32 = 4;
+const DEV_F_MOUNT_FAILED: u32 = 8;
+const DEV_F_COMMITTED: u32 = 512;
+const DEV_F_BOOT_REFUSED: u32 = 1024;
+const STAGE_ROOT: u32 = 8;
+const FSCTL_VERSION: u16 = 3;
+const FSCTL_SCRUB: u16 = 3;
+/// struct cosmo_fsctl: its size and mount_id's offset; struct cosmo_fsctl_result's size; struct
+/// cosmo_fsctl_scrub's size and the offsets of blocks_read and unrecoverable.
+const FSCTL_CMD: usize = 88;
+const FSCTL_MOUNT_ID: usize = 8;
+const FSCTL_RESULT: usize = 16;
+const FSCTL_SCRUB_SIZE: usize = 32;
+const FSCTL_SCRUB_READ: usize = 0;
+const FSCTL_SCRUB_UNRECOVERABLE: usize = 24;
+/// struct cosmofs_stats: the offsets of dirty_buffers, version, free_root and orphan_root.
+const STATS_DIRTY_BUFFERS: usize = 32;
+const STATS_VERSION: usize = 96;
+const STATS_FREE_ROOT: usize = 104;
+const STATS_ORPHAN_ROOT: usize = 112;
+/// cosmofs_format.h: a block, its header, the bits of a bitmap chunk, a DVA's block bits, a bitmap's kind.
+const CFS_BLOCK: usize = 4096;
+const MHDR_SIZE: usize = 32;
+const MHDR_GENERATION: usize = 8;
+const BITS_PER_BITMAP: u64 = 32512;
+const DVA_BLK_MASK: u64 = (1u64 << 56) - 1;
+const KIND_BITMAP: u32 = 5;
+/// struct cfs_super: the offsets of generation, members, uuid and crc.
+const SUPER_GENERATION: usize = 24;
+const SUPER_MEMBERS: usize = 88;
+const SUPER_UUID: usize = 96;
+const SUPER_CRC: usize = 160;
+/// The members block: member 0's alloc_root, after the header (cfs_member_block.m at 8, cfs_member.alloc_root at 32).
+const MEMBER0_ALLOC_ROOT: usize = 32 + 8 + 32;
+
+fn eng() -> *CChar => "/mnt/eng\0".ptr as *CChar;
+
+fn path(s: StringView) -> *CChar => s.ptr as *CChar;
+
+/// Safety: `reason` writable.
+unsafe fn failed(reason: *mut *CChar, why: StringView) -> bool {
+    reason.write(why.ptr as *CChar);
+    return false;
+}
+
+/// Safety: `f` is an open file.
+unsafe fn filePut(f: *mut file) { kobject_put(f as *mut kobject); }
+
+/// Safety: none beyond the VFS's own.
+unsafe fn mnt() -> *mut mount => cfst_mount_of(eng());
+
+fn say(line: borrow TextWriter) { KernelLog.send(LogLevel.Info, line); }
+
+/// `v` as C's "%#x": 0, or 0x and its hex digits.
+fn hexAlt(line: borrow mut TextWriter, v: u32) {
+    if (v != 0) {
+        line.text("0x");
+    }
+    line.hex(v as u64, 0);
+}
+
+static mut g_rep: [u64; 200] = [0; 200];
+
+/// A check report off the stack (the C's were static or on a larger stack).
+/// Safety: one self-test at a time uses it.
+unsafe fn rep() -> *mut cosmofs_check_report => borrow mut g_rep as *mut [u64; 200] as *mut cosmofs_check_report;
+
+/// Safety: `r` a report.
+unsafe fn clean(r: *mut cosmofs_check_report) -> bool => Ptr.toBorrow(r as *cosmofs_check_report).clean;
+
+/// The u64 at `off` of a cosmofs_stats, or `bad` when the stats cannot be had.
+/// Safety: none beyond the filesystem's own.
+unsafe fn statU64(off: usize, bad: u64) -> u64 {
+    var slot = [0u64; 32];
+    if (cfst_b2_floor_stats(mnt(), borrow mut slot as *mut [u64; 32] as *mut void) != 0) {
+        return bad;
+    }
+    return slot[off / 8];
+}
+
+/// The u32 at `off` of a cosmofs_stats, or `bad`.
+/// Safety: none beyond the filesystem's own.
+unsafe fn statU32(off: usize, bad: u32) -> u32 {
+    var slot = [0u64; 32];
+    if (cfst_b2_floor_stats(mnt(), borrow mut slot as *mut [u64; 32] as *mut void) != 0) {
+        return bad;
+    }
+    return ByteOrder.readU32LE(SliceMut.fromRaw(borrow mut slot as *mut [u64; 32] as *mut u8, 256), off);
+}
+
+/// The inode number of `p`, or 0.
+/// Safety: `p` a terminated string.
+unsafe fn inoOf(p: *CChar) -> u64 {
+    var vn = 0 as *mut vnode;
+    if (vfs_lookup(0 as *mut vnode, p, borrow mut vn as *mut *mut vnode) != 0) {
+        return 0;
+    }
+    let ino = Ptr.toBorrow(vn as *vnode).ino;
+    vnode_put(vn);
+    return ino;
+}
+
+// ---- roadmap 1.2 B2's defects ----
+
+/// One CRC per block of a single-device pool, for "what did this change"; kmalloc'd, or null.
+/// Safety: `bd` is a device of at least `nblocks` blocks.
+unsafe fn deviceCrcs(bd: *mut blkdev, nblocks: u64) -> *mut u32 {
+    var p = 0 as *mut spool;
+    if (pool_open(bd, borrow mut p as *mut *mut spool) != 0) {
+        return 0 as *mut u32;
+    }
+    let crcs = kmalloc(nblocks as usize * 4, 0) as *mut u32;
+    let b = kmalloc(CFS_BLOCK, 0) as *mut u8;
+    var ok = !crcs.isNull() && !b.isNull();
+    var i: u64 = 0;
+    while (ok && i < nblocks) {
+        ok = pool_read(p, i, b as *mut void) == 0; // CFS_DVA(0, i) is i
+        if (ok) {
+            crcs.add(i as usize).write(crc32c(b as *void, CFS_BLOCK));
+        }
+        i += 1;
+    }
+    kfree(b as *mut void);
+    pool_close(p);
+    if (!ok) {
+        kfree(crcs as *mut void);
+        return 0 as *mut u32;
+    }
+    return crcs;
+}
+
+/// Safety: `a` and `b` `nblocks` CRCs.
+unsafe fn crcsDiffer(a: *u32, b: *u32, nblocks: u64) -> u32 {
+    var n: u32 = 0;
+    for (i in 0u64..nblocks) {
+        if (a.add(i as usize).read() != b.add(i as usize).read()) {
+            n += 1;
+        }
+    }
+    return n;
+}
+
+/// CFS-1: a read-only mount writes nothing. The pool is left with both records pending -- what the last commit freed
+/// and an inode unlinked while held -- and is mounted read-only, checked and unmounted: every block is what it was.
+/// The replay ran all the same, in memory: the check is clean (it would call the orphan's blocks leaked otherwise).
+/// Before the fix the unmount's commit wrote the replay to the device.
+/// Safety: `reason` writable.
+@cfg("CONFIG_DEBUG")
+@export("selftest_cosmofs_ro_replay")
+unsafe fn selftestRoReplay(reason: *mut *CChar) -> bool {
+    let nblocks: u64 = 512;
+    var bd = 0 as *mut blkdev;
+    if (!cfst_engine_mount(borrow mut bd as *mut *mut blkdev, nblocks, reason)) {
+        return false;
+    }
+    let biglen: usize = 16 * 4096;
+    let big = kmalloc(biglen, 0) as *mut u8;
+    if (big.isNull()) {
+        return failed(reason, "check failed: big != NULL at line 294\0");
+    }
+    cfst_fill_incompressible(big, biglen, 0xc0ffee);
+    let wrote = cfst_write_file(path("/mnt/eng/held\0"), big as *void, biglen);
+    kfree(big as *mut void);
+    if (!wrote) {
+        return failed(reason, "check failed: wrote at line 300\0");
+    }
+    if (vfs_sync() != 0) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 303\0");
+    }
+    var f = 0 as *mut file;
+    if (vfs_open(0 as *mut vnode, path("/mnt/eng/held\0"), O_RDONLY, 0, borrow mut f as *mut *mut file) != 0) {
+        return failed(reason, "check failed: vfs_open(NULL, ENG \"/held\", COSMO_O_RDONLY, 0, &f) == 0 at line 307\0");
+    }
+    if (vfs_unlink(0 as *mut vnode, path("/mnt/eng/held\0")) != 0) {
+        return failed(reason, "check failed: vfs_unlink(NULL, ENG \"/held\") == 0 at line 310\0");
+    }
+    if (vfs_sync() != 0) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 313\0");
+    }
+    var slot = [0u64; 32];
+    if (cfst_b2_floor_stats(mnt(), borrow mut slot as *mut [u64; 32] as *mut void) != 0) {
+        return failed(reason, "check failed: cosmofs_stats(cfst_mount_of(ENG), &st) == 0 at line 317\0");
+    }
+    if (!(slot[STATS_ORPHAN_ROOT / 8] != 0 && slot[STATS_FREE_ROOT / 8] != 0)) { // both replays have work
+        return failed(reason, "check failed: st.orphan_root != 0 && st.free_root != 0 at line 320\0");
+    }
+    filePut(f);
+    if (vfs_umount2(eng(), VFS_UMOUNT_FORCE) != 0) { // the eviction never reaches the disk
+        return failed(reason, "check failed: vfs_umount2(ENG, VFS_UMOUNT_FORCE) == 0 at line 324\0");
+    }
+
+    let before = deviceCrcs(bd, nblocks);
+    if (before.isNull()) {
+        return failed(reason, "check failed: before != NULL at line 329\0");
+    }
+    let mrc = vfs_mount(eng(), "cosmofs\0".ptr as *CChar, bd, MOUNT_RDONLY);
+    if (mrc != 0) {
+        kfree(before as *mut void);
+        return failed(reason, "check failed: mrc == 0 at line 334\0");
+    }
+    let isClean = cosmofs_check(mnt(), rep(), 0) == 0 && clean(rep());
+    let repair = cosmofs_check(mnt(), rep(), CHECK_REPAIR);
+    let urc = vfs_umount2(eng(), 0);
+    let after = deviceCrcs(bd, nblocks);
+    let changed = if (!after.isNull()) crcsDiffer(before as *u32, after as *u32, nblocks) else 0xFFFFFFFF;
+    kfree(before as *mut void);
+    kfree(after as *mut void);
+    var buffer = [0u8; 160];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: cosmofs-ro-replay: read-only mount: check ");
+    line.text(if (isClean) "clean" else "NOT clean");
+    line.text(", repair ");
+    line.signed(repair as i64);
+    line.text(", unmount ");
+    line.signed(urc as i64);
+    line.text(", ");
+    line.decimal(changed as u64);
+    line.text(" block(s) changed");
+    say(line);
+    if (changed != 0) { // the claim, first: what the old code got wrong
+        return failed(reason, "check failed: changed == 0 at line 356\0");
+    }
+    if (urc != 0) {
+        return failed(reason, "check failed: urc == 0 at line 359\0");
+    }
+    if (!isClean) { // the replay ran in memory
+        return failed(reason, "check failed: clean at line 362\0");
+    }
+    if (repair != -EROFS) { // a repair would be dropped: refused
+        return failed(reason, "check failed: repair == -EROFS at line 365\0");
+    }
+
+    // The writable mount after it writes the replay, as it always did.
+    if (vfs_mount(eng(), "cosmofs\0".ptr as *CChar, bd, 0) != 0) {
+        return failed(reason, "check failed: vfs_mount(ENG, \"cosmofs\", bd, 0) == 0 at line 370\0");
+    }
+    cosmofs_test_set_writeback(mnt(), false);
+    if (vfs_sync() != 0) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 374\0");
+    }
+    if (!(cosmofs_check(mnt(), rep(), 0) == 0 && clean(rep()))) {
+        return failed(reason, "check failed: cosmofs_check(cfst_mount_of(ENG), &r, 0) == 0 && r.clean at line 377\0");
+    }
+    if (statU64(STATS_ORPHAN_ROOT, 1) != 0) {
+        return failed(reason,
+            "check failed: cosmofs_stats(cfst_mount_of(ENG), &st) == 0 && st.orphan_root == 0 at line 381\0");
+    }
+    return cfst_engine_unmount(bd, reason);
+}
+
+static mut g_zeros: [u8; 32768] = [0; 32768];
+
+/// CFS-2: writes honour the mounted format. A version-5 pool has no compressed records (version 6 added them), so a
+/// new file written here must not get one; at the current version the same file is a record, which is what shows this
+/// test can see one. cosmofs_test_block_of maps a plain block and answers -ENOENT for one inside a record (cfs_map
+/// finds no plain run there), and the file reading back says it is not a hole.
+/// Safety: `map0` and `reason` writable.
+unsafe fn compressAtVersion(version: u32, map0: *mut i32, reason: *mut *CChar) -> bool {
+    let _ = vfs_umount2(eng(), VFS_UMOUNT_FORCE);
+    let bd = ramblk_create(512);
+    if (bd.isNull()) {
+        return failed(reason, "check failed: bd != NULL at line 397\0");
+    }
+    var ok = (if (version == 0) cosmofs_format(bd) else cosmofs_test_format_version(bd, version)) == 0;
+    let mk = vfs_mkdir(0 as *mut vnode, eng(), 493);
+    ok = ok && (mk == 0 || mk == -EEXIST) && vfs_mount(eng(), "cosmofs\0".ptr as *CChar, bd, 0) == 0;
+    if (!ok) {
+        let _ = vfs_rmdir(0 as *mut vnode, eng());
+        ramblk_destroy(bd);
+        return failed(reason, "check failed: format and mount for compress_at_version\0");
+    }
+    cosmofs_test_set_writeback(mnt(), false);
+    // One whole record, as compressible as data gets.
+    let zeros = borrow mut g_zeros as *mut [u8; 32768] as *mut u8;
+    memset(zeros as *mut void, 0x7a, 32768);
+    var vn = 0 as *mut vnode;
+    let w = cfst_write_file(path("/mnt/eng/z\0"), zeros as *void, 32768) && vfs_sync() == 0 &&
+        vfs_lookup(0 as *mut vnode, path("/mnt/eng/z\0"), borrow mut vn as *mut *mut vnode) == 0;
+    var dva: u64 = 0;
+    let m = if (w) cosmofs_test_block_of(mnt(), Ptr.toBorrow(vn as *vnode).ino, 0, borrow mut dva as *mut u64)
+        else -100;
+    map0.write(m);
+    if (!vn.isNull()) {
+        vnode_put(vn);
+    }
+    let v = statU32(STATS_VERSION, 0);
+    let back = cfst_read_matches(path("/mnt/eng/z\0"), zeros as *void, 32768);
+    var buffer = [0u8; 128];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: cosmofs-version-compress: format ");
+    line.decimal(v as u64);
+    line.text(": block 0 maps ");
+    line.signed(m as i64);
+    line.text(", reads back ");
+    line.text(if (back) "yes" else "NO");
+    say(line);
+    if (!(w && back)) {
+        return failed(reason, "check failed: w && back at line 433\0");
+    }
+    if (!(version == 0 || v == version)) { // the format is not raised by writing
+        return failed(reason, "check failed: version == 0 || v == version at line 436\0");
+    }
+    return cfst_engine_unmount(bd, reason);
+}
+
+/// Safety: `reason` writable.
+@cfg("CONFIG_DEBUG")
+@export("selftest_cosmofs_version_compress")
+unsafe fn selftestVersionCompress(reason: *mut *CChar) -> bool {
+    var cur: i32 = 0;
+    var v5: i32 = 0;
+    if (!compressAtVersion(0, borrow mut cur as *mut i32, reason)) {
+        return false;
+    }
+    if (cur != -ENOENT) { // the current format compresses: a record
+        return failed(reason, "check failed: cur == -ENOENT at line 451\0");
+    }
+    if (!compressAtVersion(5, borrow mut v5 as *mut i32, reason)) {
+        return false;
+    }
+    if (v5 != 0) { // the claim: a plain block on a version-5 pool
+        return failed(reason, "check failed: v5 == 0 at line 457\0");
+    }
+    return true;
+}
+
+static mut g_page: [u8; 4096] = [0; 4096];
+
+/// CFS-11: a scrub that met a block no copy can satisfy still answers, and says how many. One plain data block rotted
+/// on a single-device pool is unrecoverable; the scrub's counts reach the operator through /dev/fsctl. Before the fix
+/// the write failed with -EIO and the counts were only in the kernel log.
+/// Safety: `reason` writable.
+@cfg("CONFIG_DEBUG")
+@export("selftest_cosmofs_scrub_counts")
+unsafe fn selftestScrubCounts(reason: *mut *CChar) -> bool {
+    var bd = 0 as *mut blkdev;
+    if (!cfst_engine_mount(borrow mut bd as *mut *mut blkdev, 512, reason)) {
+        return false;
+    }
+    let page = borrow mut g_page as *mut [u8; 4096] as *mut u8;
+    cfst_fill_incompressible(page, 4096, 0x5c4b);
+    if (!cfst_write_file(path("/mnt/eng/rot\0"), page as *void, 4096)) {
+        return failed(reason, "check failed: cfst_write_file(ENG \"/rot\", page, sizeof(page)) at line 478\0");
+    }
+    if (vfs_sync() != 0) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 481\0");
+    }
+    var vn = 0 as *mut vnode;
+    if (vfs_lookup(0 as *mut vnode, path("/mnt/eng/rot\0"), borrow mut vn as *mut *mut vnode) != 0) {
+        return failed(reason, "check failed: vfs_lookup(NULL, ENG \"/rot\", &vn) == 0 at line 485\0");
+    }
+    let ino = Ptr.toBorrow(vn as *vnode).ino;
+    var dva: u64 = 0;
+    vnode_put(vn);
+    if (cosmofs_test_block_of(mnt(), ino, 0, borrow mut dva as *mut u64) != 0) {
+        return failed(reason,
+            "check failed: cosmofs_test_block_of(cfst_mount_of(ENG), ino, 0, &dva) == 0 at line 492\0");
+    }
+    if (!cfst_rot_copy(bd, dva & DVA_BLK_MASK, 0x3c)) {
+        return failed(reason, "check failed: cfst_rot_copy(bd, CFS_DVA_BLK(dva), 0x3c) at line 495\0");
+    }
+
+    var scSlot = [0u64; 8];
+    let sc = borrow mut scSlot as *mut [u64; 8] as *mut cosmofs_scrub_stats;
+    let direct = cosmofs_scrub(mnt(), sc, SCRUB_REPAIR);
+    var f = 0 as *mut file;
+    if (vfs_open(0 as *mut vnode, path("/dev/fsctl\0"), O_RDWR, 0, borrow mut f as *mut *mut file) != 0) {
+        return failed(reason, "check failed: vfs_open(NULL, \"/dev/fsctl\", COSMO_O_RDWR, 0, &f) == 0 at line 503\0");
+    }
+    var cmdSlot = [0u64; 11];
+    let cmd = SliceMut.fromRaw(borrow mut cmdSlot as *mut [u64; 11] as *mut u8, FSCTL_CMD);
+    ByteOrder.writeU16LE(cmd, 0, FSCTL_VERSION);
+    ByteOrder.writeU16LE(cmd, 2, FSCTL_SCRUB);
+    ByteOrder.writeU64LE(cmd, FSCTL_MOUNT_ID, Ptr.toBorrow(mnt() as *mount).id);
+    var bufSlot = [0u64; 6];
+    let bufLen = FSCTL_RESULT + FSCTL_SCRUB_SIZE;
+    let buf = borrow mut bufSlot as *mut [u64; 6] as *mut u8;
+    let w = file_write(f, cmd.ptr as *void, FSCTL_CMD);
+    let n = file_read(f, buf as *mut void, bufLen);
+    filePut(f);
+    let s = SliceMut.fromRaw(buf.add(FSCTL_RESULT), FSCTL_SCRUB_SIZE);
+    let st = Ptr.toBorrow(sc as *cosmofs_scrub_stats);
+    var buffer = [0u8; 160];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: cosmofs-scrub-counts: scrub ");
+    line.signed(direct as i64);
+    line.text(" (");
+    line.decimal(st.unrecoverable);
+    line.text(" unrecoverable); fsctl write ");
+    line.signed(w);
+    line.text(", read ");
+    line.signed(n);
+    say(line);
+    if (!(direct == 0 && st.unrecoverable == 1)) { // a finding, not a failure
+        return failed(reason, "check failed: direct == 0 && sc.unrecoverable == 1 at line 530\0");
+    }
+    if (w != truncate<i64>(FSCTL_CMD)) {
+        return failed(reason, "check failed: w == (int64_t)sizeof(cmd) at line 533\0");
+    }
+    if (n != truncate<i64>(bufLen)) {
+        return failed(reason, "check failed: n == (int64_t)sizeof(buf) at line 536\0");
+    }
+    if (!(ByteOrder.readU64LE(s, FSCTL_SCRUB_UNRECOVERABLE) == 1 && ByteOrder.readU64LE(s, FSCTL_SCRUB_READ) > 0)) {
+        return failed(reason, "check failed: s->unrecoverable == 1 && s->blocks_read > 0 at line 539\0");
+    }
+    if (vfs_unlink(0 as *mut vnode, path("/mnt/eng/rot\0")) != 0) {
+        return failed(reason, "check failed: vfs_unlink(NULL, ENG \"/rot\") == 0 at line 542\0");
+    }
+    return cfst_engine_unmount(bd, reason);
+}
+
+/// A scrub with a transaction open. A file rewritten after a commit has its checksum tree copied into blocks this
+/// young pool has never written -- zeros on the device -- and the copies exist only in memory until the commit. The
+/// scrub checks what is on the devices, so it must leave those to the commit: before, it read the zeros and called the
+/// file's checksum index and leaf unrecoverable (found by cosmofs-compress once B2's inode_prepare moved an
+/// allocation, which had been passing by the luck of a stale block of the same kind).
+/// Safety: `reason` writable.
+@cfg("CONFIG_DEBUG")
+@export("selftest_cosmofs_scrub_open")
+unsafe fn selftestScrubOpen(reason: *mut *CChar) -> bool {
+    var bd = 0 as *mut blkdev;
+    if (!cfst_engine_mount(borrow mut bd as *mut *mut blkdev, 512, reason)) {
+        return false;
+    }
+    let page = borrow mut g_page as *mut [u8; 4096] as *mut u8;
+    cfst_fill_incompressible(page, 4096, 0x0be4);
+    if (!cfst_write_file(path("/mnt/eng/f\0"), page as *void, 4096)) {
+        return failed(reason, "check failed: cfst_write_file(ENG \"/f\", page, sizeof(page)) at line 563\0");
+    }
+    if (vfs_sync() != 0) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 566\0");
+    }
+    page.write(page.read() ^ 0xff);
+    var f = 0 as *mut file;
+    if (vfs_open(0 as *mut vnode, path("/mnt/eng/f\0"), O_RDWR, 0, borrow mut f as *mut *mut file) != 0) {
+        return failed(reason, "check failed: vfs_open(NULL, ENG \"/f\", COSMO_O_RDWR, 0, &f) == 0 at line 571\0");
+    }
+    let w = file_pwrite(f, page as *void, 4096, 0) == 4096;
+    // Written back, not committed: the copies are in the transaction.
+    let vn = Ptr.toBorrow(f as *file).vn;
+    let lock = borrow mut Ptr.toBorrowMut(vn).lock as *mut mutex;
+    mutex_lock(lock);
+    let wb = pagecache_sync(vn);
+    mutex_unlock(lock);
+    filePut(f);
+    if (!(w && wb == 0)) {
+        return failed(reason, "check failed: w && wb == 0 at line 582\0");
+    }
+    let dirty = statU32(STATS_DIRTY_BUFFERS, 0);
+    if (dirty == 0) {
+        return failed(reason,
+            "check failed: cosmofs_stats(cfst_mount_of(ENG), &st) == 0 && st.dirty_buffers > 0 at line 587\0");
+    }
+    var scSlot = [0u64; 8];
+    let sc = borrow mut scSlot as *mut [u64; 8] as *mut cosmofs_scrub_stats;
+    if (cosmofs_scrub(mnt(), sc, SCRUB_REPAIR) != 0) {
+        return failed(reason,
+            "check failed: cosmofs_scrub(cfst_mount_of(ENG), &sc, COSMOFS_SCRUB_REPAIR) == 0 at line 593\0");
+    }
+    var buffer = [0u8; 160];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: cosmofs-scrub-open: ");
+    line.decimal(dirty as u64);
+    line.text(" dirty buffer(s); scrub read ");
+    line.decimal(Ptr.toBorrow(sc as *cosmofs_scrub_stats).blocks_read);
+    line.text(", ");
+    line.decimal(Ptr.toBorrow(sc as *cosmofs_scrub_stats).unrecoverable);
+    line.text(" unrecoverable");
+    say(line);
+    if (Ptr.toBorrow(sc as *cosmofs_scrub_stats).unrecoverable != 0) {
+        return failed(reason, "check failed: sc.unrecoverable == 0 at line 606\0");
+    }
+    if (vfs_sync() != 0) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 609\0");
+    }
+    if (!(cosmofs_scrub(mnt(), sc, SCRUB_REPAIR) == 0 && Ptr.toBorrow(sc as *cosmofs_scrub_stats).unrecoverable == 0)) {
+        return failed(reason,
+            "check failed: cosmofs_scrub(cfst_mount_of(ENG), &sc, COSMOFS_SCRUB_REPAIR) == 0 && sc.... at line 613\0");
+    }
+    if (!cfst_read_matches(path("/mnt/eng/f\0"), page as *void, 4096)) {
+        return failed(reason, "check failed: cfst_read_matches(ENG \"/f\", page, sizeof(page)) at line 616\0");
+    }
+    return cfst_engine_unmount(bd, reason);
+}
+
+/// The root made a regular file in both superblock slots' trees: a corruption and a commit, twice. Nothing may write
+/// the root between: its vnode's inode_sync would put the type back.
+/// Safety: none beyond the filesystem's own.
+unsafe fn rootNotDir() -> i32 {
+    for (i in 0..2) {
+        if (cosmofs_test_corrupt(mnt(), CORRUPT_ROOT_TYPE, ROOT_INO, 0 as *mut u64) != 0) {
+            return 1;
+        }
+        if (vfs_sync() != 0) {
+            return 2;
+        }
+    }
+    return 0;
+}
+
+/// A root that is not a directory is refused by the mount with -ENOTDIR. Before, the mount succeeded and the VFS
+/// asserted the root was a directory: a disk with one changed mode panicked the kernel. Both superblock slots name the
+/// corrupted root (a second commit after the corruption's), so the older-slot fallback has nothing to fall back to.
+/// Safety: `reason` writable.
+@cfg("CONFIG_DEBUG")
+@export("selftest_cosmofs_root_type")
+unsafe fn selftestRootType(reason: *mut *CChar) -> bool {
+    var bd = 0 as *mut blkdev;
+    if (!cfst_engine_mount(borrow mut bd as *mut *mut blkdev, 512, reason)) {
+        return false;
+    }
+    if (!cfst_write_file(path("/mnt/eng/a\0"), "a".ptr as *void, 1)) {
+        return failed(reason, "check failed: cfst_write_file(ENG \"/a\", \"a\", 1) at line 648\0");
+    }
+    if (vfs_sync() != 0) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 651\0");
+    }
+    // Twice, a commit each, so both slots name it.
+    let bad = rootNotDir();
+    if (bad == 1) {
+        return failed(reason,
+            "check failed: cosmofs_test_corrupt(cfst_mount_of(ENG), COSMOFS_CORRUPT_ROOT_TYPE, CFS_... at line 657\0");
+    }
+    if (bad == 2) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 660\0");
+    }
+    if (vfs_umount2(eng(), VFS_UMOUNT_FORCE) != 0) {
+        return failed(reason, "check failed: vfs_umount2(ENG, VFS_UMOUNT_FORCE) == 0 at line 663\0");
+    }
+    let mrc = vfs_mount(eng(), "cosmofs\0".ptr as *CChar, bd, 0);
+    var buffer = [0u8; 128];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: cosmofs-root-type: a root whose inode says regular file: mount ");
+    line.signed(mrc as i64);
+    say(line);
+    if (mrc == 0) {
+        let _ = vfs_umount2(eng(), VFS_UMOUNT_FORCE);
+    }
+    if (mrc != -ENOTDIR) {
+        return failed(reason, "check failed: mrc == -ENOTDIR at line 675\0");
+    }
+    if (vfs_rmdir(0 as *mut vnode, eng()) != 0) {
+        return failed(reason, "check failed: vfs_rmdir(NULL, ENG) == 0 at line 678\0");
+    }
+    ramblk_destroy(bd);
+    return true;
+}
+
+// ---- roadmap 1.2 B2: the check on an unmounted device, the scrub's modes ----
+
+/// Write slot `slot`'s superblock again with its uuid's first byte changed, CRC recomputed: a slot that names another
+/// pool.
+/// Safety: `bd` is a device nothing has mounted.
+unsafe fn superOtherPool(bd: *mut blkdev, slot: u64) -> bool {
+    var p = 0 as *mut spool;
+    if (pool_open(bd, borrow mut p as *mut *mut spool) != 0) {
+        return false;
+    }
+    let b = kmalloc(CFS_BLOCK, 0) as *mut u8;
+    var ok = !b.isNull() && pool_read(p, slot, b as *mut void) == 0; // CFS_DVA(0, slot) is slot
+    if (ok) {
+        let blk = SliceMut.fromRaw(b, CFS_BLOCK);
+        blk[SUPER_UUID] = blk[SUPER_UUID] ^ 0x5a;
+        // CRC32C over the block with the crc field zero.
+        ByteOrder.writeU32LE(blk, SUPER_CRC, 0);
+        ByteOrder.writeU32LE(blk, SUPER_CRC, crc32c(b as *void, CFS_BLOCK));
+        ok = pool_write(p, slot, b as *void) == 0 && pool_flush(p) == 0;
+    }
+    kfree(b as *mut void);
+    pool_close(p);
+    return ok;
+}
+
+/// Clear block `blk`'s bit in the newest root's bitmap, on the device of a single-device version-4+ pool nothing has
+/// mounted: a free block in use, made where no commit can hand the block out again before the check
+/// (cosmofs_test_corrupt's FREE_IN_USE goes through a commit, whose own copies take the first free block -- this one
+/// -- and turn the finding into a cross-link: CFS-25's hazard, met by the first draft of this test).
+/// Safety: `bd` is a device nothing has mounted.
+unsafe fn bitmapClearOnDisk(bd: *mut blkdev, blk: u64) -> bool {
+    var p = 0 as *mut spool;
+    if (pool_open(bd, borrow mut p as *mut *mut spool) != 0) {
+        return false;
+    }
+    let b = kmalloc(CFS_BLOCK, 0) as *mut u8;
+    var ok = !b.isNull();
+    var members: u64 = 0;
+    var gen: u64 = 0;
+    var slot: u64 = 0;
+    while (ok && slot < 2) {
+        if (pool_read(p, slot, b as *mut void) == 0) {
+            let sb = SliceMut.fromRaw(b, CFS_BLOCK);
+            let g = ByteOrder.readU64LE(sb, SUPER_GENERATION);
+            if (memcmp(b as *void, "COSMOFS1".ptr as *void, 8) == 0 && g > gen) {
+                gen = g;
+                members = ByteOrder.readU64LE(sb, SUPER_MEMBERS);
+            }
+        }
+        slot += 1;
+    }
+    var at: u64 = 0;
+    ok = ok && members != 0 && pool_read(p, members, b as *mut void) == 0;
+    if (ok) {
+        at = ByteOrder.readU64LE(SliceMut.fromRaw(b, CFS_BLOCK), MEMBER0_ALLOC_ROOT);
+    }
+    ok = ok && at != 0 && pool_read(p, at, b as *mut void) == 0;
+    let chunk = if (ok) ByteOrder.readU64LE(SliceMut.fromRaw(b, CFS_BLOCK),
+        MHDR_SIZE + (blk / BITS_PER_BITMAP) as usize * 8) else 0;
+    ok = ok && chunk != 0 && pool_read(p, chunk, b as *mut void) == 0;
+    if (ok) {
+        let bm = SliceMut.fromRaw(b, CFS_BLOCK);
+        let hgen = ByteOrder.readU64LE(bm, MHDR_GENERATION);
+        let i = blk % BITS_PER_BITMAP;
+        let at8 = MHDR_SIZE + (i / 8) as usize;
+        bm[at8] = bm[at8] & (truncate<u8>(1u64 << (i % 8)) ^ 0xFF);
+        cfs_mhdr_seal_raw(0 as *cfs_mac, b as *mut void, KIND_BITMAP, chunk, hgen);
+        ok = pool_write(p, chunk, b as *void) == 0 && pool_flush(p) == 0;
+    }
+    kfree(b as *mut void);
+    pool_close(p);
+    return ok;
+}
+
+/// What cosmofs-check-dev's failure path frees.
+struct CheckDev {
+    rep: *mut cosmofs_check_report;
+    before: *mut u32;
+    after: *mut u32;
+}
+
+/// The check on a device nothing has mounted (cosmofs_check_dev, what fsck.cosmofs runs through /dev/fsctl
+/// CHECK_DEV). A pool left with a leak and a block in use the bitmap calls free: the read-only check names both and
+/// changes no block; the boot's repair refuses (a free block in use is not a boot's to repair); the offline repair
+/// repairs both, commits, and the next check is clean -- the free-in-use one is the repair a mounted pool cannot make.
+/// Then the three things that stop a check before it starts: a mounted device (-EBUSY), superblock slots that name two
+/// pools, and a root that is not a directory.
+/// Safety: `reason` writable.
+@cfg("CONFIG_DEBUG")
+@export("selftest_cosmofs_check_dev")
+unsafe fn selftestCheckDev(reason: *mut *CChar) -> bool {
+    let nblocks: u64 = 512;
+    var bd = 0 as *mut blkdev;
+    if (!cfst_engine_mount(borrow mut bd as *mut *mut blkdev, nblocks, reason)) {
+        return false;
+    }
+    var cd = CheckDev {
+        rep: kzalloc(layoutOf<[u64; 200]>().size) as *mut cosmofs_check_report,
+        before: 0 as *mut u32,
+        after: 0 as *mut u32,
+    };
+    let ok = checkDev(mut cd, bd, nblocks, reason);
+    kfree(cd.before as *mut void);
+    kfree(cd.after as *mut void);
+    kfree(cd.rep as *mut void);
+    if (!ok) {
+        let _ = vfs_umount2(eng(), VFS_UMOUNT_FORCE);
+    }
+    let _ = vfs_rmdir(0 as *mut vnode, eng());
+    ramblk_destroy(bd);
+    return ok;
+}
+
+/// Safety: `bd` the engine mount's device of `nblocks` blocks; `reason` writable.
+unsafe fn checkDev(cd: borrow mut CheckDev, bd: *mut blkdev, nblocks: u64, reason: *mut *CChar) -> bool {
+    let rep = cd.rep;
+    var dslot = [0u64; 12];
+    let dev = borrow mut dslot as *mut [u64; 12] as *mut cosmofs_dev_report;
+    if (rep.isNull()) {
+        return failed(reason, "check failed: rep != NULL at line 803\0");
+    }
+    if (!cfst_write_file(path("/mnt/eng/a\0"), "file a".ptr as *void, 6)) {
+        return failed(reason, "check failed: cfst_write_file(ENG \"/a\", \"file a\", 6) at line 806\0");
+    }
+    if (vfs_sync() != 0) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 809\0");
+    }
+    let ino = inoOf(path("/mnt/eng/a\0"));
+    if (ino == 0) {
+        return failed(reason, "check failed: vfs_lookup(NULL, ENG \"/a\", &vn) == 0 at line 813\0");
+    }
+    if (cosmofs_check_dev(bd, 0, rep, dev) != -EBUSY) { // mounted: its own CHECK is the way
+        return failed(reason, "check failed: cosmofs_check_dev(bd, 0, rep, &dev) == -EBUSY at line 816\0");
+    }
+    var aBlk: u64 = 0;
+    if (cosmofs_test_block_of(mnt(), ino, 0, borrow mut aBlk as *mut u64) != 0) {
+        return failed(reason,
+            "check failed: cosmofs_test_block_of(cfst_mount_of(ENG), ino, 0, &a_blk) == 0 at line 821\0");
+    }
+    if (cosmofs_test_corrupt(mnt(), CORRUPT_LEAK, 0, 0 as *mut u64) != 0) {
+        return failed(reason,
+            "check failed: cosmofs_test_corrupt(cfst_mount_of(ENG), COSMOFS_CORRUPT_LEAK, 0, NULL) == 0 at line 825\0");
+    }
+    if (vfs_sync() != 0) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 828\0");
+    }
+    if (vfs_umount2(eng(), 0) != 0) {
+        return failed(reason, "check failed: vfs_umount(ENG) == 0 at line 831\0");
+    }
+    if (!bitmapClearOnDisk(bd, aBlk & DVA_BLK_MASK)) {
+        return failed(reason, "check failed: bitmap_clear_on_disk(bd, CFS_DVA_BLK(a_blk)) at line 834\0");
+    }
+
+    cd.before = deviceCrcs(bd, nblocks);
+    if (cd.before.isNull()) {
+        return failed(reason, "check failed: before != NULL at line 839\0");
+    }
+    if (cosmofs_check_dev(bd, 0, rep, dev) != 0) {
+        return failed(reason, "check failed: cosmofs_check_dev(bd, 0, rep, &dev) == 0 at line 842\0");
+    }
+    cd.after = deviceCrcs(bd, nblocks);
+    if (cd.after.isNull()) {
+        return failed(reason, "check failed: after != NULL at line 846\0");
+    }
+    let changed = crcsDiffer(cd.before as *u32, cd.after as *u32, nblocks);
+    let r = Ptr.toBorrow(rep as *cosmofs_check_report);
+    let d = Ptr.toBorrow(dev as *cosmofs_dev_report);
+    var buffer = [0u8; 160];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: cosmofs-check-dev: read-only: flags ");
+    hexAlt(mut line, d.flags);
+    line.text(", ");
+    line.decimal(r.alloc_not_seen.count);
+    line.text(" leaked, ");
+    line.decimal(r.seen_not_alloc.count);
+    line.text(" free-in-use, ");
+    line.decimal(changed as u64);
+    line.text(" block(s) changed");
+    say(line);
+    if ((d.flags & DEV_F_CHECKED) == 0) {
+        return failed(reason, "check failed: (dev.flags & COSMO_FSCTL_DEV_F_CHECKED) != 0 at line 864\0");
+    }
+    if (!(r.alloc_not_seen.count == 1 && r.seen_not_alloc.count == 1)) {
+        return failed(reason,
+            "check failed: rep->alloc_not_seen.count == 1 && rep->seen_not_alloc.count == 1 at line 868\0");
+    }
+    if (changed != 0) {
+        return failed(reason, "check failed: changed == 0 at line 871\0");
+    }
+
+    if (cosmofs_check_dev(bd, CHECK_REPAIR | CHECK_BOOT, rep, dev) != 0) {
+        return failed(reason,
+            "check failed: cosmofs_check_dev(bd, COSMOFS_CHECK_REPAIR | COSMOFS_CHECK_BOOT, rep, &d... at line 876\0");
+    }
+    let r2 = Ptr.toBorrow(rep as *cosmofs_check_report);
+    if (!(r2.boot_refused && (Ptr.toBorrow(dev as *cosmofs_dev_report).flags & DEV_F_BOOT_REFUSED) != 0)) {
+        return failed(reason,
+            "check failed: rep->boot_refused && (dev.flags & COSMO_FSCTL_DEV_F_BOOT_REFUSED) != 0 at line 881\0");
+    }
+    if (!(r2.alloc_not_seen.repaired == 0 && r2.seen_not_alloc.repaired == 0)) {
+        return failed(reason,
+            "check failed: rep->alloc_not_seen.repaired == 0 && rep->seen_not_alloc.repaired == 0 at line 885\0");
+    }
+
+    if (cosmofs_check_dev(bd, CHECK_REPAIR, rep, dev) != 0) {
+        return failed(reason,
+            "check failed: cosmofs_check_dev(bd, COSMOFS_CHECK_REPAIR, rep, &dev) == 0 at line 890\0");
+    }
+    let r3 = Ptr.toBorrow(rep as *cosmofs_check_report);
+    let d3 = Ptr.toBorrow(dev as *cosmofs_dev_report);
+    var buffer2 = [0u8; 160];
+    var line2 = TextWriter.create(mut buffer2[..]);
+    line2.text("selftest: cosmofs-check-dev: repair: flags ");
+    hexAlt(mut line2, d3.flags);
+    line2.text(", ");
+    line2.decimal(r3.alloc_not_seen.repaired);
+    line2.text("/");
+    line2.decimal(r3.alloc_not_seen.count);
+    line2.text(" leaked, ");
+    line2.decimal(r3.seen_not_alloc.repaired);
+    line2.text("/");
+    line2.decimal(r3.seen_not_alloc.count);
+    line2.text(" free-in-use repaired");
+    say(line2);
+    if (!(r3.alloc_not_seen.repaired == 1 && r3.seen_not_alloc.repaired == 1)) {
+        return failed(reason,
+            "check failed: rep->alloc_not_seen.repaired == 1 && rep->seen_not_alloc.repaired == 1 at line 910\0");
+    }
+    if ((d3.flags & DEV_F_COMMITTED) == 0) {
+        return failed(reason, "check failed: (dev.flags & COSMO_FSCTL_DEV_F_COMMITTED) != 0 at line 913\0");
+    }
+    if (!(cosmofs_check_dev(bd, 0, rep, dev) == 0 && clean(rep))) {
+        return failed(reason, "check failed: cosmofs_check_dev(bd, 0, rep, &dev) == 0 && rep->clean at line 916\0");
+    }
+    if (vfs_mount(eng(), "cosmofs\0".ptr as *CChar, bd, 0) != 0) {
+        return failed(reason, "check failed: vfs_mount(ENG, \"cosmofs\", bd, 0) == 0 at line 919\0");
+    }
+    cosmofs_test_set_writeback(mnt(), false);
+    if (!cfst_read_matches(path("/mnt/eng/a\0"), "file a".ptr as *void, 6)) {
+        return failed(reason, "check failed: cfst_read_matches(ENG \"/a\", \"file a\", 6) at line 923\0");
+    }
+
+    // A root that is not a directory: the mount says where it stopped.
+    let bad = rootNotDir();
+    if (bad == 1) {
+        return failed(reason,
+            "check failed: cosmofs_test_corrupt(cfst_mount_of(ENG), COSMOFS_CORRUPT_ROOT_TYPE, CFS_... at line 930\0");
+    }
+    if (bad == 2) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 933\0");
+    }
+    if (vfs_umount2(eng(), VFS_UMOUNT_FORCE) != 0) {
+        return failed(reason, "check failed: vfs_umount2(ENG, VFS_UMOUNT_FORCE) == 0 at line 936\0");
+    }
+    if (cosmofs_check_dev(bd, 0, rep, dev) != 0) {
+        return failed(reason, "check failed: cosmofs_check_dev(bd, 0, rep, &dev) == 0 at line 939\0");
+    }
+    let d4 = Ptr.toBorrow(dev as *cosmofs_dev_report);
+    var buffer3 = [0u8; 128];
+    var line3 = TextWriter.create(mut buffer3[..]);
+    line3.text("selftest: cosmofs-check-dev: root not a directory: flags ");
+    hexAlt(mut line3, d4.flags);
+    line3.text(", error ");
+    line3.signed(d4.mount_error as i64);
+    line3.text(", stage ");
+    line3.decimal(d4.mount_stage as u64);
+    say(line3);
+    if (!((d4.flags & DEV_F_MOUNT_FAILED) != 0 && d4.mount_error == -ENOTDIR && d4.mount_stage == STAGE_ROOT)) {
+        return failed(reason,
+            "check failed: (dev.flags & COSMO_FSCTL_DEV_F_MOUNT_FAILED) && dev.mount_error == -ENOT... at line 953\0");
+    }
+
+    // Two slots, two pools: not checked, and said.
+    if (!superOtherPool(bd, 1)) {
+        return failed(reason, "check failed: super_other_pool(bd, 1) at line 958\0");
+    }
+    if (cosmofs_check_dev(bd, 0, rep, dev) != 0) {
+        return failed(reason, "check failed: cosmofs_check_dev(bd, 0, rep, &dev) == 0 at line 961\0");
+    }
+    let flags = Ptr.toBorrow(dev as *cosmofs_dev_report).flags;
+    if (!((flags & DEV_F_SUPER_DISAGREE) != 0 && (flags & DEV_F_CHECKED) == 0)) {
+        return failed(reason,
+            "check failed: (dev.flags & COSMO_FSCTL_DEV_F_SUPER_DISAGREE) && !(dev.flags & COSMO_FS... at line 966\0");
+    }
+    return true;
+}
+
+/// The scrub's modes (roadmap 1.2 B2). On a two-way mirror with one copy of a file's blocks rotted: a scrub without
+/// repair counts the bad copies and writes nothing (the next one counts them again); with repair it rewrites them; the
+/// one after is clean. A snapshot's own blocks -- the file's old contents, which the live tree no longer reaches --
+/// are scrubbed too. And at a bound of 50 blocks a second the same scrub takes the time its block count says. And the
+/// check of the mirror's other device is refused while the pool is mounted through the first.
+/// Safety: `reason` writable.
+@cfg("CONFIG_DEBUG")
+@export("selftest_cosmofs_scrub_modes")
+unsafe fn selftestScrubModes(reason: *mut *CChar) -> bool {
+    let _ = vfs_umount2(eng(), VFS_UMOUNT_FORCE);
+    var bd = [ramblk_create(512), ramblk_create(512)];
+    let saved = cfst_b2_floor_scrub_rate();
+    if (scrubModes(borrow mut bd as *mut [*mut blkdev; 2] as *mut *mut blkdev, saved, reason)) {
+        ramblk_destroy(bd[0]);
+        ramblk_destroy(bd[1]);
+        return true;
+    }
+    cfst_b2_floor_set_scrub_rate(saved);
+    let _ = vfs_umount2(eng(), VFS_UMOUNT_FORCE);
+    let _ = vfs_rmdir(0 as *mut vnode, eng());
+    if (!bd[0].isNull()) {
+        ramblk_destroy(bd[0]);
+    }
+    if (!bd[1].isNull()) {
+        ramblk_destroy(bd[1]);
+    }
+    return false;
+}
+
+static mut g_data: [u8; 16384] = [0; 16384];
+
+/// Safety: `bd` two devices or nulls; `reason` writable.
+unsafe fn scrubModes(bd: *mut *mut blkdev, saved: u32, reason: *mut *CChar) -> bool {
+    let bd0 = bd.read();
+    let bd1 = bd.add(1).read();
+    if (!(!bd0.isNull() && !bd1.isNull())) {
+        return failed(reason, "check failed: bd[0] != NULL && bd[1] != NULL at line 1007\0");
+    }
+    if (cosmofs_format_mirror(bd, 1, 2) != 0) {
+        return failed(reason, "check failed: cosmofs_format_mirror(bd, 1, 2) == 0 at line 1010\0");
+    }
+    let mk = vfs_mkdir(0 as *mut vnode, eng(), 493);
+    if (!(mk == 0 || mk == -EEXIST)) {
+        return failed(reason, "check failed: mk == 0 || mk == -EEXIST at line 1014\0");
+    }
+    if (vfs_mount(eng(), "cosmofs\0".ptr as *CChar, bd0, 0) != 0) {
+        return failed(reason, "check failed: vfs_mount(ENG, \"cosmofs\", bd[0], 0) == 0 at line 1017\0");
+    }
+    cosmofs_test_set_writeback(mnt(), false);
+    let data = borrow mut g_data as *mut [u8; 16384] as *mut u8;
+    cfst_fill_incompressible(data, 16384, 0x5c5c);
+    if (!cfst_write_file(path("/mnt/eng/m\0"), data as *void, 16384)) {
+        return failed(reason, "check failed: cfst_write_file(ENG \"/m\", data, sizeof(data)) at line 1023\0");
+    }
+    if (vfs_sync() != 0) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 1026\0");
+    }
+    var n: u32 = 0;
+    var info = [0u64; 13];
+    if (cfst_snapctl(SNAP_CREATE, path("old\0"), borrow mut info as *mut [u64; 13] as *mut void, 1,
+        borrow mut n as *mut u32) != 0) {
+        return failed(reason,
+            "check failed: cfst_snapctl(COSMOFS_SNAP_CREATE, \"old\", &info, 1, &n) == 0 at line 1033\0");
+    }
+    cfst_fill_incompressible(data, 16384, 0x6d6d);
+    if (!cfst_write_file(path("/mnt/eng/m\0"), data as *void, 16384)) { // the snapshot keeps the old blocks
+        return failed(reason, "check failed: cfst_write_file(ENG \"/m\", data, sizeof(data)) at line 1037\0");
+    }
+    if (vfs_sync() != 0) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 1040\0");
+    }
+    let ino = inoOf(path("/mnt/eng/m\0"));
+    if (ino == 0) {
+        return failed(reason, "check failed: vfs_lookup(NULL, ENG \"/m\", &vn) == 0 at line 1044\0");
+    }
+    for (l in 0u64..4) {
+        var dva: u64 = 0;
+        if (cosmofs_test_block_of(mnt(), ino, l, borrow mut dva as *mut u64) != 0) {
+            return failed(reason,
+                "check failed: cosmofs_test_block_of(cfst_mount_of(ENG), ino, l, &dva) == 0 at line 1050\0");
+        }
+        if (!cfst_rot_copy(bd1, dva & DVA_BLK_MASK, 0x3c)) {
+            return failed(reason, "check failed: cfst_rot_copy(bd[1], CFS_DVA_BLK(dva), 0x3c) at line 1053\0");
+        }
+    }
+    var sa = [0u64; 8];
+    var sb = [0u64; 8];
+    var sc = [0u64; 8];
+    var sd = [0u64; 8];
+    let a = borrow mut sa as *mut [u64; 8] as *mut cosmofs_scrub_stats;
+    let b = borrow mut sb as *mut [u64; 8] as *mut cosmofs_scrub_stats;
+    let c = borrow mut sc as *mut [u64; 8] as *mut cosmofs_scrub_stats;
+    let d = borrow mut sd as *mut [u64; 8] as *mut cosmofs_scrub_stats;
+    if (cosmofs_scrub(mnt(), a, 0) != 0) {
+        return failed(reason, "check failed: cosmofs_scrub(cfst_mount_of(ENG), &a, 0) == 0 at line 1065\0");
+    }
+    if (cosmofs_scrub(mnt(), b, 0) != 0) {
+        return failed(reason, "check failed: cosmofs_scrub(cfst_mount_of(ENG), &b, 0) == 0 at line 1068\0");
+    }
+    if (cosmofs_scrub(mnt(), c, SCRUB_REPAIR) != 0) {
+        return failed(reason,
+            "check failed: cosmofs_scrub(cfst_mount_of(ENG), &c, COSMOFS_SCRUB_REPAIR) == 0 at line 1072\0");
+    }
+    if (cosmofs_scrub(mnt(), d, 0) != 0) {
+        return failed(reason, "check failed: cosmofs_scrub(cfst_mount_of(ENG), &d, 0) == 0 at line 1075\0");
+    }
+    let ra = Ptr.toBorrow(a as *cosmofs_scrub_stats);
+    let rb = Ptr.toBorrow(b as *cosmofs_scrub_stats);
+    let rc = Ptr.toBorrow(c as *cosmofs_scrub_stats);
+    let rd = Ptr.toBorrow(d as *cosmofs_scrub_stats);
+    var buffer = [0u8; 192];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: cosmofs-scrub-modes: ");
+    line.decimal(ra.blocks_read);
+    line.text(" blocks; report ");
+    line.decimal(ra.bad_copies);
+    line.text(" bad, again ");
+    line.decimal(rb.bad_copies);
+    line.text(" bad; repair ");
+    line.decimal(rc.repaired);
+    line.text(" of ");
+    line.decimal(rc.bad_copies);
+    line.text("; after ");
+    line.decimal(rd.bad_copies);
+    line.text(" bad");
+    say(line);
+    if (!(ra.bad_copies == 4 && ra.repaired == 0 && ra.unrecoverable == 0)) {
+        return failed(reason,
+            "check failed: a.bad_copies == 4 && a.repaired == 0 && a.unrecoverable == 0 at line 1099\0");
+    }
+    if (rb.bad_copies != 4) { // the report wrote nothing
+        return failed(reason, "check failed: b.bad_copies == 4 at line 1102\0");
+    }
+    if (!(rc.bad_copies == 4 && rc.repaired == 4)) {
+        return failed(reason, "check failed: c.bad_copies == 4 && c.repaired == 4 at line 1105\0");
+    }
+    if (!(rd.bad_copies == 0 && rd.unrecoverable == 0)) {
+        return failed(reason, "check failed: d.bad_copies == 0 && d.unrecoverable == 0 at line 1108\0");
+    }
+    if (!cfst_read_matches(path("/mnt/eng/m\0"), data as *void, 16384)) {
+        return failed(reason, "check failed: cfst_read_matches(ENG \"/m\", data, sizeof(data)) at line 1111\0");
+    }
+    // The snapshot's blocks: four data blocks the live tree no longer reaches, read by the scrub (8 = the old file's 4
+    // + the new file's 4, and more for the trees).
+    if (!(ra.blocks_read >= 8 + 4)) {
+        return failed(reason, "check failed: a.blocks_read >= 8 + 4 at line 1116\0");
+    }
+
+    cfst_b2_floor_set_scrub_rate(50); // 5 blocks a window: the pool's few dozen take several
+    var se = [0u64; 8];
+    let e = borrow mut se as *mut [u64; 8] as *mut cosmofs_scrub_stats;
+    if (cosmofs_scrub(mnt(), e, 0) != 0) {
+        return failed(reason, "check failed: cosmofs_scrub(cfst_mount_of(ENG), &e, 0) == 0 at line 1123\0");
+    }
+    cfst_b2_floor_set_scrub_rate(saved);
+    let re = Ptr.toBorrow(e as *cosmofs_scrub_stats);
+    let floorMs = if (re.blocks_read > 5) (re.blocks_read / 5 - 1) * 100 else 0;
+    var buffer2 = [0u8; 160];
+    var line2 = TextWriter.create(mut buffer2[..]);
+    line2.text("selftest: cosmofs-scrub-modes: at 50 blocks/s: ");
+    line2.decimal(re.blocks_read);
+    line2.text(" blocks in ");
+    line2.decimal(re.elapsed_ns / 1000000);
+    line2.text(" ms (at least ");
+    line2.decimal(floorMs);
+    line2.text(" ms)");
+    say(line2);
+    if (floorMs < 300) { // a bound this test could not see would prove nothing
+        return failed(reason, "check failed: floor_ms >= 300 at line 1139\0");
+    }
+    if (!(re.rate == 50 && re.elapsed_ns / 1000000 >= floorMs)) {
+        return failed(reason, "check failed: e.rate == 50 && e.elapsed_ns / 1000000 >= floor_ms at line 1142\0");
+    }
+    if (cfst_snapctl(SNAP_DELETE, path("old\0"), 0 as *mut void, 0, 0 as *mut u32) != 0) {
+        return failed(reason,
+            "check failed: cfst_snapctl(COSMOFS_SNAP_DELETE, \"old\", NULL, 0, NULL) == 0 at line 1146\0");
+    }
+    // The mirror is mounted through its first device: a check of the second must not run beside the live allocator
+    // (Codex on #434). Since roadmap 1.2 B3 the mount holds the second too (CFS-5), so the check's own mount is
+    // refused its claim.
+    var legdev = [0u64; 12];
+    let leg = borrow mut legdev as *mut [u64; 12] as *mut cosmofs_dev_report;
+    let lrc = cosmofs_check_dev(bd1, CHECK_REPAIR, rep(), leg);
+    var buffer3 = [0u8; 128];
+    var line3 = TextWriter.create(mut buffer3[..]);
+    line3.text("selftest: cosmofs-scrub-modes: the other leg of a mounted mirror: check ");
+    line3.signed(lrc as i64);
+    say(line3);
+    if (lrc != -EBUSY) {
+        return failed(reason, "check failed: lrc == -EBUSY at line 1160\0");
+    }
+    if (vfs_umount2(eng(), 0) != 0) {
+        return failed(reason, "check failed: vfs_umount(ENG) == 0 at line 1163\0");
+    }
+    if (vfs_rmdir(0 as *mut vnode, eng()) != 0) {
+        return failed(reason, "check failed: vfs_rmdir(NULL, ENG) == 0 at line 1166\0");
+    }
+    return true;
+}
+
+// ---- cosmofs-nomem ----
+
+/// What cosmofs-nomem's failure path releases.
+struct Nomem {
+    f: *mut file;
+    vn: *mut vnode;
+    pages: *mut u8;
+}
+
+static mut g_got: [u8; 4096] = [0; 4096];
+
+/// CFS-6: an allocation a retry could survive is returned to the caller, and the transaction lives on. Two sites CF17
+/// abandoned the transaction at: the chain block a file's eleventh run needs (extents_store), and the inode-map path a
+/// chown's inode write needs (inode_sync). Each fails once, the operation reports -ENOMEM, and the same operation done
+/// again succeeds, commits and reads back after a remount. Before the fix the first failure abandoned the transaction:
+/// the retry and every commit after it answered -EIO until the unmount dropped everything. The self-test is
+/// cosmofstest_b2_floor.c's selftest_cosmofs_nomem, which runs this with CONFIG_FAULTINJECT.
+/// Safety: `reason` writable.
+@cfg("CONFIG_DEBUG")
+@export("cfst_b2_nomem")
+unsafe fn selftestNomem(reason: *mut *CChar) -> bool {
+    var bd = 0 as *mut blkdev;
+    if (!cfst_engine_mount(borrow mut bd as *mut *mut blkdev, 1024, reason)) {
+        return false;
+    }
+    var st = Nomem { f: 0 as *mut file, vn: 0 as *mut vnode, pages: kmalloc(11 * 4096, 0) as *mut u8 };
+    if (nomem(mut st, bd, reason)) {
+        kfree(st.pages as *mut void);
+        return cfst_engine_unmount(bd, reason);
+    }
+    let _ = cfst_b2_floor_fail_end(0);
+    let _ = cfst_b2_floor_fail_end(1);
+    if (!st.f.isNull()) {
+        filePut(st.f);
+    }
+    if (!st.vn.isNull()) {
+        vnode_put(st.vn);
+    }
+    kfree(st.pages as *mut void);
+    let _ = vfs_umount2(eng(), VFS_UMOUNT_FORCE);
+    let _ = vfs_rmdir(0 as *mut vnode, eng());
+    ramblk_destroy(bd);
+    return false;
+}
+
+/// Safety: `bd` the engine mount's device; `reason` writable.
+unsafe fn nomem(st: borrow mut Nomem, bd: *mut blkdev, reason: *mut *CChar) -> bool {
+    let pages = st.pages;
+    if (pages.isNull()) {
+        return failed(reason, "check failed: pages != NULL at line 1220\0");
+    }
+    cfst_fill_incompressible(pages, 11 * 4096, 0x6e6f6d);
+    // Ten runs: every other page, so no two merge. The direct slots hold exactly ten.
+    if (vfs_open(0 as *mut vnode, path("/mnt/eng/runs\0"), O_RDWR | O_CREAT, 420, borrow mut st.f as *mut *mut file) !=
+        0) {
+        return failed(reason,
+            "check failed: vfs_open(NULL, ENG \"/runs\", COSMO_O_RDWR | COSMO_O_CREAT, 0644, &f) == 0 at line 1227\0");
+    }
+    for (i in 0usize..10) {
+        if (file_pwrite(st.f, pages.add(i * 4096) as *void, 4096, (i * 2 * 4096) as u64) != 4096) {
+            return failed(reason,
+                "check failed: file_pwrite(f, pages + (size_t)i * 4096, 4096, (uint64_t)i * 2 * 409... at line 1232\0");
+        }
+    }
+    if (file_sync(st.f) != 0) {
+        return failed(reason, "check failed: file_sync(f) == 0 at line 1236\0");
+    }
+    // The eleventh run needs the chain's first block.
+    if (file_pwrite(st.f, pages.add(10 * 4096) as *void, 4096, 20 * 4096) != 4096) {
+        return failed(reason,
+            "check failed: file_pwrite(f, pages + 10 * 4096, 4096, 20 * 4096) == 4096 at line 1241\0");
+    }
+    cfst_b2_floor_fail_set(0);
+    let first = file_sync(st.f);
+    let hits = cfst_b2_floor_fail_end(0);
+    let retry = file_sync(st.f);
+    var buffer = [0u8; 128];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: cosmofs-nomem: chain: sync ");
+    line.signed(first as i64);
+    line.text(" (hits ");
+    line.decimal(hits);
+    line.text("), retry ");
+    line.signed(retry as i64);
+    say(line);
+    if (!(hits == 1 && first == -ENOMEM)) {
+        return failed(reason, "check failed: fst.hits == 1 && first == -ENOMEM at line 1257\0");
+    }
+    if (retry != 0) { // the claim: the transaction was not abandoned
+        return failed(reason, "check failed: retry == 0 at line 1260\0");
+    }
+    filePut(st.f);
+    st.f = 0 as *mut file;
+
+    // A chown's inode write after a commit: the map path is copied anew.
+    if (vfs_lookup(0 as *mut vnode, path("/mnt/eng/runs\0"), borrow mut st.vn as *mut *mut vnode) != 0) {
+        return failed(reason, "check failed: vfs_lookup(NULL, ENG \"/runs\", &vn) == 0 at line 1267\0");
+    }
+    cfst_b2_floor_fail_set(1);
+    let owned = vfs_chown(st.vn, 7, 7);
+    let hits2 = cfst_b2_floor_fail_end(1);
+    let own2 = vfs_chown(st.vn, 7, 7);
+    let sync = vfs_sync();
+    var buffer2 = [0u8; 128];
+    var line2 = TextWriter.create(mut buffer2[..]);
+    line2.text("selftest: cosmofs-nomem: inode: chown ");
+    line2.signed(owned as i64);
+    line2.text(" (hits ");
+    line2.decimal(hits2);
+    line2.text("), retry ");
+    line2.signed(own2 as i64);
+    line2.text(", sync ");
+    line2.signed(sync as i64);
+    say(line2);
+    if (!(hits2 == 1 && owned == -ENOMEM)) {
+        return failed(reason, "check failed: fst.hits == 1 && own == -ENOMEM at line 1286\0");
+    }
+    if (!(own2 == 0 && sync == 0)) {
+        return failed(reason, "check failed: own2 == 0 && sync == 0 at line 1289\0");
+    }
+    vnode_put(st.vn);
+    st.vn = 0 as *mut vnode;
+
+    // A truncate whose map store fails: a twelfth run, committed, then a truncate that drops it -- eleven runs stay,
+    // so the chain's block is copied, and that copy fails. The truncate is -ENOMEM, and what the old map names must
+    // still be allocated after a commit: the first draft of this fix queued the dropped run's block free before the
+    // store, and the commit freed it under the map that still named it (Codex on #433).
+    if (vfs_open(0 as *mut vnode, path("/mnt/eng/runs\0"), O_RDWR, 0, borrow mut st.f as *mut *mut file) != 0) {
+        return failed(reason, "check failed: vfs_open(NULL, ENG \"/runs\", COSMO_O_RDWR, 0, &f) == 0 at line 1299\0");
+    }
+    if (file_pwrite(st.f, pages as *void, 4096, 22 * 4096) != 4096) {
+        return failed(reason, "check failed: file_pwrite(f, pages, 4096, 22 * 4096) == 4096 at line 1302\0");
+    }
+    if (file_sync(st.f) != 0) {
+        return failed(reason, "check failed: file_sync(f) == 0 at line 1305\0");
+    }
+    filePut(st.f);
+    st.f = 0 as *mut file;
+    cfst_b2_floor_fail_set(0);
+    let trc = vfs_truncate(0 as *mut vnode, path("/mnt/eng/runs\0"), 21 * 4096);
+    let hits3 = cfst_b2_floor_fail_end(0);
+    if (vfs_sync() != 0) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 1313\0");
+    }
+    if (cosmofs_check(mnt(), rep(), 0) != 0) {
+        return failed(reason, "check failed: cosmofs_check(cfst_mount_of(ENG), &tr, 0) == 0 at line 1316\0");
+    }
+    let tr = Ptr.toBorrow(rep() as *cosmofs_check_report);
+    var buffer3 = [0u8; 160];
+    var line3 = TextWriter.create(mut buffer3[..]);
+    line3.text("selftest: cosmofs-nomem: truncate: ");
+    line3.signed(trc as i64);
+    line3.text(" (hits ");
+    line3.decimal(hits3);
+    line3.text("); then ");
+    line3.decimal(tr.seen_not_alloc.count);
+    line3.text(" free-in-use, ");
+    line3.decimal(tr.alloc_not_seen.count);
+    line3.text(" leaked");
+    say(line3);
+    if (!(hits3 == 1 && trc == -ENOMEM)) {
+        return failed(reason, "check failed: fst.hits == 1 && trc == -ENOMEM at line 1332\0");
+    }
+    if (!tr.clean) {
+        return failed(reason, "check failed: tr.clean at line 1335\0");
+    }
+    if (vfs_truncate(0 as *mut vnode, path("/mnt/eng/runs\0"), 21 * 4096) != 0) {
+        return failed(reason, "check failed: vfs_truncate(NULL, ENG \"/runs\", 21 * 4096) == 0 at line 1338\0");
+    }
+
+    if (!(cosmofs_check(mnt(), rep(), 0) == 0 && clean(rep()))) {
+        return failed(reason, "check failed: cosmofs_check(cfst_mount_of(ENG), &r, 0) == 0 && r.clean at line 1342\0");
+    }
+    if (vfs_umount2(eng(), 0) != 0) {
+        return failed(reason, "check failed: vfs_umount(ENG) == 0 at line 1345\0");
+    }
+    if (vfs_mount(eng(), "cosmofs\0".ptr as *CChar, bd, 0) != 0) {
+        return failed(reason, "check failed: vfs_mount(ENG, \"cosmofs\", bd, 0) == 0 at line 1348\0");
+    }
+    cosmofs_test_set_writeback(mnt(), false);
+    if (vfs_open(0 as *mut vnode, path("/mnt/eng/runs\0"), O_RDONLY, 0, borrow mut st.f as *mut *mut file) != 0) {
+        return failed(reason, "check failed: vfs_open(NULL, ENG \"/runs\", COSMO_O_RDONLY, 0, &f) == 0 at line 1352\0");
+    }
+    if (Ptr.toBorrow(Ptr.toBorrow(st.f as *file).vn as *vnode).uid != 7) {
+        return failed(reason, "check failed: f->vn->uid == 7 at line 1355\0");
+    }
+    let got = borrow mut g_got as *mut [u8; 4096] as *mut u8;
+    for (i in 0usize..11) {
+        let at = (if (i < 10) i * 2 else 20) as u64 * 4096;
+        if (file_pread(st.f, got as *mut void, 4096, at) != 4096) {
+            return failed(reason, "check failed: file_pread(f, got, sizeof(got), at) == 4096 at line 1361\0");
+        }
+        if (memcmp(got as *void, pages.add(i * 4096) as *void, 4096) != 0) {
+            return failed(reason, "check failed: memcmp(got, pages + (size_t)i * 4096, 4096) == 0 at line 1364\0");
+        }
+    }
+    filePut(st.f);
+    st.f = 0 as *mut file;
+    if (!(cosmofs_check(mnt(), rep(), 0) == 0 && clean(rep()))) {
+        return failed(reason, "check failed: cosmofs_check(cfst_mount_of(ENG), &r, 0) == 0 && r.clean at line 1370\0");
+    }
+    return true;
+}
