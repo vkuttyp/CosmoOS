@@ -21,6 +21,7 @@
 #include <kernel/types.h>
 #include <kernel/utsns.h>
 #include <kernel/vfs.h>
+#include <kernel/page.h>
 
 #include <uapi/cosmo/fsctl.h>
 
@@ -110,3 +111,68 @@ bool vfstest_floor_bounce_fallback(const char **reason)
     return true;
 #endif
 }
+
+_Static_assert(EIO == 5 && VFS_UMOUNT_FORCE == 1, "vfstest_wb.cee's errno.h and vfs.h values");
+
+/* --- vfstest_wb.cee's fault injection, and its stand-ins without it ------ */
+
+void vfstest_floor_inject_blk(unsigned count);
+uint64_t vfstest_floor_inject_end(void);
+
+#if CONFIG_FAULTINJECT
+
+/* FI_BLK_COMPLETE refuses this thread's next `count` write-backs. */
+void vfstest_floor_inject_blk(unsigned count)
+{
+    faultinject_set(FI_BLK_COMPLETE, 1, count, thread_current());
+}
+
+/* The injection's end: how many it refused. */
+uint64_t vfstest_floor_inject_end(void)
+{
+    faultinject_clear(FI_BLK_COMPLETE);
+    struct fi_stats fst;
+    faultinject_stats(FI_BLK_COMPLETE, &fst);
+    return fst.hits;
+}
+
+#else
+
+void vfstest_floor_inject_blk(unsigned count)
+{
+    (void)count;
+}
+
+uint64_t vfstest_floor_inject_end(void)
+{
+    return 0;
+}
+
+#define WB_STUB(fn, name)                                                                     \
+    bool fn(const char **reason);                                                             \
+    bool fn(const char **reason)                                                              \
+    {                                                                                         \
+        (void)reason;                                                                         \
+        kinfo("selftest: " name ": fault injection is compiled out of this build");          \
+        return true;                                                                          \
+    }
+WB_STUB(selftest_wb_error_fsync, "wb-error-fsync")
+WB_STUB(selftest_wb_error_once, "wb-error-once")
+WB_STUB(selftest_wb_error_close, "wb-error-close")
+WB_STUB(selftest_wb_error_lost, "wb-error-lost")
+
+#endif
+
+_Static_assert(EFAULT == 14 && EFBIG == 27 && EOPNOTSUPP == 95 && PG_PAGECACHE == 128 && COSMO_SEEK_CUR == 1,
+               "vfstest_wb.cee's and vfstest_fill.cee's errno.h, page.h and syscall.h values");
+
+#if !CONFIG_SELFTEST
+/* aio-pwrite-dirty needs the ring's test body, which only a self-test
+ * build has (vfstest_fill.cee). */
+bool selftest_aio_pwrite_dirty(const char **reason);
+bool selftest_aio_pwrite_dirty(const char **reason)
+{
+    (void)reason;
+    return true;
+}
+#endif

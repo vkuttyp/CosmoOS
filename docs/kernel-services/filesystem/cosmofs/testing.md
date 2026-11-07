@@ -12,7 +12,7 @@ test holds are in `invariants.md`.
 |---|---|---|
 | Host (ASan/UBSan) | `test_cosmofs`: the on-disk layout compiled natively | `make host-test` |
 | Host fuzz (ASan/UBSan) | `fuzz_cosmofs`: the real `cosmofs_core.c`, `cosmofs.c`, `cosmofs_snap.cee` (generated), `cosmofs_member.cee` (generated), `cosmofs_scrub.cee` (generated), `cosmofs_check.cee` (generated) and `cosmofs_crypt.cee` (generated) mount, walk and read mutated images | `make fuzz` |
-| Target self-tests (debug builds) | 71 tests: 67 `cosmofs-*`, `pool`, and three `fsctl-*`, in `cosmofstest_*.cee`, `cosmofscrash.cee` and `vfstest.c`, listed below | `make test` |
+| Target self-tests (debug builds) | 71 tests: 67 `cosmofs-*`, `pool`, and three `fsctl-*`, in `cosmofstest_*.cee`, `cosmofscrash.cee` and `vfstest_dev.cee`, listed below | `make test` |
 | Other target self-tests on cosmofs | tests of other subsystems that use cosmofs as the filesystem under them | `make test` |
 | User mode (debug builds) | `init --selftest` mounts the kernel tests' cosmofs, commits a compressible file, and drives `/sbin/fsctl` | `make test` |
 | Shell (debug builds) | `/etc/rc.test` takes, reads and deletes a snapshot (`SNAPTEST`) | `make test` |
@@ -222,9 +222,9 @@ writeback thread off so that generation counts are exact.
 | `cosmofs-check-partial` | an unreadable directory block: report partial, repair refused, blocks named only inside it not freed |
 | `cosmofs-check-many-orphans` | twelve orphans, more than the eight names a class carries, all repaired in one pass |
 | `cosmofs-check-slot-identity` | a slot whose `ino` disagrees with its position is named, partial, repair refused |
-| `fsctl-list` (`vfstest.c`) | every mount of the namespace once, the root at `/`, `count == total` |
+| `fsctl-list` (`vfstest_dev.cee`) | every mount of the namespace once, the root at `/`, `count == total` |
 | `fsctl-check` | a leak found and repaired through `/dev/fsctl` with the same numbers as a direct call; `-EOPNOTSUPP`, `-ENOENT`, `-EINVAL` for a wrong version or size |
-| `fsctl-result-per-open` (`vfstest.c`) | two open files keep their own results; a file with no command reads zero bytes; a short buffer is refused |
+| `fsctl-result-per-open` (`vfstest_dev.cee`) | two open files keep their own results; a file with no command reads zero bytes; a short buffer is refused |
 
 ### Crash consistency: `cosmofs-replay` (`cosmofscrash.c`)
 
@@ -278,8 +278,8 @@ plain pool's file past 516128 blocks raises it to 14 and keeps CRC32C.
 |---|---|---|
 | `fault-blk` | `kernel/core/faulttest.c` | device errors injected under a workload; a forced unmount and remount show a committed root |
 | `nvme` | `kernel/device/devtest.c` | formats and mounts the NVMe disk, and leaves the cosmofs `SNAPTEST` uses |
-| `cache-limits`, `read-bounce`, `wb-error-fsync`, `wb-error-once`, `wb-error-close`, `wb-error-lost`, `read-bench`, `write-bench`, `pagecache-pinned` | `kernel-services/vfs/vfstest.c` | page cache and write-back behaviour (`docs/kernel-services/vfs/testing.md`) |
-| `vfs-mount-id`, `vfs-mount-pin` | `kernel-services/vfs/vfstest.c` | mount ids and the pass hold behind `/dev/fsctl` |
+| `cache-limits`, `read-bounce`, `wb-error-fsync`, `wb-error-once`, `wb-error-close`, `wb-error-lost`, `read-bench`, `write-bench`, `pagecache-pinned` | `kernel-services/vfs/vfstest_mount.cee`, `vfstest_dev.cee`, `vfstest_wb.cee` | page cache and write-back behaviour (`docs/kernel-services/vfs/testing.md`) |
+| `vfs-mount-id`, `vfs-mount-pin` | `kernel-services/vfs/vfstest_mount.cee` | mount ids and the pass hold behind `/dev/fsctl` |
 
 ## User mode and shell
 

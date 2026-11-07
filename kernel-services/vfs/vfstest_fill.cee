@@ -1,0 +1,434 @@
+// vfstest_fill.cee - The VFS's self-tests of reads that fill and writers bounded by the dirty count, in CeeSafe:
+// roadmap 2.0 SA7. file-read-filled, pagecache-dirty-writer and aio-pwrite-dirty. Each is an exported function the
+// selftest table names, failing with the condition that did not hold and its line here. aio-pwrite-dirty needs the
+// ring's test body, which only a self-test build has: vfstest_floor.c's stub stands in for it elsewhere.
+
+@header("kernel/aio.h", "kernel/cosmofs.h", "kernel/kmalloc.h", "kernel/log.h", "kernel/mutex.h", "kernel/object.h",
+    "kernel/pagecache.h", "kernel/ramblk.h", "kernel/string.h", "kernel/vfs.h")
+extern "C" {
+    struct mount {
+        cache_dirty: AtomicU64;
+    }
+    struct vnode {
+        mnt: *mut mount;
+        @cname("type") kind: u32;
+    }
+    struct file {
+        obj: kobject;
+        vn: *mut vnode;
+        lock: mutex;
+    }
+    struct kobject_io_type {
+        read_filled: extern "C" fn(*mut kobject, *mut void, usize, usize,
+            extern "C" fn(*mut void, *void, usize) -> i32, *mut void) -> i64;
+    }
+    struct blkdev;
+
+    fn memcmp(a: *void, b: *void, n: usize) -> i32;
+    fn memcpy(dst: *mut void, src: *void, n: usize) -> *mut void;
+    fn memset(p: *mut void, c: i32, n: usize) -> *mut void;
+    fn mutex_is_locked(m: *mut mutex) -> bool;
+    fn vfs_open(start: *mut vnode, path: *CChar, flags: u32, mode: u32, out: *mut *mut file) -> i32;
+    fn vfs_lookup(start: *mut vnode, path: *CChar, out: *mut *mut vnode) -> i32;
+    fn vfs_mkdir(start: *mut vnode, path: *CChar, mode: u32) -> i32;
+    fn vfs_unlink(start: *mut vnode, path: *CChar) -> i32;
+    fn vfs_rmdir(start: *mut vnode, path: *CChar) -> i32;
+    fn vfs_mount(path: *CChar, fsname: *CChar, bdev: *mut blkdev, flags: u32) -> i32;
+    fn vfs_umount2(path: *CChar, flags: u32) -> i32;
+    fn vnode_put(vn: *mut vnode);
+    fn file_write(f: *mut file, buf: *void, len: usize) -> i64;
+    fn file_pread(f: *mut file, buf: *mut void, len: usize, off: u64) -> i64;
+    fn file_seek(f: *mut file, off: i64, whence: i32) -> i64;
+    fn file_sync(f: *mut file) -> i32;
+    fn kobject_io_of(obj: *kobject) -> *kobject_io_type;
+    fn pagecache_limit() -> u64;
+    fn pagecache_set_limit(pages: u64);
+    fn ramblk_create(nblocks: u64) -> *mut blkdev;
+    fn ramblk_destroy(bd: *mut blkdev);
+    fn cosmofs_format(bd: *mut blkdev) -> i32;
+    fn cosmofs_test_set_writeback(mnt: *mut mount, on: bool);
+    fn aio_test_pwrite(f: *mut file, buf: *void, len: usize, off: u64) -> i64;
+}
+
+// errno.h, syscall.h, vfs.h, page.h and kmalloc.h, which vfstest_floor.c checks.
+const EEXIST: i32 = 17;
+const EFAULT: i32 = 14;
+const EOPNOTSUPP: i32 = 95;
+const O_RDONLY: u32 = 0x0000;
+const O_RDWR: u32 = 0x0002;
+const O_CREAT: u32 = 0x0040;
+const O_TRUNC: u32 = 0x0200;
+const SEEK_SET: i32 = 0;
+const SEEK_CUR: i32 = 1;
+const VNODE_REG: u32 = 1;
+const VFS_UMOUNT_FORCE: u32 = 1;
+const PAGE: usize = 4096;
+const MODE_DIR: u32 = 0x1ED; // 0755
+const MODE_FILE: u32 = 0x1A4; // 0644
+const MODE_OWN: u32 = 0x180; // 0600
+
+/// Safety: `reason` is writable; `why` ends in a zero byte.
+unsafe fn failed(reason: *mut *CChar, why: StringView) -> bool {
+    reason.write(why.ptr as *CChar);
+    return false;
+}
+
+/// A reason too long for one line, in two pieces, the second ending in a zero byte.
+/// Safety: `reason` is writable; the text stays valid until the next failure.
+unsafe fn failed2(reason: *mut *CChar, a: StringView, b: StringView) -> bool {
+    let buf = SliceMut.fromRaw(borrow mut REASON as *mut [u8; 256] as *mut u8, 256);
+    var line = TextWriter.create(buf);
+    line.text(a);
+    line.text(b);
+    reason.write(line.cText());
+    return false;
+}
+
+static mut REASON: [u8; 256] = [0; 256];
+
+/// A literal's C string: the literal ends in a zero byte.
+fn c(s: StringView) -> *CChar => s.ptr as *CChar;
+
+/// Safety: `f` is an open file.
+unsafe fn filePut(f: *mut file) {
+    kobject_put(f as *mut kobject);
+}
+
+/// Safety: `p` ends in a zero byte; `out` is writable.
+unsafe fn open(p: StringView, flags: u32, mode: u32, out: *mut *mut file) -> i32 =>
+    vfs_open(0 as *mut vnode, c(p), flags, mode, out);
+
+// kobject_io_type.read_filled (roadmap 1.1 P3, #413's review): a large read of a regular file is one read across its
+// pieces -- the open file's position lock is held while each piece is handed over, so no seek or second reader on the
+// same open file lands between two pieces -- and the position moves by what was accepted, so a fault after a piece
+// returns that piece and the next read starts after it. /dev/zero fills too (without a position); /dev/null does not,
+// and is read one call at a time.
+
+/// What a fill hands its pieces to.
+struct FilledCtx {
+    f: *mut file;
+    dst: *mut u8;
+    done: usize;
+    pieces: u32;
+    failAt: u32;
+    unlocked: bool; // a piece was handed over without the position lock
+}
+
+fn filled(f: *mut file, dst: *mut u8, failAt: u32) -> FilledCtx =>
+    FilledCtx { f: f, dst: dst, done: 0, pieces: 0, failAt: failAt, unlocked: false };
+
+/// Safety: `ctx` is a FilledCtx whose `dst` has room for every piece; `piece` holds `n` bytes.
+@callback
+unsafe fn filledPut(ctx: *mut void, piece: *void, n: usize) -> i32 {
+    let cx = Ptr.toBorrowMut(ctx as *mut FilledCtx);
+    let file = Ptr.toBorrowMut(cx.f);
+    if (Ptr.toBorrow(file.vn as *vnode).kind == VNODE_REG && !mutex_is_locked(borrow mut file.lock as *mut mutex)) {
+        cx.unlocked = true;
+    }
+    cx.pieces += 1;
+    if (cx.pieces == cx.failAt) {
+        return -EFAULT;
+    }
+    let _ = memcpy(cx.dst.add(cx.done) as *mut void, piece, n);
+    cx.done += n;
+    return 0;
+}
+
+const SZ: usize = 5 * 4096 + 100;
+const CAP: usize = 2 * 4096;
+
+static mut F_SRC: [u8; 20580] = [0; 20580];
+static mut F_DST: [u8; 24576] = [0; 24576]; // SZ, or the 3 * CAP /dev/zero fills
+static mut F_BOUNCE: [u8; 8192] = [0; 8192];
+
+/// Safety: `f` is an open file whose io type fills; the rest as read_filled takes them.
+unsafe fn fill(io: *kobject_io_type, f: *mut file, len: usize, cx: borrow mut FilledCtx) -> i64 =>
+    Ptr.toBorrow(io).read_filled(f as *mut kobject, borrow mut F_BOUNCE as *mut [u8; 8192] as *mut void, CAP, len,
+        filledPut, cx as *mut FilledCtx as *mut void);
+
+/// Safety: `reason` is writable; runs at boot, alone, with /dev/zero and /dev/null made.
+@export("selftest_file_read_filled")
+unsafe fn selftestFileReadFilled(reason: *mut *CChar) -> bool {
+    let src = borrow mut F_SRC as *mut [u8; 20580] as *mut u8;
+    let dst = borrow mut F_DST as *mut [u8; 24576] as *mut u8;
+    for (i in 0..SZ) {
+        let b = Ptr.toBorrowMut(src.add(i));
+        *b = truncate<u8>(i * 7 + i / PAGE);
+    }
+    var f = 0 as *mut file;
+    if (!(open("/tmp/filled-test\0", O_RDWR | O_CREAT | O_TRUNC, MODE_OWN, borrow mut f as *mut *mut file) == 0)) {
+        return failed(reason, "check failed: vfs_open(NULL, \"/tmp/filled-test\", ..., 0600, &f) == 0 at line 160\0");
+    }
+    if (!(file_write(f, src as *void, SZ) == truncate<i64>(SZ))) {
+        return failed(reason, "check failed: file_write(f, src, SZ) == SZ at line 163\0");
+    }
+    let io = kobject_io_of(f as *kobject);
+    if (!(!io.isNull() && !Ptr.toBorrow(io).read_filled.isNull())) {
+        return failed(reason, "check failed: io != NULL && io->read_filled != NULL at line 167\0");
+    }
+
+    // From offset 100 to the end, in pieces of two pages: 8192, 8192, then 4096 at the end of file; contiguous, each
+    // under the lock.
+    if (!(file_seek(f, 100, SEEK_SET) == 100)) {
+        return failed(reason, "check failed: file_seek(f, 100, COSMO_SEEK_SET) == 100 at line 173\0");
+    }
+    var cx = filled(f, dst, 0);
+    if (!(fill(io, f, SZ, mut cx) == truncate<i64>(SZ - 100))) {
+        return failed2(reason, "check failed: io->read_filled(&f->obj, bounce, CAP, SZ, filled_put, &c) == SZ - 100 ",
+            "at line 178\0");
+    }
+    if (!(cx.pieces == 3 && !cx.unlocked && cx.done == SZ - 100)) {
+        return failed(reason, "check failed: c.pieces == 3 && !c.unlocked && c.done == SZ - 100 at line 181\0");
+    }
+    if (!(memcmp(dst as *void, src.add(100) as *void, SZ - 100) == 0)) {
+        return failed(reason, "check failed: memcmp(dst, src + 100, SZ - 100) == 0 at line 184\0");
+    }
+    if (!(file_seek(f, 0, SEEK_CUR) == truncate<i64>(SZ))) {
+        return failed(reason, "check failed: file_seek(f, 0, COSMO_SEEK_CUR) == SZ at line 187\0");
+    }
+    if (!(!mutex_is_locked(borrow mut Ptr.toBorrowMut(f).lock as *mut mutex))) {
+        return failed(reason, "check failed: !mutex_is_locked(&f->lock) at line 190\0");
+    }
+
+    // The second piece faults: the first piece's bytes, the position after them.
+    if (!(file_seek(f, 0, SEEK_SET) == 0)) {
+        return failed(reason, "check failed: file_seek(f, 0, COSMO_SEEK_SET) == 0 at line 195\0");
+    }
+    var c2 = filled(f, dst, 2);
+    if (!(fill(io, f, SZ, mut c2) == truncate<i64>(CAP))) {
+        return failed2(reason, "check failed: io->read_filled(&f->obj, bounce, CAP, SZ, filled_put, &c) == CAP at ",
+            "line 0\0");
+    }
+    if (!(file_seek(f, 0, SEEK_CUR) == truncate<i64>(CAP))) {
+        return failed(reason, "check failed: file_seek(f, 0, COSMO_SEEK_CUR) == CAP at line 203\0");
+    }
+    // The first piece faults: -EFAULT, the position where it was.
+    var c3 = filled(f, dst, 1);
+    if (!(fill(io, f, SZ, mut c3) == -EFAULT as i64)) {
+        return failed2(reason, "check failed: io->read_filled(&f->obj, bounce, CAP, SZ, filled_put, &c) == -EFAULT at ",
+            "line 0\0");
+    }
+    if (!(file_seek(f, 0, SEEK_CUR) == truncate<i64>(CAP))) {
+        return failed(reason, "check failed: file_seek(f, 0, COSMO_SEEK_CUR) == CAP at line 212\0");
+    }
+    filePut(f);
+    if (!(vfs_unlink(0 as *mut vnode, c("/tmp/filled-test\0")) == 0)) {
+        return failed(reason, "check failed: vfs_unlink(NULL, \"/tmp/filled-test\") == 0 at line 216\0");
+    }
+
+    // /dev/zero: three whole pieces of zeros; /dev/null: one call at a time.
+    if (!(open("/dev/zero\0", O_RDONLY, 0, borrow mut f as *mut *mut file) == 0)) {
+        return failed(reason, "check failed: vfs_open(NULL, \"/dev/zero\", COSMO_O_RDONLY, 0, &f) == 0 at line 221\0");
+    }
+    let _ = memset(dst as *mut void, 0xff, 24576);
+    var c4 = filled(f, dst, 0);
+    var z = fill(io, f, 3 * CAP, mut c4);
+    var zero = true;
+    for (i in 0..3 * CAP) {
+        zero = zero && *Ptr.toBorrow(dst.add(i) as *u8) == 0;
+    }
+    filePut(f);
+    if (!(z == truncate<i64>(3 * CAP) && c4.pieces == 3 && zero)) {
+        return failed(reason, "check failed: z == 3 * CAP && c.pieces == 3 && zero at line 232\0");
+    }
+    if (!(open("/dev/null\0", O_RDONLY, 0, borrow mut f as *mut *mut file) == 0)) {
+        return failed(reason, "check failed: vfs_open(NULL, \"/dev/null\", COSMO_O_RDONLY, 0, &f) == 0 at line 235\0");
+    }
+    var c5 = filled(f, dst, 0);
+    z = fill(io, f, 3 * CAP, mut c5);
+    filePut(f);
+    if (!(z == -EOPNOTSUPP as i64 && c5.pieces == 0)) {
+        return failed(reason, "check failed: z == -EOPNOTSUPP && c.pieces == 0 at line 241\0");
+    }
+    return true;
+}
+
+// MEM-9, V40, the failing test: a writer alone with its dirty pages. Write-back is off, so nothing but the writer can
+// clean a page, and the cache limit is lowered to DW_LIMIT pages; the bound V40 states is half of it. One writer of
+// eight times the bound may never have more than the bound and one write's pages dirty on its mount. Without a bound
+// the mount's count is every page written (1024 here); test-fill's writer stage on 75e1e15f, a 256 MiB guest, was that
+// count meeting memory (`sh: cat: Out of memory`, 219 MiB of the 512 written), which a fast enough write-back thread
+// can hide.
+const DW_LIMIT: u64 = 256;
+const DW_WRITES: u32 = 64; // of 64 KiB: 1024 pages
+
+/// MEM-9, V40, the review's case: one COSMO_AIO_PWRITE of twice the dirty bound (the cache limit lowered to DW_LIMIT,
+/// so 128 pages, and write-back off, as above), through the ring's own body (aio_test_pwrite). The request has no size
+/// cap, and its loop holds the open file's lock, under which the throttle may not sleep; a writer throttled once
+/// before the loop leaves every page of the request dirty (256 here). Bounded, the mount never holds more than the
+/// bound and one piece's page.
+const AW_BYTES: usize = 1 << 20; // 256 pages: twice the bound
+
+/// Safety: `p` holds `len` bytes.
+unsafe fn dwNoise(p: *mut u8, len: usize, seed: u32) {
+    var x = seed.wrappingMul(2654435761).wrappingAdd(1);
+    for (i in 0..len) {
+        x = x ^ x.wrappingShl(13);
+        x = x ^ (x >> 17);
+        x = x ^ x.wrappingShl(5);
+        let b = Ptr.toBorrowMut(p.add(i));
+        *b = truncate<u8>(x);
+    }
+}
+
+/// What a dirty writer holds, released whatever happened.
+struct DwState {
+    bd: *mut blkdev;
+    buf: *mut u8;
+    back: *mut u8;
+    f: *mut file;
+    m: *mut mount;
+}
+
+/// The dirty writer's body, by file_write (pagecache-dirty-writer) or by one ring request (aio-pwrite-dirty), at
+/// `dir`; the caller lets go of everything in `st`.
+/// Safety: `reason` is writable; `dir` and `file` end in a zero byte; `st` starts with the disk and buffers, or nulls.
+unsafe fn dirtyWriter(reason: *mut *CChar, st: borrow mut DwState, dir: StringView, path: StringView, aio: bool)
+    -> bool {
+    if (!(!st.bd.isNull() && !st.buf.isNull() && !st.back.isNull())) {
+        return failed(reason, "check failed: bd != NULL && buf != NULL && back != NULL at line 289\0");
+    }
+    if (!(cosmofs_format(st.bd) == 0)) {
+        return failed(reason, "check failed: cosmofs_format(bd) == 0 at line 292\0");
+    }
+    let mrc = vfs_mkdir(0 as *mut vnode, c(dir), MODE_DIR);
+    if (!(mrc == 0 || mrc == -EEXIST)) {
+        return failed(reason, "check failed: mrc == 0 || mrc == -EEXIST at line 296\0");
+    }
+    if (!(vfs_mount(c(dir), c("cosmofs\0"), st.bd, 0) == 0)) {
+        return failed(reason, "check failed: vfs_mount(dir, \"cosmofs\", bd, 0) == 0 at line 299\0");
+    }
+    var root = 0 as *mut vnode;
+    if (!(vfs_lookup(0 as *mut vnode, c(dir), borrow mut root as *mut *mut vnode) == 0)) {
+        return failed(reason, "check failed: vfs_lookup(NULL, dir, &root) == 0 at line 303\0");
+    }
+    st.m = Ptr.toBorrow(root as *vnode).mnt;
+    vnode_put(root);
+    cosmofs_test_set_writeback(st.m, false);
+    pagecache_set_limit(DW_LIMIT);
+    let bound = DW_LIMIT / 2;
+
+    if (!(open(path, O_RDWR | O_CREAT, MODE_FILE, borrow mut st.f as *mut *mut file) == 0)) {
+        return failed2(reason, "check failed: vfs_open(NULL, path, COSMO_O_RDWR | COSMO_O_CREAT, 0644, &f) == 0 at ",
+            "line 0\0");
+    }
+    let dirty = borrow Ptr.toBorrow(st.m as *mount).cache_dirty;
+    var buffer: [u8; 192] = [0; 192];
+    var line = TextWriter.create(mut buffer[..]);
+    if (!aio) {
+        var peak: u64 = 0;
+        for (i in 0..DW_WRITES) {
+            dwNoise(st.buf, 65536, i);
+            if (!(file_write(st.f, st.buf as *void, 65536) == 65536)) {
+                return failed(reason, "check failed: file_write(f, buf, 65536) == 65536 at line 323\0");
+            }
+            let d = dirty.loadWith(LoadOrdering.Relaxed);
+            if (d > peak) {
+                peak = d;
+            }
+        }
+        line.text("selftest: pagecache-dirty-writer: ");
+        line.decimal((DW_WRITES * 16) as u64);
+        line.text(" pages written with write-back off, at most ");
+        line.decimal(peak);
+        line.text(" dirty on the mount against a bound of ");
+        line.decimal(bound);
+        KernelLog.send(LogLevel.Info, line);
+        if (!(peak <= bound + 16)) { // the bound and one write's pages
+            return failed(reason, "check failed: peak <= bound + 16 at line 338\0");
+        }
+        if (!(file_sync(st.f) == 0)) {
+            return failed(reason, "check failed: file_sync(f) == 0 at line 341\0");
+        }
+        var i: u32 = 0;
+        while (i < DW_WRITES) {
+            dwNoise(st.buf, 65536, i);
+            if (!(file_pread(st.f, st.back as *mut void, 65536, i as u64 * 65536) == 65536)) {
+                return failed2(reason, "check failed: file_pread(f, back, 65536, (uint64_t)i * 65536) == 65536 at ",
+                    "line 0\0");
+            }
+            if (!(memcmp(st.back as *void, st.buf as *void, 65536) == 0)) {
+                return failed(reason, "check failed: memcmp(back, buf, 65536) == 0 at line 351\0");
+            }
+            i += 21;
+        }
+        return true;
+    }
+    var piece: u32 = 0;
+    while (piece < 16) { // AW_BYTES / 65536
+        dwNoise(st.buf.add(piece as usize * 65536), 65536, piece);
+        piece += 1;
+    }
+    if (!(aio_test_pwrite(st.f, st.buf as *void, AW_BYTES, 0) == truncate<i64>(AW_BYTES))) {
+        return failed(reason, "check failed: aio_test_pwrite(f, buf, AW_BYTES, 0) == (int64_t)AW_BYTES at line 363\0");
+    }
+    // Write-back is off: what the request left dirty is still dirty.
+    let left = dirty.loadWith(LoadOrdering.Relaxed);
+    line.text("selftest: aio-pwrite-dirty: one PWRITE of ");
+    line.decimal((AW_BYTES / 4096) as u64);
+    line.text(" pages with write-back off left ");
+    line.decimal(left);
+    line.text(" dirty on the mount against a bound of ");
+    line.decimal(bound);
+    KernelLog.send(LogLevel.Info, line);
+    if (!(left <= bound + 16)) { // the bound, as pagecache-dirty-writer's
+        return failed(reason, "check failed: left <= bound + 16 at line 375\0");
+    }
+    if (!(file_sync(st.f) == 0)) {
+        return failed(reason, "check failed: file_sync(f) == 0 at line 378\0");
+    }
+    var k: usize = 0;
+    while (k < AW_BYTES / 65536) {
+        if (!(file_pread(st.f, st.back as *mut void, 65536, k as u64 * 65536) == 65536)) {
+            return failed2(reason, "check failed: file_pread(f, back, 65536, (uint64_t)i * 65536) == 65536 at line ",
+                "383\0");
+        }
+        if (!(memcmp(st.back as *void, st.buf.add(k * 65536) as *void, 65536) == 0)) {
+            return failed(reason, "check failed: memcmp(back, buf + (size_t)i * 65536, 65536) == 0 at line 387\0");
+        }
+        k += 5;
+    }
+    return true;
+}
+
+/// Runs the dirty writer and lets go of what it held.
+/// Safety: `reason` is writable; runs at boot, alone; `dir` and `path` end in a zero byte.
+unsafe fn dirtyRun(reason: *mut *CChar, dir: StringView, path: StringView, aio: bool, bytes: usize) -> bool {
+    var st = DwState {
+        bd: ramblk_create(4096),
+        buf: kmalloc(bytes, 0) as *mut u8,
+        back: kmalloc(65536, 0) as *mut u8,
+        f: 0 as *mut file,
+        m: 0 as *mut mount,
+    };
+    let saved = pagecache_limit();
+    let ok = dirtyWriter(reason, mut st, dir, path, aio);
+    pagecache_set_limit(saved);
+    if (!st.f.isNull()) {
+        filePut(st.f);
+    }
+    if (!st.m.isNull()) {
+        cosmofs_test_set_writeback(st.m, true);
+        if (vfs_umount2(c(dir), 0) != 0) {
+            let _ = vfs_umount2(c(dir), VFS_UMOUNT_FORCE);
+        }
+    }
+    let _ = vfs_rmdir(0 as *mut vnode, c(dir));
+    if (!st.bd.isNull()) {
+        ramblk_destroy(st.bd);
+    }
+    kfree(st.buf as *mut void);
+    kfree(st.back as *mut void);
+    return ok;
+}
+
+/// Safety: `reason` is writable; runs at boot, alone.
+@export("selftest_pagecache_dirty_writer")
+unsafe fn selftestPagecacheDirtyWriter(reason: *mut *CChar) -> bool =>
+    dirtyRun(reason, "/mnt/dw\0", "/mnt/dw/w\0", false, 65536);
+
+/// Safety: `reason` is writable; runs at boot, alone, in a self-test build.
+@cfg("CONFIG_SELFTEST")
+@export("selftest_aio_pwrite_dirty")
+unsafe fn selftestAioPwriteDirty(reason: *mut *CChar) -> bool =>
+    dirtyRun(reason, "/mnt/aw\0", "/mnt/aw/w\0", true, AW_BYTES);

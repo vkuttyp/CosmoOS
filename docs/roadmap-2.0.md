@@ -1650,6 +1650,23 @@ file's state round a `struct mutex`, the operation table and the
 spinlock /proc/mounts is rendered under; the mount table's lock and the
 root mount come from `mountns_floor.c`.
 
+`vfstest_*.cee`, the VFS's 35 self-tests, moved group by group out of
+`vfstest.c` (now gone) as the cosmofs ones were, each proven by both
+boot tests rather than a digest: `vfstest_base.cee` (crc32c, the page
+cache, symlinks, ramfs, fsync, namespaces, concurrency),
+`vfstest_mount.cee` (budgets, limits, the last put, mount ids and
+pins), `vfstest_dev.cee` (/dev/fsctl, character devices, the bounce),
+`vfstest_wb.cee` (write-back errors, the dirty bound, the benches,
+pinned frames), `vfstest_walk.cee` (renames, named lookups, unmounts
+from a start) and `vfstest_fill.cee` (filled reads, dirty-bounded
+writers). Every check fails with its condition and its line in the
+`.cee`. `vfs-put-race` now stops its racers before it returns on a
+failed check, where the C left them spinning on its frame.
+`vfstest_floor.c` keeps the test devices' tables and completions, the
+fault-injection seams and the release builds' stand-ins for the tests
+that need injection or the AIO test body, and asserts the constants and
+stack-slot sizes.
+
 Size: about 4.5x.
 
 ### SA8 The Linux personality and the system-call layer

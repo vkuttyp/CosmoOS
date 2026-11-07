@@ -276,7 +276,7 @@ identical before/after assembly for the search helpers and scratch-size
 function with counters disabled. These checks establish work counts, not
 a wall-clock maximum, complete acquisition cost, or NMI safety.
 
-## VFS concurrency (`kernel-services/vfs/vfstest.c`, `vfs-concurrency`)
+## VFS concurrency (`kernel-services/vfs/vfstest_base.cee`, `vfs-concurrency`)
 
 Two threads pinned to CPU 0 and CPU 1 (or both on CPU 0 with one CPU):
 

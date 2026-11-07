@@ -3,7 +3,7 @@
 The VFS (`vfs.c`: `fs_type` registry, mounts, path walk, vnodes, files,
 the namespace operations), the per-vnode page cache (`pagecache.cee`),
 ramfs (`ramfs.cee`: the root filesystem, `/boot` populated from the boot
-archive, `/tmp`, `/mnt`, `/dev`) and their self-tests (`vfstest.c`:
+archive, `/tmp`, `/mnt`, `/dev`) and their self-tests (`vfstest_*.cee`:
 `crc32c`, `pagecache`, `vfs-ramfs`). Public headers:
 `kernel/include/kernel/{vfs,pagecache}.h`. The VFS knows filesystems only
 through `struct fs_type` and `struct vnode_ops`. Docs:

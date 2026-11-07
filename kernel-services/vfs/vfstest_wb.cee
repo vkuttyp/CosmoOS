@@ -1,0 +1,980 @@
+// vfstest_wb.cee - The VFS's self-tests of write-back on cosmofs, in CeeSafe: roadmap 2.0 SA7. wb-error-fsync,
+// wb-error-once, wb-error-close and wb-error-lost: a failure recorded, reported once to each open file, counted when
+// the data is lost. They need fault injection: in a build without it vfstest_floor.c's stubs stand in for them, and
+// the injection itself goes through vfstest_floor.c, which compiles either way. Then pagecache-dirty-bound,
+// read-bench, write-bench and pagecache-pinned, which share the RAM disk.
+//
+// cosmofs on a RAM block device, which completes every bio in its submitter's context, so FI_BLK_COMPLETE scoped to
+// this thread refuses exactly the next `budget` write-backs this thread issues.
+
+@header("kernel/cosmofs.h", "kernel/faultinject.h", "kernel/handle.h", "kernel/kmalloc.h", "kernel/log.h",
+    "kernel/page.h", "kernel/pagecache.h",
+    "kernel/ramblk.h", "kernel/string.h", "kernel/vfs.h")
+extern "C" {
+    struct pagecache {
+        nr_dirty: u32;
+    }
+    struct mount;
+    struct vnode {
+        mnt: *mut mount;
+        pc: pagecache;
+    }
+    struct page {
+        flags: u32;
+        refcount: u32;
+    }
+    struct file {
+        obj: kobject;
+        vn: *mut vnode;
+    }
+    struct pagecache_stats {
+        pages: u64;
+        reclaimed: u64;
+        wb_errors: u64;
+        dropped_dirty: u64;
+        pinned_skips: u64;
+        throttled: u64;
+    }
+    struct handle_table;
+    struct blkdev;
+    struct thread;
+
+    fn memcmp(a: *void, b: *void, n: usize) -> i32;
+    fn vfs_open(start: *mut vnode, path: *CChar, flags: u32, mode: u32, out: *mut *mut file) -> i32;
+    fn vfs_mkdir(start: *mut vnode, path: *CChar, mode: u32) -> i32;
+    fn vfs_rmdir(start: *mut vnode, path: *CChar) -> i32;
+    fn vfs_mount(path: *CChar, fsname: *CChar, bdev: *mut blkdev, flags: u32) -> i32;
+    fn vfs_umount2(path: *CChar, flags: u32) -> i32;
+    fn file_read(f: *mut file, buf: *mut void, len: usize) -> i64;
+    fn file_write(f: *mut file, buf: *void, len: usize) -> i64;
+    fn file_sync(f: *mut file) -> i32;
+    fn pagecache_get_stats(out: *mut pagecache_stats);
+    fn ramblk_create(nblocks: u64) -> *mut blkdev;
+    fn ramblk_destroy(bd: *mut blkdev);
+    fn cosmofs_format(bd: *mut blkdev) -> i32;
+    fn handle_table_init(t: *mut handle_table);
+    fn handle_table_destroy(t: *mut handle_table);
+    fn handle_install(t: *mut handle_table, obj: *mut kobject, rights: u32) -> i32;
+    fn handle_close(t: *mut handle_table, h: i32) -> i32;
+    fn memset(p: *mut void, c: i32, n: usize) -> *mut void;
+    fn vfs_lookup(start: *mut vnode, path: *CChar, out: *mut *mut vnode) -> i32;
+    fn vfs_unlink(start: *mut vnode, path: *CChar) -> i32;
+    fn vnode_put(vn: *mut vnode);
+    fn file_pread(f: *mut file, buf: *mut void, len: usize, off: u64) -> i64;
+    fn file_pwrite_held(f: *mut file, buf: *void, len: usize, off: u64) -> i64;
+    fn file_seek(f: *mut file, off: i64, whence: i32) -> i64;
+    fn pagecache_limit() -> u64;
+    fn pagecache_set_limit(pages: u64);
+    fn pagecache_dirty_pages() -> u64;
+    fn pagecache_lock(vn: *mut vnode);
+    fn pagecache_unlock(vn: *mut vnode);
+    fn pagecache_fault_page(vn: *mut vnode, index: u64, dirty: bool, out: *mut *mut page) -> i32;
+    fn pagecache_floor_virt(p: *page) -> *mut u8;
+    fn pmm_page_put(p: *mut page);
+    fn cosmofs_test_set_writeback(mnt: *mut mount, on: bool);
+    fn clock_now_ns() -> u64;
+    fn clock_since_ns(stamp: u64) -> u64;
+    fn thread_create(entry: extern "C" fn(*mut void), arg: *mut void, name: *CChar, priority: i32) -> *mut thread;
+    fn thread_join(t: *mut thread) -> i32;
+    fn thread_sleep_ns(ns: u64);
+
+    // vfstest_floor.c: FI_BLK_COMPLETE refusing this thread's next `count` write-backs, and its end with the hits.
+    fn vfstest_floor_inject_blk(count: u32);
+    fn vfstest_floor_inject_end() -> u64;
+}
+
+// errno.h, syscall.h, vfs.h, handle.h and kmalloc.h, which vfstest_floor.c checks.
+const ENOMEM: i32 = 12;
+const EIO: i32 = 5;
+const EBADF: i32 = 9;
+const EEXIST: i32 = 17;
+const O_RDONLY: u32 = 0x0000;
+const O_WRONLY: u32 = 0x0001;
+const O_RDWR: u32 = 0x0002;
+const O_CREAT: u32 = 0x0040;
+const VFS_UMOUNT_FORCE: u32 = 1;
+const HANDLE_RIGHT_OWNER: u32 = 0x1C;
+const KMEM_ZERO: u32 = 1;
+const PAGE: usize = 4096;
+const PAGE_I: i64 = 4096;
+const PAGE_U: u64 = 4096;
+const EFBIG: i32 = 27;
+const O_TRUNC: u32 = 0x0200;
+const SEEK_SET: i32 = 0;
+const PG_PAGECACHE: u32 = 128;
+const SCHED_PRIO_DEFAULT: i32 = 32;
+const MS: u64 = 1000000;
+const MODE_DIR: u32 = 0x1ED; // 0755
+const MODE_FILE: u32 = 0x1A4; // 0644
+
+/// Safety: `reason` is writable; `why` ends in a zero byte.
+unsafe fn failed(reason: *mut *CChar, why: StringView) -> bool {
+    reason.write(why.ptr as *CChar);
+    return false;
+}
+
+/// A reason too long for one line, in two pieces, the second ending in a zero byte.
+/// Safety: `reason` is writable; the text stays valid until the next failure.
+unsafe fn failed2(reason: *mut *CChar, a: StringView, b: StringView) -> bool {
+    let buf = SliceMut.fromRaw(borrow mut REASON as *mut [u8; 256] as *mut u8, 256);
+    var line = TextWriter.create(buf);
+    line.text(a);
+    line.text(b);
+    reason.write(line.cText());
+    return false;
+}
+
+static mut REASON: [u8; 256] = [0; 256];
+
+/// A literal's C string: the literal ends in a zero byte.
+fn c(s: StringView) -> *CChar => s.ptr as *CChar;
+
+/// Safety: `f` is an open file.
+unsafe fn filePut(f: *mut file) {
+    kobject_put(f as *mut kobject);
+}
+
+/// Safety: `p` ends in a zero byte; `out` is writable.
+unsafe fn open(p: StringView, flags: u32, mode: u32, out: *mut *mut file) -> i32 =>
+    vfs_open(0 as *mut vnode, c(p), flags, mode, out);
+
+/// Safety: `f` is an open file.
+unsafe fn dirty(f: *mut file) -> u32 => Ptr.toBorrow(Ptr.toBorrow(f as *file).vn as *vnode).pc.nr_dirty;
+
+/// Safety: `s` is writable.
+unsafe fn stats(s: borrow mut [u64; 11]) -> borrow(static) pagecache_stats {
+    let p = s as *mut [u64; 11] as *mut pagecache_stats;
+    pagecache_get_stats(p);
+    return Ptr.toBorrow(p as *pagecache_stats);
+}
+
+/// A fresh cosmofs on a RAM disk at /mnt/wb.
+/// Safety: `out` is writable; runs at boot, alone.
+unsafe fn wbSetup(out: *mut *mut blkdev) -> i32 {
+    // A test that failed mid-way left its mount: take it down first, so one failure does not fail every test after it
+    // at setup.
+    let _ = vfs_umount2(c("/mnt/wb\0"), VFS_UMOUNT_FORCE);
+    let bd = ramblk_create(256);
+    if (bd.isNull()) {
+        return -ENOMEM;
+    }
+    var rc = cosmofs_format(bd);
+    if (rc == 0) {
+        rc = vfs_mkdir(0 as *mut vnode, c("/mnt/wb\0"), MODE_DIR);
+        if (rc == -EEXIST) {
+            rc = 0;
+        }
+    }
+    if (rc == 0) {
+        rc = vfs_mount(c("/mnt/wb\0"), c("cosmofs\0"), bd, 0);
+    }
+    if (rc != 0) {
+        ramblk_destroy(bd);
+        return rc;
+    }
+    let slot = Ptr.toBorrowMut(out);
+    *slot = bd;
+    return 0;
+}
+
+/// Safety: `bd` is wbSetup's disk.
+unsafe fn wbTeardown(bd: *mut blkdev) {
+    let _ = vfs_umount2(c("/mnt/wb\0"), 0);
+    let _ = vfs_rmdir(0 as *mut vnode, c("/mnt/wb\0"));
+    ramblk_destroy(bd);
+}
+
+/// Safety: as wbSetup.
+unsafe fn remount(bd: *mut blkdev) -> bool =>
+    vfs_umount2(c("/mnt/wb\0"), 0) == 0 && vfs_mount(c("/mnt/wb\0"), c("cosmofs\0"), bd, 0) == 0;
+
+/// A page of a known pattern, `k` distinguishing files.
+/// Safety: `page` holds a page.
+unsafe fn wbFill(page: *mut u8, k: u32) {
+    for (i in 0..PAGE) {
+        let b = Ptr.toBorrowMut(page.add(i));
+        *b = truncate<u8>(i * 3 + k as usize);
+    }
+}
+
+/// Safety: `path` ends in a zero byte; `page` holds a page.
+unsafe fn wbReadsBack(path: StringView, page: *u8) -> bool {
+    var f = 0 as *mut file;
+    if (open(path, O_RDONLY, 0, borrow mut f as *mut *mut file) != 0) {
+        return false;
+    }
+    let buf = kmalloc(PAGE, 0) as *mut u8;
+    let ok = !buf.isNull() && file_read(f, buf as *mut void, PAGE) == PAGE_I &&
+        memcmp(buf as *void, page as *void, PAGE) == 0;
+    kfree(buf as *mut void);
+    filePut(f);
+    return ok;
+}
+
+/// Safety: `reason` is writable; runs at boot, alone, with fault injection.
+@cfg("CONFIG_FAULTINJECT")
+@export("selftest_wb_error_fsync")
+unsafe fn selftestWbErrorFsync(reason: *mut *CChar) -> bool {
+    var bd = 0 as *mut blkdev;
+    if (!(wbSetup(borrow mut bd as *mut *mut blkdev) == 0)) {
+        return failed(reason, "check failed: wb_setup(&bd) == 0 at line 220\0");
+    }
+    let data = kmalloc(3 * PAGE, 0) as *mut u8;
+    if (!(!data.isNull())) {
+        return failed(reason, "check failed: data != NULL at line 224\0");
+    }
+    for (k in 0..3 as u32) {
+        wbFill(data.add(k as usize * PAGE), k);
+    }
+    var s0: [u64; 11] = [0; 11];
+    var s1: [u64; 11] = [0; 11];
+    let p0 = stats(mut s0);
+
+    var f = 0 as *mut file;
+    if (!(open("/mnt/wb/f\0", O_WRONLY | O_CREAT, MODE_FILE, borrow mut f as *mut *mut file) == 0)) {
+        return failed(reason, "check failed: vfs_open(NULL, \"/mnt/wb/f\", ..., 0644, &f) == 0 at line 235\0");
+    }
+    if (!(file_write(f, data as *void, 3 * PAGE) == 3 * PAGE_I)) {
+        return failed2(reason, "check failed: file_write(f, data, 3 * PAGE_SIZE) == 3 * (int64_t)PAGE_SIZE at line ",
+            "237\0");
+    }
+    if (!(dirty(f) == 3)) {
+        return failed(reason, "check failed: f->vn->pc.nr_dirty == 3 at line 242\0");
+    }
+
+    // One refused write-back: fsync says so, and throws nothing away.
+    vfstest_floor_inject_blk(1);
+    let r1 = file_sync(f);
+    let hits = vfstest_floor_inject_end();
+    if (!(hits == 1)) {
+        return failed(reason, "check failed: fst.hits == 1 at line 250\0");
+    }
+    if (!(r1 == -EIO)) {
+        return failed(reason, "check failed: s1 == -EIO at line 253\0");
+    }
+    if (!(dirty(f) > 0)) {
+        return failed(reason, "check failed: f->vn->pc.nr_dirty > 0 at line 256\0");
+    }
+    let p1 = stats(mut s1);
+    if (!(p1.wb_errors == p0.wb_errors + 1)) {
+        return failed(reason, "check failed: p1.wb_errors == p0.wb_errors + 1 at line 260\0");
+    }
+
+    // The next attempt writes, and the file has already been told.
+    if (!(file_sync(f) == 0)) {
+        return failed(reason, "check failed: file_sync(f) == 0 at line 265\0");
+    }
+    if (!(dirty(f) == 0)) {
+        return failed(reason, "check failed: f->vn->pc.nr_dirty == 0 at line 268\0");
+    }
+    if (!(file_sync(f) == 0)) {
+        return failed(reason, "check failed: file_sync(f) == 0 at line 271\0");
+    }
+    filePut(f);
+
+    // On disk: a fresh mount reads it back.
+    if (!(remount(bd))) {
+        return failed(reason, "check failed: vfs_umount(\"/mnt/wb\") == 0 && vfs_mount(... bd ...) == 0 at line 277\0");
+    }
+    if (!(wbReadsBack("/mnt/wb/f\0", data as *u8))) {
+        return failed(reason, "check failed: wb_reads_back(\"/mnt/wb/f\", data) at line 280\0");
+    }
+    kfree(data as *mut void);
+    wbTeardown(bd);
+    return true;
+}
+
+/// Safety: `reason` is writable; runs at boot, alone, with fault injection.
+@cfg("CONFIG_FAULTINJECT")
+@export("selftest_wb_error_once")
+unsafe fn selftestWbErrorOnce(reason: *mut *CChar) -> bool {
+    var bd = 0 as *mut blkdev;
+    if (!(wbSetup(borrow mut bd as *mut *mut blkdev) == 0)) {
+        return failed(reason, "check failed: wb_setup(&bd) == 0 at line 293\0");
+    }
+    let page = kmalloc(PAGE, 0) as *mut u8;
+    if (!(!page.isNull())) {
+        return failed(reason, "check failed: page != NULL at line 297\0");
+    }
+    wbFill(page, 9);
+
+    var a = 0 as *mut file;
+    var b = 0 as *mut file;
+    var c3 = 0 as *mut file;
+    if (!(open("/mnt/wb/o\0", O_RDWR | O_CREAT, MODE_FILE, borrow mut a as *mut *mut file) == 0)) {
+        return failed(reason, "check failed: vfs_open(NULL, \"/mnt/wb/o\", ..., 0644, &a) == 0 at line 305\0");
+    }
+    if (!(open("/mnt/wb/o\0", O_RDWR, 0, borrow mut b as *mut *mut file) == 0)) {
+        return failed(reason, "check failed: vfs_open(NULL, \"/mnt/wb/o\", COSMO_O_RDWR, 0, &b) == 0 at line 308\0");
+    }
+    if (!(Ptr.toBorrow(a as *file).vn == Ptr.toBorrow(b as *file).vn)) {
+        return failed(reason, "check failed: a->vn == b->vn at line 311\0");
+    }
+    if (!(file_write(a, page as *void, PAGE) == PAGE_I)) {
+        return failed(reason, "check failed: file_write(a, page, PAGE_SIZE) == (int64_t)PAGE_SIZE at line 314\0");
+    }
+
+    // A's attempt fails; A hears its own failure once.
+    vfstest_floor_inject_blk(1);
+    let sa = file_sync(a);
+    let hits = vfstest_floor_inject_end();
+    if (!(hits == 1 && sa == -EIO)) {
+        return failed(reason, "check failed: fst.hits == 1 && sa == -EIO at line 322\0");
+    }
+
+    // B's attempt writes the page, and B is told of the failure it was open for -- once. A was told already. C,
+    // opened later, never.
+    if (!(file_sync(b) == -EIO)) {
+        return failed(reason, "check failed: file_sync(b) == -EIO at line 328\0");
+    }
+    if (!(dirty(b) == 0)) {
+        return failed(reason, "check failed: b->vn->pc.nr_dirty == 0 at line 331\0");
+    }
+    if (!(file_sync(b) == 0)) {
+        return failed(reason, "check failed: file_sync(b) == 0 at line 334\0");
+    }
+    if (!(file_sync(a) == 0)) {
+        return failed(reason, "check failed: file_sync(a) == 0 at line 337\0");
+    }
+    if (!(open("/mnt/wb/o\0", O_RDONLY, 0, borrow mut c3 as *mut *mut file) == 0)) {
+        return failed(reason, "check failed: vfs_open(NULL, \"/mnt/wb/o\", COSMO_O_RDONLY, 0, &c) == 0 at line 340\0");
+    }
+    if (!(file_sync(c3) == 0)) {
+        return failed(reason, "check failed: file_sync(c) == 0 at line 343\0");
+    }
+    filePut(c3);
+    filePut(b);
+    filePut(a);
+    if (!(wbReadsBack("/mnt/wb/o\0", page as *u8))) {
+        return failed(reason, "check failed: wb_reads_back(\"/mnt/wb/o\", page) at line 349\0");
+    }
+    kfree(page as *mut void);
+    wbTeardown(bd);
+    return true;
+}
+
+/// A file in a handle table, as the syscall holds it.
+/// Safety: `t` is a live table; `path` ends in a zero byte; `page` holds a page.
+unsafe fn wbOpenInTable(t: *mut handle_table, path: StringView, page: *u8) -> i32 {
+    var f = 0 as *mut file;
+    let rc = open(path, O_WRONLY | O_CREAT, MODE_FILE, borrow mut f as *mut *mut file);
+    if (rc != 0) {
+        return rc;
+    }
+    if (file_write(f, page as *void, PAGE) != PAGE_I) {
+        filePut(f);
+        return -EIO;
+    }
+    let h = handle_install(t, f as *mut kobject, HANDLE_RIGHT_OWNER);
+    filePut(f); // the table holds the reference now
+    return h;
+}
+
+/// Safety: `reason` is writable; runs at boot, alone, with fault injection.
+@cfg("CONFIG_FAULTINJECT")
+@export("selftest_wb_error_close")
+unsafe fn selftestWbErrorClose(reason: *mut *CChar) -> bool {
+    var bd = 0 as *mut blkdev;
+    if (!(wbSetup(borrow mut bd as *mut *mut blkdev) == 0)) {
+        return failed(reason, "check failed: wb_setup(&bd) == 0 at line 379\0");
+    }
+    let page = kmalloc(PAGE, 0) as *mut u8;
+    if (!(!page.isNull())) {
+        return failed(reason, "check failed: page != NULL at line 383\0");
+    }
+    wbFill(page, 5);
+    let t = kmalloc(layoutOf<handle_table>().size, KMEM_ZERO) as *mut handle_table;
+    if (!(!t.isNull())) {
+        return failed(reason, "check failed: t != NULL at line 388\0");
+    }
+    handle_table_init(t);
+    var s0: [u64; 11] = [0; 11];
+    var s1: [u64; 11] = [0; 11];
+    let p0 = stats(mut s0);
+
+    var h = wbOpenInTable(t, "/mnt/wb/c\0", page as *u8);
+    if (!(h >= 0)) {
+        return failed(reason, "check failed: h >= 0 at line 397\0");
+    }
+    // close: the flush's write-back is refused and close says so; the handle is closed regardless; the release's own
+    // retry then writes the page (the injection is spent), so nothing is lost.
+    vfstest_floor_inject_blk(1);
+    let rc = handle_close(t, h);
+    let hits = vfstest_floor_inject_end();
+    if (!(hits == 1)) {
+        return failed(reason, "check failed: fst.hits == 1 at line 405\0");
+    }
+    if (!(rc == -EIO)) {
+        return failed(reason, "check failed: rc == -EIO at line 408\0");
+    }
+    if (!(handle_close(t, h) == -EBADF)) {
+        return failed(reason, "check failed: handle_close(t, h) == -EBADF at line 411\0");
+    }
+    let p1 = stats(mut s1);
+    if (!(p1.dropped_dirty == p0.dropped_dirty)) {
+        return failed(reason, "check failed: p1.dropped_dirty == p0.dropped_dirty at line 415\0");
+    }
+    if (!(p1.wb_errors == p0.wb_errors + 1)) {
+        return failed(reason, "check failed: p1.wb_errors == p0.wb_errors + 1 at line 418\0");
+    }
+    // A clean close reports nothing.
+    h = wbOpenInTable(t, "/mnt/wb/c2\0", page as *u8);
+    if (!(h >= 0)) {
+        return failed(reason, "check failed: h >= 0 at line 423\0");
+    }
+    if (!(handle_close(t, h) == 0)) {
+        return failed(reason, "check failed: handle_close(t, h) == 0 at line 426\0");
+    }
+    handle_table_destroy(t);
+    kfree(t as *mut void);
+
+    if (!(remount(bd))) {
+        return failed(reason, "check failed: vfs_umount(\"/mnt/wb\") == 0 && vfs_mount(... bd ...) == 0 at line 432\0");
+    }
+    if (!(wbReadsBack("/mnt/wb/c\0", page as *u8))) {
+        return failed(reason, "check failed: wb_reads_back(\"/mnt/wb/c\", page) at line 435\0");
+    }
+    if (!(wbReadsBack("/mnt/wb/c2\0", page as *u8))) {
+        return failed(reason, "check failed: wb_reads_back(\"/mnt/wb/c2\", page) at line 438\0");
+    }
+    kfree(page as *mut void);
+    wbTeardown(bd);
+    return true;
+}
+
+/// Safety: `reason` is writable; runs at boot, alone, with fault injection.
+@cfg("CONFIG_FAULTINJECT")
+@export("selftest_wb_error_lost")
+unsafe fn selftestWbErrorLost(reason: *mut *CChar) -> bool {
+    var bd = 0 as *mut blkdev;
+    if (!(wbSetup(borrow mut bd as *mut *mut blkdev) == 0)) {
+        return failed(reason, "check failed: wb_setup(&bd) == 0 at line 451\0");
+    }
+    let page = kmalloc(PAGE, 0) as *mut u8;
+    if (!(!page.isNull())) {
+        return failed(reason, "check failed: page != NULL at line 455\0");
+    }
+    wbFill(page, 2);
+    let t = kmalloc(layoutOf<handle_table>().size, KMEM_ZERO) as *mut handle_table;
+    if (!(!t.isNull())) {
+        return failed(reason, "check failed: t != NULL at line 460\0");
+    }
+    handle_table_init(t);
+    var s0: [u64; 11] = [0; 11];
+    var s1: [u64; 11] = [0; 11];
+    let p0 = stats(mut s0);
+
+    let h = wbOpenInTable(t, "/mnt/wb/l\0", page as *u8);
+    if (!(h >= 0)) {
+        return failed(reason, "check failed: h >= 0 at line 469\0");
+    }
+    // Three refusals: the flush's, the file release's retry, the vnode release's last attempt. Then the page is gone
+    // -- counted, said.
+    vfstest_floor_inject_blk(3);
+    let rc = handle_close(t, h);
+    let hits = vfstest_floor_inject_end();
+    if (!(hits == 3)) {
+        return failed(reason, "check failed: fst.hits == 3 at line 477\0");
+    }
+    if (!(rc == -EIO)) {
+        return failed(reason, "check failed: rc == -EIO at line 480\0");
+    }
+    let p1 = stats(mut s1);
+    if (!(p1.dropped_dirty == p0.dropped_dirty + 1)) {
+        return failed(reason, "check failed: p1.dropped_dirty == p0.dropped_dirty + 1 at line 484\0");
+    }
+    if (!(p1.wb_errors == p0.wb_errors + 3)) {
+        return failed(reason, "check failed: p1.wb_errors == p0.wb_errors + 3 at line 487\0");
+    }
+    handle_table_destroy(t);
+    kfree(t as *mut void);
+
+    // The mount is not poisoned: a new file writes and syncs.
+    var f = 0 as *mut file;
+    if (!(open("/mnt/wb/after\0", O_WRONLY | O_CREAT, MODE_FILE, borrow mut f as *mut *mut file) == 0)) {
+        return failed(reason, "check failed: vfs_open(NULL, \"/mnt/wb/after\", ..., 0644, &f) == 0 at line 495\0");
+    }
+    if (!(file_write(f, page as *void, PAGE) == PAGE_I)) {
+        return failed(reason, "check failed: file_write(f, page, PAGE_SIZE) == (int64_t)PAGE_SIZE at line 498\0");
+    }
+    if (!(file_sync(f) == 0)) {
+        return failed(reason, "check failed: file_sync(f) == 0 at line 501\0");
+    }
+    filePut(f);
+    KernelLog.write(LogLevel.Info,
+        "selftest: wb-error-lost: one page lost after three refusals, counted; the mount still writes");
+    kfree(page as *mut void);
+    wbTeardown(bd);
+    return true;
+}
+
+// ---- benchmarks: the object path per request size ----
+//
+// Prints, asserts nothing. The audit's missing "read/write bandwidth at 1 KiB chunking": a 1 MiB file read and
+// written through file_read / file_write with kernel buffers of 1 KiB, 4 KiB and 64 KiB -- the object side of what the
+// syscall bounce now allows per call. The syscall side (entry, range check, copy) is measured from user mode (init
+// --selftest, USERBENCH lines).
+
+/// Safety: `f` is an open file; `buf` holds `req` bytes.
+unsafe fn benchPass(what: StringView, f: *mut file, buf: *mut u8, req: usize, write: bool) {
+    let _ = file_seek(f, 0, SEEK_SET);
+    let t0 = clock_now_ns();
+    var calls: u32 = 0;
+    var total: usize = 0;
+    while (total < 1024 * 1024) {
+        let n = if (write) file_write(f, buf as *void, req) else file_read(f, buf as *mut void, req);
+        if (n <= 0) {
+            break;
+        }
+        total += truncate<usize>(n);
+        calls += 1;
+    }
+    let dt = clock_since_ns(t0);
+    var buffer: [u8; 192] = [0; 192];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: ");
+    line.text(if (write) "write" else "read");
+    line.text("-bench: ");
+    line.text(what);
+    line.text(" ");
+    line.decimal((req / 1024) as u64);
+    line.text(" KiB requests: ");
+    line.decimal(calls as u64);
+    line.text(" calls, ");
+    line.decimal(dt / 1000);
+    line.text(" us, ");
+    line.decimal(if (dt != 0) total as u64 * 1000000000 / dt / (1024 * 1024) else 0);
+    line.text(" MiB/s");
+    KernelLog.send(LogLevel.Info, line);
+}
+
+// MEM-9, V40: dirty pages bounded, the writer asleep holding nothing. The cache limit is lowered for the test to
+// DB_LIMIT pages, a dirty bound of DB_LIMIT / 2. Part one: one writer of eight times the bound, with write-back on,
+// never has more than the bound and one write's pages dirty (it writes its own file back at the bound). Part two: a
+// file left dirty past the bound with write-back off, which the writer of another file cannot clean; that writer
+// sleeps until a thread syncs the first file 300 ms later, and is woken by it -- the sleep and the wake lockdep's
+// `pagecache-dirty` class sees.
+const DB_LIMIT: u64 = 256;
+const DB_WRITES: u32 = 128; // of 64 KiB: 2048 pages
+
+/// The file the syncer syncs, and what the sync said.
+struct DbSyncer {
+    f: *mut file;
+    rc: i32;
+}
+
+/// Safety: `arg` is a DbSyncer that outlives the thread.
+@callback
+unsafe fn dbSyncerThread(arg: *mut void) {
+    let s = Ptr.toBorrowMut(arg as *mut DbSyncer);
+    thread_sleep_ns(300 * MS);
+    s.rc = file_sync(s.f);
+}
+
+/// Safety: runs while /mnt/db is mounted.
+unsafe fn dbMount() -> *mut mount {
+    var vn = 0 as *mut vnode;
+    if (vfs_lookup(0 as *mut vnode, c("/mnt/db\0"), borrow mut vn as *mut *mut vnode) != 0) {
+        return 0 as *mut mount;
+    }
+    let m = Ptr.toBorrow(vn as *vnode).mnt;
+    vnode_put(vn);
+    return m;
+}
+
+/// Safety: `p` holds `len` bytes.
+unsafe fn dbNoise(p: *mut u8, len: usize, seed: u32) {
+    var x = seed.wrappingMul(2654435761).wrappingAdd(1);
+    for (i in 0..len) {
+        x = x ^ x.wrappingShl(13);
+        x = x ^ (x >> 17);
+        x = x ^ x.wrappingShl(5);
+        let b = Ptr.toBorrowMut(p.add(i));
+        *b = truncate<u8>(x);
+    }
+}
+
+/// What dirty-bound holds, released whatever happened.
+struct DbState {
+    bd: *mut blkdev;
+    buf: *mut u8;
+    back: *mut u8;
+    a: *mut file;
+    b: *mut file;
+    mounted: bool;
+}
+
+/// dirty-bound's body; the caller lets go of everything in `st`.
+/// Safety: `reason` is writable; `st` starts with the disk and buffers, or nulls.
+unsafe fn dirtyBound(reason: *mut *CChar, st: borrow mut DbState) -> bool {
+    if (!(!st.bd.isNull() && !st.buf.isNull() && !st.back.isNull())) {
+        return failed(reason, "check failed: bd != NULL && buf != NULL && back != NULL at line 611\0");
+    }
+    if (!(cosmofs_format(st.bd) == 0)) {
+        return failed(reason, "check failed: cosmofs_format(bd) == 0 at line 614\0");
+    }
+    let mrc = vfs_mkdir(0 as *mut vnode, c("/mnt/db\0"), MODE_DIR);
+    if (!(mrc == 0 || mrc == -EEXIST)) {
+        return failed(reason, "check failed: mrc == 0 || mrc == -EEXIST at line 618\0");
+    }
+    if (!(vfs_mount(c("/mnt/db\0"), c("cosmofs\0"), st.bd, 0) == 0)) {
+        return failed(reason, "check failed: vfs_mount(\"/mnt/db\", \"cosmofs\", bd, 0) == 0 at line 621\0");
+    }
+    st.mounted = true;
+    let bound = DB_LIMIT / 2;
+    var s1b: [u64; 11] = [0; 11];
+    var s2b: [u64; 11] = [0; 11];
+    pagecache_set_limit(DB_LIMIT);
+
+    // One writer, write-back on.
+    if (!(open("/mnt/db/one\0", O_RDWR | O_CREAT, MODE_FILE, borrow mut st.a as *mut *mut file) == 0)) {
+        return failed(reason, "check failed: vfs_open(NULL, \"/mnt/db/one\", ..., 0644, &a) == 0 at line 631\0");
+    }
+    var peak: u64 = 0;
+    for (i in 0..DB_WRITES) {
+        dbNoise(st.buf, 65536, i);
+        if (!(file_write(st.a, st.buf as *void, 65536) == 65536)) {
+            return failed(reason, "check failed: file_write(a, buf, 65536) == 65536 at line 637\0");
+        }
+        let d = pagecache_dirty_pages();
+        if (d > peak) {
+            peak = d;
+        }
+    }
+    if (!(file_sync(st.a) == 0)) {
+        return failed(reason, "check failed: file_sync(a) == 0 at line 645\0");
+    }
+    let p1 = stats(mut s1b);
+    var buffer: [u8; 192] = [0; 192];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: pagecache-dirty-bound: ");
+    line.decimal((DB_WRITES * 16) as u64);
+    line.text(" pages written, at most ");
+    line.decimal(peak);
+    line.text(" dirty against a bound of ");
+    line.decimal(bound);
+    KernelLog.send(LogLevel.Info, line);
+    if (!(peak <= bound + 16 + 8)) { // the bound, one write's pages, and a few of the system's own
+        return failed(reason, "check failed: peak <= bound + 16 + 8 at line 658\0");
+    }
+    var i: u32 = 0;
+    while (i < DB_WRITES) {
+        dbNoise(st.buf, 65536, i);
+        if (!(file_pread(st.a, st.back as *mut void, 65536, i as u64 * 65536) == 65536)) {
+            return failed2(reason, "check failed: file_pread(a, back, 65536, (uint64_t)i * 65536) == 65536 at line ",
+                "662\0");
+        }
+        if (!(memcmp(st.back as *void, st.buf as *void, 65536) == 0)) {
+            return failed(reason, "check failed: memcmp(back, buf, 65536) == 0 at line 668\0");
+        }
+        i += 31;
+    }
+    filePut(st.a);
+    st.a = 0 as *mut file;
+
+    // Another file's dirty pages, which this writer cannot clean.
+    cosmofs_test_set_writeback(dbMount(), false);
+    if (!(open("/mnt/db/held\0", O_RDWR | O_CREAT, MODE_FILE, borrow mut st.a as *mut *mut file) == 0)) {
+        return failed(reason, "check failed: vfs_open(NULL, \"/mnt/db/held\", ..., 0644, &a) == 0 at line 678\0");
+    }
+    for (k in 0..(bound + 32) / 16) {
+        dbNoise(st.buf, 65536, truncate<u32>(1000 + k));
+        if (!(file_pwrite_held(st.a, st.buf as *void, 65536, k * 65536) == 65536)) { // past the bound, unthrottled
+            return failed2(reason, "check failed: file_pwrite_held(a, buf, 65536, (uint64_t)i * 65536) == 65536 at ",
+                "line 0\0");
+        }
+    }
+    if (!(pagecache_dirty_pages() >= bound)) {
+        return failed(reason, "check failed: pagecache_dirty_pages() >= bound at line 688\0");
+    }
+    if (!(open("/mnt/db/waits\0", O_RDWR | O_CREAT, MODE_FILE, borrow mut st.b as *mut *mut file) == 0)) {
+        return failed(reason, "check failed: vfs_open(NULL, \"/mnt/db/waits\", ..., 0644, &b) == 0 at line 691\0");
+    }
+    var sy = DbSyncer { f: st.a, rc: -1 };
+    let t = thread_create(dbSyncerThread, borrow mut sy as *mut DbSyncer as *mut void, c("db-syncer\0"),
+        SCHED_PRIO_DEFAULT);
+    if (!(!t.isNull())) {
+        return failed(reason, "check failed: t != NULL at line 697\0");
+    }
+    let t0 = clock_now_ns();
+    let wn = file_write(st.b, st.buf as *void, 4096);
+    let waitedMs = clock_since_ns(t0) / MS;
+    let _ = thread_join(t);
+    let p2 = stats(mut s2b);
+    var buffer2: [u8; 192] = [0; 192];
+    var line2 = TextWriter.create(mut buffer2[..]);
+    line2.text("selftest: pagecache-dirty-bound: a writer behind another file's dirty pages waited ");
+    line2.decimal(waitedMs);
+    line2.text(" ms, ");
+    line2.decimal(p2.throttled - p1.throttled);
+    line2.text(" sleep(s), woken by their sync");
+    KernelLog.send(LogLevel.Info, line2);
+    if (!(wn == 4096 && sy.rc == 0)) {
+        return failed(reason, "check failed: wn == 4096 && sy.rc == 0 at line 713\0");
+    }
+    if (!(p2.throttled > p1.throttled)) {
+        return failed(reason, "check failed: s2.throttled > s1.throttled at line 716\0");
+    }
+    if (!(waitedMs >= 200 && waitedMs < 4000)) { // woken by the sync, not the 5 s give-up
+        return failed(reason, "check failed: waited_ms >= 200 && waited_ms < 4000 at line 719\0");
+    }
+    return true;
+}
+
+/// Safety: `reason` is writable; runs at boot, alone.
+@export("selftest_pagecache_dirty_bound")
+unsafe fn selftestPagecacheDirtyBound(reason: *mut *CChar) -> bool {
+    var st = DbState {
+        bd: ramblk_create(4096),
+        buf: kmalloc(65536, 0) as *mut u8,
+        back: kmalloc(65536, 0) as *mut u8,
+        a: 0 as *mut file,
+        b: 0 as *mut file,
+        mounted: false,
+    };
+    let saved = pagecache_limit();
+    let ok = dirtyBound(reason, mut st);
+    pagecache_set_limit(saved);
+    if (!st.a.isNull()) {
+        filePut(st.a);
+    }
+    if (!st.b.isNull()) {
+        filePut(st.b);
+    }
+    if (st.mounted) {
+        cosmofs_test_set_writeback(dbMount(), true);
+        if (vfs_umount2(c("/mnt/db\0"), 0) != 0) {
+            let _ = vfs_umount2(c("/mnt/db\0"), VFS_UMOUNT_FORCE);
+        }
+    }
+    let _ = vfs_rmdir(0 as *mut vnode, c("/mnt/db\0"));
+    if (!st.bd.isNull()) {
+        ramblk_destroy(st.bd);
+    }
+    kfree(st.buf as *mut void);
+    kfree(st.back as *mut void);
+    return ok;
+}
+
+fn benchReq(i: u32) -> usize => if (i == 0) 1024 else if (i == 1) 4096 else 65536;
+
+/// read-bench's body; the caller frees `buf`.
+/// Safety: `reason` is writable; `buf` holds 64 KiB.
+unsafe fn readBench(reason: *mut *CChar, buf: *mut u8) -> bool {
+    // ramfs: the copy alone.
+    var f = 0 as *mut file;
+    if (!(open("/tmp/bench.bin\0", O_RDWR | O_CREAT | O_TRUNC, MODE_FILE, borrow mut f as *mut *mut file) == 0)) {
+        return failed(reason, "check failed: vfs_open(NULL, \"/tmp/bench.bin\", ..., 0644, &f) == 0 at line 767\0");
+    }
+    for (i in 0..16) {
+        if (!(file_write(f, buf as *void, 65536) == 65536)) {
+            return failed(reason, "check failed: file_write(f, buf, 65536) == 65536 at line 771\0");
+        }
+    }
+    for (i in 0..3 as u32) {
+        benchPass("ramfs", f, buf, benchReq(i), false);
+    }
+    filePut(f);
+    if (!(vfs_unlink(0 as *mut vnode, c("/tmp/bench.bin\0")) == 0)) {
+        return failed(reason, "check failed: vfs_unlink(NULL, \"/tmp/bench.bin\") == 0 at line 779\0");
+    }
+
+    // cosmofs on ramblk: cold (after a remount, through the device) and warm (the page cache).
+    var bd = 0 as *mut blkdev;
+    if (!(wbSetup(borrow mut bd as *mut *mut blkdev) == 0)) {
+        return failed(reason, "check failed: wb_setup(&bd) == 0 at line 785\0");
+    }
+    if (!(open("/mnt/wb/bench\0", O_WRONLY | O_CREAT, MODE_FILE, borrow mut f as *mut *mut file) == 0)) {
+        return failed(reason, "check failed: vfs_open(NULL, \"/mnt/wb/bench\", ..., 0644, &f) == 0 at line 788\0");
+    }
+    for (i in 0..16) {
+        if (!(file_write(f, buf as *void, 65536) == 65536)) {
+            return failed(reason, "check failed: file_write(f, buf, 65536) == 65536 at line 792\0");
+        }
+    }
+    if (!(file_sync(f) == 0)) {
+        return failed(reason, "check failed: file_sync(f) == 0 at line 796\0");
+    }
+    filePut(f);
+    for (i in 0..3 as u32) {
+        if (!(remount(bd))) {
+            return failed2(reason, "check failed: vfs_umount(\"/mnt/wb\") == 0 && vfs_mount(... bd ...) == 0 at line ",
+                "0\0");
+        }
+        if (!(open("/mnt/wb/bench\0", O_RDONLY, 0, borrow mut f as *mut *mut file) == 0)) {
+            return failed2(reason, "check failed: vfs_open(NULL, \"/mnt/wb/bench\", COSMO_O_RDONLY, 0, &f) == 0 at ",
+                "line 0\0");
+        }
+        benchPass("cosmofs cold", f, buf, benchReq(i), false);
+        benchPass("cosmofs warm", f, buf, benchReq(i), false);
+        filePut(f);
+    }
+    wbTeardown(bd);
+    return true;
+}
+
+/// Safety: `reason` is writable; runs at boot, alone.
+@export("selftest_read_bench")
+unsafe fn selftestReadBench(reason: *mut *CChar) -> bool {
+    let buf = kmalloc(65536, 0) as *mut u8;
+    if (!(!buf.isNull())) {
+        return failed(reason, "check failed: buf != NULL at line 821\0");
+    }
+    let _ = memset(buf as *mut void, 0x5a, 65536);
+    let ok = readBench(reason, buf);
+    kfree(buf as *mut void); // a failing check leaks nothing (the analyzer's finding)
+    return ok;
+}
+
+/// Safety: `reason` is writable; runs at boot, alone.
+@export("selftest_write_bench")
+unsafe fn selftestWriteBench(reason: *mut *CChar) -> bool {
+    let buf = kmalloc(65536, 0) as *mut u8;
+    if (!(!buf.isNull())) {
+        return failed(reason, "check failed: buf != NULL at line 834\0");
+    }
+    let _ = memset(buf as *mut void, 0xa5, 65536);
+    for (i in 0..3 as u32) {
+        var f = 0 as *mut file;
+        let flags = O_WRONLY | O_CREAT | O_TRUNC;
+        if (!(open("/tmp/wbench.bin\0", flags, MODE_FILE, borrow mut f as *mut *mut file) == 0)) {
+            kfree(buf as *mut void);
+            return failed2(reason, "check failed: vfs_open(NULL, \"/tmp/wbench.bin\", ..., 0644, &f) == 0 at line ",
+                "838\0");
+        }
+        benchPass("ramfs", f, buf, benchReq(i), true);
+        filePut(f);
+        if (!(vfs_unlink(0 as *mut vnode, c("/tmp/wbench.bin\0")) == 0)) {
+            kfree(buf as *mut void);
+            return failed(reason, "check failed: vfs_unlink(NULL, \"/tmp/wbench.bin\") == 0 at line 849\0");
+        }
+    }
+    kfree(buf as *mut void);
+    return true;
+}
+
+static mut PIN_BUF: [u8; 4096] = [0; 4096];
+
+/// A frame a mapping references is not reclaimed (the file-regions unit): pagecache_fault_page takes the mapping's
+/// reference under the cache mutex, and reclaim, deciding under that mutex, leaves a frame whose count is not one
+/// alone. Put the reference and it goes. cosmofs on a RAM device, because ramfs pages are never reclaimed at all.
+/// Safety: `reason` is writable; runs at boot, alone.
+@export("selftest_pagecache_pinned")
+unsafe fn selftestPagecachePinned(reason: *mut *CChar) -> bool {
+    let buf = borrow mut PIN_BUF as *mut [u8; 4096] as *mut void;
+    var f = 0 as *mut file;
+    var s0b: [u64; 11] = [0; 11];
+    var s1b: [u64; 11] = [0; 11];
+    let bd = ramblk_create(1024);
+    if (!(!bd.isNull())) {
+        return failed(reason, "check failed: bd != NULL at line 870\0");
+    }
+    if (!(cosmofs_format(bd) == 0)) {
+        return failed(reason, "check failed: cosmofs_format(bd) == 0 at line 873\0");
+    }
+    let mk = vfs_mkdir(0 as *mut vnode, c("/mnt/pin\0"), MODE_DIR);
+    if (!(mk == 0 || mk == -EEXIST)) {
+        return failed(reason, "check failed: mk == 0 || mk == -EEXIST at line 877\0");
+    }
+    if (!(vfs_mount(c("/mnt/pin\0"), c("cosmofs\0"), bd, 0) == 0)) {
+        return failed(reason, "check failed: vfs_mount(\"/mnt/pin\", \"cosmofs\", bd, 0) == 0 at line 880\0");
+    }
+    if (!(open("/mnt/pin/f\0", O_RDWR | O_CREAT, MODE_FILE, borrow mut f as *mut *mut file) == 0)) {
+        return failed(reason, "check failed: vfs_open(NULL, \"/mnt/pin/f\", ..., 0644, &f) == 0 at line 883\0");
+    }
+    let vn = Ptr.toBorrow(f as *file).vn;
+    let npages: u32 = 256;
+    for (i in 0..npages) {
+        let _ = memset(buf, truncate<i32>(i & 0xff), PAGE);
+        if (!(file_write(f, buf as *void, PAGE) == PAGE_I)) {
+            return failed(reason, "check failed: file_write(f, buf, PAGE_SIZE) == PAGE_SIZE at line 890\0");
+        }
+    }
+    if (!(file_sync(f) == 0)) { // every page clean: every page a candidate
+        return failed(reason, "check failed: file_sync(f) == 0 at line 894\0");
+    }
+
+    // Page 3 as a mapping would hold it.
+    var held = 0 as *mut page;
+    pagecache_lock(vn);
+    let frc = pagecache_fault_page(vn, 3, false, borrow mut held as *mut *mut page);
+    pagecache_unlock(vn);
+    if (!(frc == 0)) {
+        return failed(reason, "check failed: pagecache_fault_page(vn, 3, false, &held) == 0 at line 903\0");
+    }
+    let hp = Ptr.toBorrow(held as *page);
+    if (!(!held.isNull() && (hp.flags & PG_PAGECACHE) != 0 && hp.refcount == 2)) {
+        return failed2(reason, "check failed: held != NULL && (held->flags & PG_PAGECACHE) && held->refcount == 2 at ",
+            "line 0\0");
+    }
+    // Past the end: the bound, not a zero page.
+    var none = 0 as *mut page;
+    pagecache_lock(vn);
+    let erc = pagecache_fault_page(vn, npages as u64, false, borrow mut none as *mut *mut page);
+    pagecache_unlock(vn);
+    if (!(erc == -EFBIG)) {
+        return failed(reason, "check failed: pagecache_fault_page(vn, NPAGES, false, &none) == -EFBIG at line 916\0");
+    }
+    if (!(none.isNull())) {
+        return failed(reason, "check failed: none == NULL at line 919\0");
+    }
+
+    // Force reclaim: a limit below what is cached, then a read of every page. Page 3 survives it, referenced.
+    let p0 = stats(mut s0b);
+    let saved = pagecache_limit();
+    pagecache_set_limit(if (p0.pages > (npages / 2) as u64) p0.pages - (npages / 2) as u64 else 1);
+    for (i in 0..npages) {
+        if (!(file_pread(f, buf, PAGE, i as u64 * PAGE_U) == PAGE_I)) {
+            return failed2(reason, "check failed: file_pread(f, buf, PAGE_SIZE, (uint64_t)i * PAGE_SIZE) == PAGE_SIZE ",
+                "at line 929\0");
+        }
+    }
+    let p1 = stats(mut s1b);
+    if (!(p1.reclaimed > p0.reclaimed)) {
+        return failed(reason, "check failed: s1.reclaimed > s0.reclaimed at line 934\0");
+    }
+    if (!(p1.pinned_skips > p0.pinned_skips)) {
+        return failed(reason, "check failed: s1.pinned_skips > s0.pinned_skips at line 937\0");
+    }
+    let hp2 = Ptr.toBorrow(held as *page);
+    if (!(hp2.refcount == 2 && (hp2.flags & PG_PAGECACHE) != 0)) { // still the cache's, still ours
+        return failed(reason, "check failed: held->refcount == 2 && (held->flags & PG_PAGECACHE) at line 941\0");
+    }
+    if (!(*Ptr.toBorrow(pagecache_floor_virt(held as *page) as *u8) == 3)) {
+        return failed(reason, "check failed: ((uint8_t *)page_to_virt(held))[0] == 3 at line 944\0");
+    }
+
+    // Put the reference: now it can go, and a sweep takes it.
+    pmm_page_put(held);
+    var s2b: [u64; 11] = [0; 11];
+    var s3b: [u64; 11] = [0; 11];
+    let p2 = stats(mut s2b);
+    pagecache_set_limit(1);
+    for (i in 0..npages) {
+        if (!(file_pread(f, buf, PAGE, i as u64 * PAGE_U) == PAGE_I)) {
+            pagecache_set_limit(saved);
+            return failed2(reason, "check failed: file_pread(f, buf, PAGE_SIZE, (uint64_t)i * PAGE_SIZE) == PAGE_SIZE ",
+                "at line 957\0");
+        }
+    }
+    let p3 = stats(mut s3b);
+    pagecache_set_limit(saved);
+    if (!(p3.reclaimed > p2.reclaimed)) {
+        return failed(reason, "check failed: s1.reclaimed > s0.reclaimed at line 963\0");
+    }
+
+    filePut(f);
+    if (!(vfs_unlink(0 as *mut vnode, c("/mnt/pin/f\0")) == 0)) {
+        return failed(reason, "check failed: vfs_unlink(NULL, \"/mnt/pin/f\") == 0 at line 968\0");
+    }
+    if (!(vfs_umount2(c("/mnt/pin\0"), 0) == 0)) {
+        return failed(reason, "check failed: vfs_umount(\"/mnt/pin\") == 0 at line 971\0");
+    }
+    if (!(vfs_rmdir(0 as *mut vnode, c("/mnt/pin\0")) == 0)) {
+        return failed(reason, "check failed: vfs_rmdir(NULL, \"/mnt/pin\") == 0 at line 974\0");
+    }
+    ramblk_destroy(bd);
+    KernelLog.write(LogLevel.Info,
+        "selftest: pagecache-pinned: a referenced frame survives reclaim and goes when the reference does");
+    return true;
+}

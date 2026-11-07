@@ -77,7 +77,7 @@ described under "Memory".
 `syscall_count`, `syscall_unknown_count`, `syscall_filtered_count`,
 `syscall_bounce_heap_count`, `syscall_bounce_fallback_count`. Only the
 fallback count has a reader in the tree (`read-bounce`,
-`kernel-services/vfs/vfstest.c`).
+`kernel-services/vfs/vfstest_dev.cee`).
 
 ## The path of one call
 

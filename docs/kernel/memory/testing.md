@@ -520,7 +520,7 @@ mmap-readfail`, which maps the file and touches page 0: the miss's read
 child because a child making it would spend the injected failure on its
 own write.
 
-### `SELFTEST: pagecache-pinned` (`selftest_pagecache_pinned`, `kernel-services/vfs/vfstest.c`)
+### `SELFTEST: pagecache-pinned` (`selftest_pagecache_pinned`, `kernel-services/vfs/vfstest_wb.cee`)
 
 On cosmofs over a RAM device (ramfs pages are never reclaimed): 256
 pages written and synced, page 3 taken as a mapping would take it

@@ -84,7 +84,7 @@ files. Every call, result and byte read back, and the statistics after each step
 entry and reference is given back. Every line runs (the branches left are other threads' races); clang and gcc give
 the same digest, for the C and for the port.
 
-## Self-tests (`kernel-services/vfs/vfstest.c`, `kernel-services/filesystem/cosmofs/cosmofstest_*.cee`)
+## Self-tests (`kernel-services/vfs/vfstest_*.cee`, `kernel-services/filesystem/cosmofs/cosmofstest_*.cee`)
 
 **`crc32c`**: the standard vector and incremental update.
 
