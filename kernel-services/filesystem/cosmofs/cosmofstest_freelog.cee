@@ -1,0 +1,1911 @@
+// cosmofstest_freelog.cee - cosmofs's self-tests of symbolic links, the free record (format version 9) and the
+// snapshot deadlists, in CeeSafe: roadmap 2.0 SA7.
+//
+// cosmofs-symlink and cosmofs-symlink-version; the free record: written, accounted in the bitmap its root publishes,
+// superseded, replayed, replayed twice, reused, kept off a snapshot's deadlist, given back when its commit fails,
+// refused when malformed, chained past one block; and the deadlists: copied in one commit, written by an unmount's
+// own commit, not growing, reserved past one block, rolled back, judged once per block. Debug builds only; the
+// shared helpers are cosmofstest_lib.cee's. cosmofstest_freelog_floor.c asserts the values this file writes as its
+// own constants.
+
+@header("kernel/blk.h", "kernel/vfs.h", "kernel/kmalloc.h", "kernel/ramblk.h", "kernel/string.h", "kernel/cosmofs.h",
+    "uapi/cosmo/syscall.h")
+extern "C" {
+    struct blkdev;
+    struct mount;
+    struct vnode;
+    struct cosmofs_check_class {
+        count: u64;
+        repaired: u64;
+    }
+    struct cosmofs_check_report {
+        alloc_not_seen: cosmofs_check_class;
+        seen_not_alloc: cosmofs_check_class;
+        snapshots_seen: u64;
+        clean: bool;
+    }
+    struct cosmo_stat {
+        size: u64;
+    }
+
+    fn kzalloc(size: usize) -> *mut void;
+    fn ramblk_create(nblocks: u64) -> *mut blkdev;
+    fn ramblk_destroy(bd: *mut blkdev);
+    fn cosmofs_format(bd: *mut blkdev) -> i32;
+    fn vfs_mkdir(start: *mut vnode, path: *CChar, mode: u32) -> i32;
+    fn vfs_rmdir(start: *mut vnode, path: *CChar) -> i32;
+    fn vfs_unlink(start: *mut vnode, path: *CChar) -> i32;
+    fn vfs_symlink(start: *mut vnode, path: *CChar, target: *CChar) -> i32;
+    fn vfs_readlink(start: *mut vnode, path: *CChar, buf: *mut CChar, len: usize) -> i32;
+    fn vfs_stat(start: *mut vnode, path: *CChar, st: *mut cosmo_stat) -> i32;
+    fn vfs_lstat(start: *mut vnode, path: *CChar, st: *mut cosmo_stat) -> i32;
+    fn vfs_mount(path: *CChar, fsname: *CChar, bd: *mut blkdev, flags: u32) -> i32;
+    fn vfs_umount2(path: *CChar, flags: u32) -> i32;
+    fn vfs_sync() -> i32;
+    /// cosmofstest_freelog_floor.c: cosmofs_stats of `mnt` as six numbers (generation, free_blocks, total_blocks,
+    /// members, version, free_root) -- a function whose name its struct's takes in CeeSafe.
+    fn cfst_fl_stats(mnt: *mut mount, out: *mut u64) -> i32;
+    fn cosmofs_check(mnt: *mut mount, out: *mut cosmofs_check_report, flags: u32) -> i32;
+    fn cosmofs_test_set_writeback(mnt: *mut mount, on: bool);
+    fn cosmofs_test_discard_on_unmount(mnt: *mut mount, discard: bool);
+    fn cosmofs_test_format_version(bd: *mut blkdev, version: u32) -> i32;
+    fn cosmofs_test_poison_free_root(bd: *mut blkdev, value: u64) -> i32;
+    fn cosmofs_test_fail_freelog(mnt: *mut mount, on: bool);
+    fn cosmofs_test_poison_freelog_count(bd: *mut blkdev, count: u64) -> i32;
+    fn cosmofs_test_fail_snapfill(mnt: *mut mount, on: bool);
+    fn cosmofs_test_snap_walks(mnt: *mut mount) -> u64;
+    fn cosmofs_test_snap_verdicts(mnt: *mut mount) -> u64;
+    fn cosmofs_test_deadlist_len(mnt: *mut mount, of: u64) -> u64;
+    fn cosmofs_test_deadlist_dups(mnt: *mut mount, examined: *mut u64, first: *mut u64) -> u64;
+    fn cosmofs_test_snap_root(mnt: *mut mount) -> u64;
+    fn memset(p: *mut void, c: i32, n: usize) -> *mut void;
+    fn memcmp(a: *void, b: *void, n: usize) -> i32;
+    // cosmofstest_lib.cee's (cosmofstest.h).
+    fn cfst_mount_of(path: *CChar) -> *mut mount;
+    fn cfst_write_file(path: *CChar, data: *void, len: usize) -> bool;
+    fn cfst_read_matches(path: *CChar, data: *void, len: usize) -> bool;
+    fn cfst_write_wide_file(path: *CChar, pages: u32) -> bool;
+    fn cfst_engine_mount(bdp: *mut *mut blkdev, nblocks: u64, reason: *mut *CChar) -> bool;
+    fn cfst_engine_unmount(bd: *mut blkdev, reason: *mut *CChar) -> bool;
+}
+
+// ---- Values (asserted in cosmofstest_freelog_floor.c) ----
+
+const ENOENT: i32 = 2;
+const EEXIST: i32 = 17;
+const EOPNOTSUPP: i32 = 95;
+const VFS_UMOUNT_FORCE: u32 = 1;
+const DT_REG: u32 = 1;
+const DT_LNK: u32 = 6;
+const CFS_FORMAT_VERSION: u32 = 11;
+/// CFS_DEAD_PER_BLOCK: the block numbers a deadlist or a free record block holds.
+const DEAD_PER_BLOCK: u64 = 506;
+/// u64 words of a cosmo_stat's slot and of a check report's (at least their sizes).
+const STAT_SLOT: usize = 8;
+/// Offsets in a cosmo_stat: its type, its link count.
+const STAT_TYPE: usize = 8;
+const STAT_NLINK: usize = 16;
+
+const ENG: StringView = "/mnt/eng\0";
+const SNAP_NOGROW_COMMITS: u32 = 100;
+
+// ---- Helpers ----
+
+fn c(s: StringView) -> *CChar => s.ptr as *CChar;
+
+fn nov() -> *mut vnode => 0 as *mut vnode;
+
+/// Safety: `reason` writable.
+unsafe fn failed(reason: *mut *CChar, why: StringView) -> bool {
+    reason.write(why.ptr as *CChar);
+    return false;
+}
+
+/// The engine mount.
+/// Safety: none beyond the VFS's own.
+unsafe fn mnt() -> *mut mount => cfst_mount_of(c(ENG));
+
+/// Safety: `bd` is a device.
+unsafe fn mountEng(bd: *mut blkdev) -> i32 => vfs_mount(c(ENG), c("cosmofs\0"), bd, 0);
+
+/// Safety: none beyond the VFS's own.
+unsafe fn umountEng() -> i32 => vfs_umount2(c(ENG), 0);
+
+/// What the tests read of a cosmofs_stats.
+struct Stats {
+    generation: u64;
+    freeBlocks: u64;
+    version: u32;
+    freeRoot: u64;
+}
+
+fn noStats() -> Stats => Stats { generation: 0, freeBlocks: 0, version: 0, freeRoot: 0 };
+
+/// The engine mount's statistics into `s`; false where cosmofs_stats failed.
+/// Safety: none beyond the VFS's own.
+unsafe fn stats(s: borrow mut Stats) -> bool {
+    var v = [0u64; 6];
+    if (cfst_fl_stats(mnt(), borrow mut v as *mut [u64; 6] as *mut u64) != 0) {
+        return false;
+    }
+    s.generation = v[0];
+    s.freeBlocks = v[1];
+    s.version = truncate<u32>(v[4]);
+    s.freeRoot = v[5];
+    return true;
+}
+
+/// The report of the last check: static, since the self-tests run one at a time and the stack has no room for it.
+static mut g_rep: [u64; 256] = [0; 256];
+
+/// Safety: the self-tests run one at a time.
+unsafe fn rep() -> *mut cosmofs_check_report => borrow mut g_rep as *mut [u64; 256] as *mut cosmofs_check_report;
+
+/// The structural check of the engine mount into the report; its result.
+/// Safety: the self-tests run one at a time.
+unsafe fn check(flags: u32) -> i32 => cosmofs_check(mnt(), rep(), flags);
+
+/// Safety: the report is the last check's.
+unsafe fn clean() -> bool => Ptr.toBorrow(rep() as *cosmofs_check_report).clean;
+
+/// Safety: the report is the last check's.
+unsafe fn seenNotAlloc() -> u64 => Ptr.toBorrow(rep() as *cosmofs_check_report).seen_not_alloc.count;
+
+/// Safety: the report is the last check's.
+unsafe fn allocNotSeen() -> u64 => Ptr.toBorrow(rep() as *cosmofs_check_report).alloc_not_seen.count;
+
+/// Safety: the report is the last check's.
+unsafe fn snapshotsSeen() -> u64 => Ptr.toBorrow(rep() as *cosmofs_check_report).snapshots_seen;
+
+/// A stat (or lstat) of `path`: its result, and the type, link count and size into `out` (type, nlink, size).
+/// Safety: `path` a terminated string.
+unsafe fn statOf(path: *CChar, link: bool, out: borrow mut [u64; 3]) -> i32 {
+    var slot = [0u64; 8];
+    let st = borrow mut slot as *mut [u64; 8] as *mut cosmo_stat;
+    let rc = if (link) vfs_lstat(nov(), path, st) else vfs_stat(nov(), path, st);
+    let bytes = Slice.fromRaw(st as *u8, STAT_SLOT * 8);
+    out[0] = ByteOrder.readU32LE(bytes, STAT_TYPE) as u64;
+    out[1] = ByteOrder.readU32LE(bytes, STAT_NLINK) as u64;
+    out[2] = Ptr.toBorrow(st as *cosmo_stat).size;
+    return rc;
+}
+
+/// `/mnt/eng/f<i>`, terminated, in `buf`.
+/// Safety: the result is used while `buf` lives.
+unsafe fn fpath(buf: borrow mut [u8; 64], i: u32) -> *CChar {
+    var w = TextWriter.create(mut buf[..]);
+    w.text("/mnt/eng/f");
+    w.decimal(i as u64);
+    return w.cText();
+}
+
+/// A RAM device of `nblocks` blocks, formatted (at `version`, or the current one for 0), mounted at /mnt/eng with
+/// write-back off, into `bdp`. As the C's first lines of each test did it, a failure leaves the device behind.
+/// Safety: `bdp` and `reason` writable.
+unsafe fn fresh(bdp: *mut *mut blkdev, nblocks: u64, version: u32, reason: *mut *CChar) -> bool {
+    let _ = vfs_umount2(c(ENG), VFS_UMOUNT_FORCE);
+    let bd = ramblk_create(nblocks);
+    bdp.write(bd);
+    if (bd.isNull()) {
+        return failed(reason, "check failed: bd != NULL at line 190\0");
+    }
+    if (version == 0) {
+        if (cosmofs_format(bd) != 0) {
+            return failed(reason, "check failed: cosmofs_format(bd) == 0 at line 194\0");
+        }
+    } else if (cosmofs_test_format_version(bd, version) != 0) {
+        return failed(reason, "check failed: cosmofs_test_format_version(bd, version) == 0 at line 197\0");
+    }
+    let mk = vfs_mkdir(nov(), c(ENG), 493);
+    if (!(mk == 0 || mk == -EEXIST)) {
+        return failed(reason, "check failed: mk == 0 || mk == -EEXIST at line 201\0");
+    }
+    if (mountEng(bd) != 0) {
+        return failed(reason, "check failed: vfs_mount(ENG, \"cosmofs\", bd, 0) == 0 at line 204\0");
+    }
+    cosmofs_test_set_writeback(mnt(), false);
+    return true;
+}
+
+/// The end of a test that made its own device: /mnt/eng unmounted and removed, the device destroyed.
+/// Safety: `bd` the mount's device; `reason` writable.
+unsafe fn finish(bd: *mut blkdev, reason: *mut *CChar) -> bool {
+    if (umountEng() != 0) {
+        return failed(reason, "check failed: vfs_umount(ENG) == 0 at line 214\0");
+    }
+    if (vfs_rmdir(nov(), c(ENG)) != 0) {
+        return failed(reason, "check failed: vfs_rmdir(NULL, ENG) == 0 at line 217\0");
+    }
+    ramblk_destroy(bd);
+    return true;
+}
+
+/// A page of zeros.
+static mut g_zero: [u8; 4096] = [0; 4096];
+
+/// Safety: nothing writes the page.
+unsafe fn zero() -> *void => borrow mut g_zero as *mut [u8; 4096] as *void;
+
+fn say(text: StringView) {
+    var buffer = [0u8; 160];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text(text);
+    KernelLog.send(LogLevel.Info, line);
+}
+
+// ---- Symbolic links ----
+
+/// Safety: `reason` writable.
+@cfg("CONFIG_DEBUG")
+@export("selftest_cosmofs_symlink")
+unsafe fn selftestSymlink(reason: *mut *CChar) -> bool {
+    var bd = 0 as *mut blkdev;
+    if (!fresh(borrow mut bd as *mut *mut blkdev, 512, 0, reason)) {
+        return false;
+    }
+    var st0 = noStats();
+    var st1 = noStats();
+    if (!stats(mut st0)) {
+        return failed(reason, "check failed: cosmofs_stats(cfst_mount_of(ENG), &st0) == 0 at line 249\0");
+    }
+
+    if (!cfst_write_file(c("/mnt/eng/file\0"), "on-disk-bytes".ptr as *void, 13)) {
+        return failed(reason, "check failed: cfst_write_file(ENG \"/file\", \"on-disk-bytes\", 13) at line 253\0");
+    }
+    if (vfs_symlink(nov(), c("/mnt/eng/link\0"), c("file\0")) != 0) {
+        return failed(reason, "check failed: vfs_symlink(NULL, ENG \"/link\", \"file\") == 0 at line 256\0");
+    }
+    if (vfs_symlink(nov(), c("/mnt/eng/abs\0"), c("/mnt/eng/file\0")) != 0) {
+        return failed(reason, "check failed: vfs_symlink(NULL, ENG \"/abs\", ENG \"/file\") == 0 at line 259\0");
+    }
+
+    var lst = [0u64; 3];
+    var fst = [0u64; 3];
+    if (!(statOf(c("/mnt/eng/link\0"), true, mut lst) == 0)) {
+        return failed(reason, "check failed: vfs_lstat(NULL, ENG \"/link\", &lst) == 0 at line 265\0");
+    }
+    if (!(lst[0] == DT_LNK as u64)) {
+        return failed(reason, "check failed: lst.type == COSMO_DT_LNK at line 268\0");
+    }
+    if (!(lst[2] == 4)) {
+        return failed(reason, "check failed: lst.size == 4 at line 271\0");
+    }
+    if (!(statOf(c("/mnt/eng/link\0"), false, mut fst) == 0)) {
+        return failed(reason, "check failed: vfs_stat(NULL, ENG \"/link\", &fst) == 0 at line 274\0");
+    }
+    if (!(fst[0] == DT_REG as u64)) {
+        return failed(reason, "check failed: fst.type == COSMO_DT_REG at line 277\0");
+    }
+    if (!(fst[2] == 13)) {
+        return failed(reason, "check failed: fst.size == 13 at line 280\0");
+    }
+    if (!cfst_read_matches(c("/mnt/eng/link\0"), "on-disk-bytes".ptr as *void, 13)) {
+        return failed(reason, "check failed: cfst_read_matches(ENG \"/link\", \"on-disk-bytes\", 13) at line 283\0");
+    }
+    if (!cfst_read_matches(c("/mnt/eng/abs\0"), "on-disk-bytes".ptr as *void, 13)) {
+        return failed(reason, "check failed: cfst_read_matches(ENG \"/abs\", \"on-disk-bytes\", 13) at line 286\0");
+    }
+
+    // It survives a remount with nothing cached: the bytes come off the disk, not from a vnode this test left behind.
+    if (vfs_sync() != 0) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 291\0");
+    }
+    if (umountEng() != 0) {
+        return failed(reason, "check failed: vfs_umount(ENG) == 0 at line 294\0");
+    }
+    if (mountEng(bd) != 0) {
+        return failed(reason, "check failed: vfs_mount(ENG, \"cosmofs\", bd, 0) == 0 at line 297\0");
+    }
+    cosmofs_test_set_writeback(mnt(), false);
+    var buf = [0u8; 64];
+    memset(borrow mut buf as *mut [u8; 64] as *mut void, 90, 64); // 'Z'
+    let n = vfs_readlink(nov(), c("/mnt/eng/link\0"), borrow mut buf as *mut [u8; 64] as *mut CChar, 64);
+    if (!(n == 4 && memcmp(borrow buf as *[u8; 64] as *void, "file".ptr as *void, 4) == 0 && buf[4] == 90)) {
+        return failed(reason, "check failed: n == 4 && memcmp(buf, \"file\", 4) == 0 && buf[4] == 'Z' at line 304\0");
+    }
+    if (!(statOf(c("/mnt/eng/link\0"), true, mut lst) == 0 && lst[0] == DT_LNK as u64)) {
+        return failed(reason,
+            "check failed: vfs_lstat(NULL, ENG \"/link\", &lst) == 0 && lst.type == COSMO_DT_LNK at line 308\0");
+    }
+    if (!cfst_read_matches(c("/mnt/eng/link\0"), "on-disk-bytes".ptr as *void, 13)) {
+        return failed(reason, "check failed: cfst_read_matches(ENG \"/link\", \"on-disk-bytes\", 13) at line 311\0");
+    }
+
+    // One block per link, given back when it goes.
+    if (!stats(mut st1)) {
+        return failed(reason, "check failed: cosmofs_stats(cfst_mount_of(ENG), &st1) == 0 at line 316\0");
+    }
+    if (vfs_unlink(nov(), c("/mnt/eng/link\0")) != 0) {
+        return failed(reason, "check failed: vfs_unlink(NULL, ENG \"/link\") == 0 at line 319\0");
+    }
+    if (vfs_unlink(nov(), c("/mnt/eng/abs\0")) != 0) {
+        return failed(reason, "check failed: vfs_unlink(NULL, ENG \"/abs\") == 0 at line 322\0");
+    }
+    if (vfs_sync() != 0) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 325\0");
+    }
+    if (!stats(mut st0)) {
+        return failed(reason, "check failed: cosmofs_stats(cfst_mount_of(ENG), &st0) == 0 at line 328\0");
+    }
+    if (!(st0.freeBlocks > st1.freeBlocks)) {
+        return failed(reason, "check failed: st0.free_blocks > st1.free_blocks at line 331\0");
+    }
+    if (!cfst_read_matches(c("/mnt/eng/file\0"), "on-disk-bytes".ptr as *void, 13)) { // the target stayed
+        return failed(reason, "check failed: cfst_read_matches(ENG \"/file\", \"on-disk-bytes\", 13) at line 334\0");
+    }
+
+    if (vfs_unlink(nov(), c("/mnt/eng/file\0")) != 0) {
+        return failed(reason, "check failed: vfs_unlink(NULL, ENG \"/file\") == 0 at line 338\0");
+    }
+    if (!finish(bd, reason)) {
+        return false;
+    }
+    say("selftest: cosmofs-symlink: a link and its target survive a remount, and its block comes back");
+    return true;
+}
+
+/// Safety: `reason` writable.
+@cfg("CONFIG_DEBUG")
+@export("selftest_cosmofs_symlink_version")
+unsafe fn selftestSymlinkVersion(reason: *mut *CChar) -> bool {
+    var bd = 0 as *mut blkdev;
+    if (!fresh(borrow mut bd as *mut *mut blkdev, 512, 7, reason)) {
+        return false;
+    }
+
+    // A version-7 filesystem mounts and works, and refuses a link.
+    if (!cfst_write_file(c("/mnt/eng/file\0"), "seven".ptr as *void, 5)) {
+        return failed(reason, "check failed: cfst_write_file(ENG \"/file\", \"seven\", 5) at line 358\0");
+    }
+    if (vfs_symlink(nov(), c("/mnt/eng/link\0"), c("file\0")) != -EOPNOTSUPP) {
+        return failed(reason, "check failed: vfs_symlink(NULL, ENG \"/link\", \"file\") == -EOPNOTSUPP at line 361\0");
+    }
+    var st = [0u64; 3];
+    if (statOf(c("/mnt/eng/link\0"), true, mut st) != -ENOENT) {
+        return failed(reason, "check failed: vfs_lstat(NULL, ENG \"/link\", &st) == -ENOENT at line 365\0");
+    }
+    if (!cfst_read_matches(c("/mnt/eng/file\0"), "seven".ptr as *void, 5)) {
+        return failed(reason, "check failed: cfst_read_matches(ENG \"/file\", \"seven\", 5) at line 368\0");
+    }
+
+    if (vfs_unlink(nov(), c("/mnt/eng/file\0")) != 0) {
+        return failed(reason, "check failed: vfs_unlink(NULL, ENG \"/file\") == 0 at line 372\0");
+    }
+    if (!finish(bd, reason)) {
+        return false;
+    }
+    say("selftest: cosmofs-symlink-version: a version-7 filesystem mounts, works and refuses a link");
+    return true;
+}
+
+// ---- The free record (format version 9) ----
+
+/// Version 9 takes `free_root` from the superblock's reserved words, so the gate is on *reading* it: below version 9
+/// that word is a reserved zero, and a mount that read it as a chain head would refuse every filesystem written
+/// before this unit (docs/audit/next-subsystem-unmount-leak.md).
+/// Safety: `reason` writable.
+@cfg("CONFIG_DEBUG")
+@export("selftest_cosmofs_freelog_format")
+unsafe fn selftestFreelogFormat(reason: *mut *CChar) -> bool {
+    // A version-8 filesystem mounts, works, and replays nothing.
+    var bd = 0 as *mut blkdev;
+    if (!fresh(borrow mut bd as *mut *mut blkdev, 512, 8, reason)) {
+        return false;
+    }
+    if (!cfst_write_file(c("/mnt/eng/eight\0"), "older".ptr as *void, 5)) {
+        return failed(reason, "check failed: cfst_write_file(ENG \"/eight\", \"older\", 5) at line 396\0");
+    }
+    if (vfs_sync() != 0) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 399\0");
+    }
+    if (!cfst_read_matches(c("/mnt/eng/eight\0"), "older".ptr as *void, 5)) {
+        return failed(reason, "check failed: cfst_read_matches(ENG \"/eight\", \"older\", 5) at line 402\0");
+    }
+    if (check(0) != 0) {
+        return failed(reason, "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, 0) == 0 at line 405\0");
+    }
+    if (!clean()) {
+        return failed(reason, "check failed: rep.clean at line 408\0");
+    }
+    if (umountEng() != 0) {
+        return failed(reason, "check failed: vfs_umount(ENG) == 0 at line 411\0");
+    }
+
+    // And again after a remount: nothing was read from a field it does not have, and nothing was written into one.
+    if (mountEng(bd) != 0) {
+        return failed(reason, "check failed: vfs_mount(ENG, \"cosmofs\", bd, 0) == 0 at line 416\0");
+    }
+    if (!cfst_read_matches(c("/mnt/eng/eight\0"), "older".ptr as *void, 5)) {
+        return failed(reason, "check failed: cfst_read_matches(ENG \"/eight\", \"older\", 5) at line 419\0");
+    }
+    var st8 = noStats();
+    if (!stats(mut st8)) {
+        return failed(reason, "check failed: cosmofs_stats(cfst_mount_of(ENG), &st8) == 0 at line 423\0");
+    }
+    if (!(st8.version == 8 && st8.freeRoot == 0)) {
+        return failed(reason, "check failed: st8.version == 8 && st8.free_root == 0 at line 426\0");
+    }
+    if (umountEng() != 0) {
+        return failed(reason, "check failed: vfs_umount(ENG) == 0 at line 429\0");
+    }
+
+    // The gate itself. Every image this tree formats zeroes its reserved words, so a version-8 filesystem's
+    // `free_root` word is 0 whether the gate is there or not -- which makes the gate untestable against anything the
+    // tree writes. This puts a value in it, as a later version or another writer would, and the gate is what keeps it
+    // from being read as the head of a chain.
+    if (cosmofs_test_poison_free_root(bd, 0x5a5a5a5a) != 0) {
+        return failed(reason, "check failed: cosmofs_test_poison_free_root(bd, 0x5a5a5a5aull) == 0 at line 437\0");
+    }
+    if (mountEng(bd) != 0) {
+        return failed(reason, "check failed: vfs_mount(ENG, \"cosmofs\", bd, 0) == 0 at line 440\0");
+    }
+    if (!stats(mut st8)) {
+        return failed(reason, "check failed: cosmofs_stats(cfst_mount_of(ENG), &st8) == 0 at line 443\0");
+    }
+    if (st8.version != 8) {
+        return failed(reason, "check failed: st8.version == 8 at line 446\0");
+    }
+    if (st8.freeRoot != 0) { // not 0x5a5a5a5a: below version 9 the word is not a root
+        return failed(reason, "check failed: st8.free_root == 0 at line 449\0");
+    }
+    if (!cfst_read_matches(c("/mnt/eng/eight\0"), "older".ptr as *void, 5)) {
+        return failed(reason, "check failed: cfst_read_matches(ENG \"/eight\", \"older\", 5) at line 452\0");
+    }
+    if (umountEng() != 0) {
+        return failed(reason, "check failed: vfs_umount(ENG) == 0 at line 455\0");
+    }
+
+    // A version-9 filesystem carries the field, and an idle one has nothing recorded in it.
+    let bd9 = ramblk_create(512);
+    if (bd9.isNull()) {
+        return failed(reason, "check failed: bd9 != NULL at line 461\0");
+    }
+    if (cosmofs_format(bd9) != 0) {
+        return failed(reason, "check failed: cosmofs_format(bd9) == 0 at line 464\0");
+    }
+    if (mountEng(bd9) != 0) {
+        return failed(reason, "check failed: vfs_mount(ENG, \"cosmofs\", bd9, 0) == 0 at line 467\0");
+    }
+    cosmofs_test_set_writeback(mnt(), false);
+    var st = noStats();
+    if (!stats(mut st)) {
+        return failed(reason, "check failed: cosmofs_stats(cfst_mount_of(ENG), &st) == 0 at line 472\0");
+    }
+    if (st.version != CFS_FORMAT_VERSION) { // raised to 12 only by a snapshot
+        return failed(reason, "check failed: st.version == CFS_FORMAT_VERSION at line 475\0");
+    }
+    if (st.freeRoot != 0) { // a fresh filesystem freed nothing
+        return failed(reason, "check failed: st.free_root == 0 at line 478\0");
+    }
+    if (!finish(bd, reason)) {
+        return false;
+    }
+    ramblk_destroy(bd9);
+    var buffer = [0u8; 160];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: cosmofs-freelog-format: a version-8 filesystem mounts and replays nothing; ");
+    line.text("a version-9 one has the field");
+    KernelLog.send(LogLevel.Info, line);
+    return true;
+}
+
+/// The record's own blocks are metadata, and the bitmap the root publishes has to say so. Allocating them after the
+/// bitmap fixpoint -- which is where they naturally want to go, since the set to record is only final then --
+/// publishes a root whose bitmap does not know about them, and the allocator hands them out again. That is a
+/// corruption rather than a leak, and the structural check is what sees it: a block that is reachable and free is
+/// `seen_not_alloc`, the dangerous direction (docs/audit/next-subsystem-unmount-leak.md).
+/// Safety: `reason` writable.
+@cfg("CONFIG_DEBUG")
+@export("selftest_cosmofs_freelog_accounted")
+unsafe fn selftestFreelogAccounted(reason: *mut *CChar) -> bool {
+    var bd = 0 as *mut blkdev;
+    if (!fresh(borrow mut bd as *mut *mut blkdev, 512, 0, reason)) {
+        return false;
+    }
+
+    // Something to free, so the record is not empty.
+    if (!cfst_write_file(c("/mnt/eng/a\0"), "one".ptr as *void, 3)) {
+        return failed(reason, "check failed: cfst_write_file(ENG \"/a\", \"one\", 3) at line 508\0");
+    }
+    if (vfs_sync() != 0) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 511\0");
+    }
+    if (!cfst_write_file(c("/mnt/eng/a\0"), "one again, longer".ptr as *void, 17)) {
+        return failed(reason, "check failed: cfst_write_file(ENG \"/a\", \"one again, longer\", 17) at line 514\0");
+    }
+    if (vfs_unlink(nov(), c("/mnt/eng/a\0")) != 0) {
+        return failed(reason, "check failed: vfs_unlink(NULL, ENG \"/a\") == 0 at line 517\0");
+    }
+    if (vfs_sync() != 0) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 520\0");
+    }
+
+    var st = noStats();
+    if (!stats(mut st)) {
+        return failed(reason, "check failed: cosmofs_stats(cfst_mount_of(ENG), &st) == 0 at line 525\0");
+    }
+    if (st.freeRoot == 0) { // there is a record
+        return failed(reason, "check failed: st.free_root != 0 at line 528\0");
+    }
+
+    // Every block of it is allocated in the bitmap this root published, and the check agrees: no leak, and nothing
+    // reachable-but-free.
+    if (check(0) != 0) {
+        return failed(reason, "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, 0) == 0 at line 534\0");
+    }
+    if (seenNotAlloc() != 0) { // the dangerous direction
+        return failed(reason, "check failed: rep.seen_not_alloc.count == 0 at line 537\0");
+    }
+    if (allocNotSeen() != 0) {
+        return failed(reason, "check failed: rep.alloc_not_seen.count == 0 at line 540\0");
+    }
+    if (!clean()) {
+        return failed(reason, "check failed: rep.clean at line 543\0");
+    }
+
+    // And across a remount, where the bitmap on disk is the only word.
+    if (umountEng() != 0) {
+        return failed(reason, "check failed: vfs_umount(ENG) == 0 at line 548\0");
+    }
+    if (mountEng(bd) != 0) {
+        return failed(reason, "check failed: vfs_mount(ENG, \"cosmofs\", bd, 0) == 0 at line 551\0");
+    }
+    if (check(0) != 0) {
+        return failed(reason, "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, 0) == 0 at line 554\0");
+    }
+    if (seenNotAlloc() != 0) {
+        return failed(reason, "check failed: rep.seen_not_alloc.count == 0 at line 557\0");
+    }
+
+    if (!finish(bd, reason)) {
+        return false;
+    }
+    say("selftest: cosmofs-freelog-accounted: the record's blocks are allocated in the bitmap its root published");
+    return true;
+}
+
+/// A record supersedes its predecessor, and the predecessor's blocks have to go back. Without that, every commit
+/// leaks a block or two -- this unit's own defect one level up -- which no single-commit test can see.
+/// Safety: `reason` writable.
+@cfg("CONFIG_DEBUG")
+@export("selftest_cosmofs_freelog_supersede")
+unsafe fn selftestFreelogSupersede(reason: *mut *CChar) -> bool {
+    var bd = 0 as *mut blkdev;
+    if (!fresh(borrow mut bd as *mut *mut blkdev, 512, 0, reason)) {
+        return false;
+    }
+
+    // Settle, then measure: the first commits grow the tree.
+    if (!cfst_write_file(c("/mnt/eng/churn\0"), "x".ptr as *void, 1)) {
+        return failed(reason, "check failed: cfst_write_file(ENG \"/churn\", \"x\", 1) at line 580\0");
+    }
+    if (vfs_sync() != 0) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 583\0");
+    }
+    if (vfs_sync() != 0) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 586\0");
+    }
+    var before = noStats();
+    if (!stats(mut before)) {
+        return failed(reason, "check failed: cosmofs_stats(cfst_mount_of(ENG), &before) == 0 at line 590\0");
+    }
+
+    // A hundred commits that change the same one block.
+    for (i in 0u32..100) {
+        if (!cfst_write_file(c("/mnt/eng/churn\0"), "y".ptr as *void, 1)) {
+            return failed(reason, "check failed: cfst_write_file(ENG \"/churn\", \"y\", 1) at line 596\0");
+        }
+        if (vfs_sync() != 0) {
+            return failed(reason, "check failed: vfs_sync() == 0 at line 599\0");
+        }
+    }
+    var after = noStats();
+    if (!stats(mut after)) {
+        return failed(reason, "check failed: cosmofs_stats(cfst_mount_of(ENG), &after) == 0 at line 604\0");
+    }
+
+    // The count may move by the transaction in flight, but not by a hundred commits' worth of records. A leak of one
+    // block per commit would be a hundred blocks on a 512-block filesystem.
+    if (!(after.freeBlocks + 8 >= before.freeBlocks)) {
+        return failed(reason, "check failed: after.free_blocks + 8 >= before.free_blocks at line 610\0");
+    }
+    if (after.freeRoot == 0) {
+        return failed(reason, "check failed: after.free_root != 0 at line 613\0");
+    }
+
+    if (check(0) != 0) {
+        return failed(reason, "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, 0) == 0 at line 617\0");
+    }
+    if (!clean()) {
+        return failed(reason, "check failed: rep.clean at line 620\0");
+    }
+
+    if (!finish(bd, reason)) {
+        return false;
+    }
+    var buffer = [0u8; 160];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: cosmofs-freelog-supersede: 100 commits, ");
+    line.decimal(before.freeBlocks);
+    line.text(" free before and ");
+    line.decimal(after.freeBlocks);
+    line.text(" after");
+    KernelLog.send(LogLevel.Info, line);
+    return true;
+}
+
+/// The defect this unit exists for. Write a file, delete it, unmount, and the blocks the delete freed are gone: the
+/// commit cleared their bits in memory after its root was durable and marked the chunks for a next commit that an
+/// unmount never makes.
+///
+/// This test fails on the tree before this unit, which is the strongest thing that can be said about a test.
+/// Safety: `reason` writable.
+@cfg("CONFIG_DEBUG")
+@export("selftest_cosmofs_unmount_leak")
+unsafe fn selftestUnmountLeak(reason: *mut *CChar) -> bool {
+    var bd = 0 as *mut blkdev;
+    if (!fresh(borrow mut bd as *mut *mut blkdev, 512, 0, reason)) {
+        return false;
+    }
+    if (vfs_sync() != 0) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 651\0");
+    }
+
+    // Settle first: the count to come back to is the one after the filesystem has stopped growing.
+    if (!cfst_write_file(c("/mnt/eng/settle\0"), "s".ptr as *void, 1)) {
+        return failed(reason, "check failed: cfst_write_file(ENG \"/settle\", \"s\", 1) at line 656\0");
+    }
+    if (vfs_unlink(nov(), c("/mnt/eng/settle\0")) != 0) {
+        return failed(reason, "check failed: vfs_unlink(NULL, ENG \"/settle\") == 0 at line 659\0");
+    }
+    if (vfs_sync() != 0) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 662\0");
+    }
+    if (vfs_sync() != 0) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 665\0");
+    }
+    var before = noStats();
+    if (!stats(mut before)) {
+        return failed(reason, "check failed: cosmofs_stats(cfst_mount_of(ENG), &before) == 0 at line 669\0");
+    }
+
+    // A file, and then no file.
+    if (!cfst_write_file(c("/mnt/eng/leakme\0"), zero(), 4096)) {
+        return failed(reason, "check failed: cfst_write_file(ENG \"/leakme\", big, sizeof(big)) at line 674\0");
+    }
+    if (vfs_sync() != 0) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 677\0");
+    }
+    if (vfs_unlink(nov(), c("/mnt/eng/leakme\0")) != 0) {
+        return failed(reason, "check failed: vfs_unlink(NULL, ENG \"/leakme\") == 0 at line 680\0");
+    }
+    if (umountEng() != 0) { // the unmount's commit frees them
+        return failed(reason, "check failed: vfs_umount(ENG) == 0 at line 683\0");
+    }
+
+    // Remount: every block is back, and the filesystem adds up.
+    if (mountEng(bd) != 0) {
+        return failed(reason, "check failed: vfs_mount(ENG, \"cosmofs\", bd, 0) == 0 at line 688\0");
+    }
+    var after = noStats();
+    if (!stats(mut after)) {
+        return failed(reason, "check failed: cosmofs_stats(cfst_mount_of(ENG), &after) == 0 at line 692\0");
+    }
+    if (after.freeBlocks != before.freeBlocks) {
+        return failed(reason, "check failed: after.free_blocks == before.free_blocks at line 695\0");
+    }
+    if (check(0) != 0) {
+        return failed(reason, "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, 0) == 0 at line 698\0");
+    }
+    if (!clean()) {
+        return failed(reason, "check failed: rep.clean at line 701\0");
+    }
+
+    if (!finish(bd, reason)) {
+        return false;
+    }
+    var buffer = [0u8; 160];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: cosmofs-unmount-leak: ");
+    line.decimal(before.freeBlocks);
+    line.text(" free before the file, ");
+    line.decimal(after.freeBlocks);
+    line.text(" after it was deleted and the filesystem remounted");
+    KernelLog.send(LogLevel.Info, line);
+    return true;
+}
+
+/// A record must not name a block a snapshot still holds. The commit writes the record *before* the root and appends
+/// to the deadlist *after* it, so the two ask the same question through cfs_snapshot_holds -- and if the record's
+/// answer were wrong, a mount would replay it and hand a live snapshot's block to the allocator.
+///
+/// The remount is the point: without it nothing reads the record, and a wrong one costs nothing until the next
+/// mount.
+/// Safety: `reason` writable.
+@cfg("CONFIG_DEBUG")
+@export("selftest_cosmofs_freelog_snapshot")
+unsafe fn selftestFreelogSnapshot(reason: *mut *CChar) -> bool {
+    var bd = 0 as *mut blkdev;
+    if (!fresh(borrow mut bd as *mut *mut blkdev, 512, 0, reason)) {
+        return false;
+    }
+
+    // Something for the snapshot to hold.
+    if (!cfst_write_file(c("/mnt/eng/held\0"), "the snapshot's copy".ptr as *void, 19)) {
+        return failed(reason,
+            "check failed: cfst_write_file(ENG \"/held\", \"the snapshot's copy\", 19) at line 736\0");
+    }
+    if (vfs_sync() != 0) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 739\0");
+    }
+    if (vfs_mkdir(nov(), c("/mnt/eng/.snapshots/keep\0"), 493) != 0) {
+        return failed(reason, "check failed: vfs_mkdir(NULL, ENG \"/.snapshots/keep\", 0755) == 0 at line 742\0");
+    }
+
+    var before = noStats();
+    if (!stats(mut before)) {
+        return failed(reason, "check failed: cosmofs_stats(cfst_mount_of(ENG), &before) == 0 at line 747\0");
+    }
+
+    // Free those blocks in the live tree and let **the unmount's own commit** be the one that records it. A sync in
+    // between would write the record and then supersede it, and the record a mount actually reads is the last one
+    // written -- so a wrong record would be replaced before anything believed it, and the test would pass whatever
+    // the code did.
+    if (vfs_unlink(nov(), c("/mnt/eng/held\0")) != 0) {
+        return failed(reason, "check failed: vfs_unlink(NULL, ENG \"/held\") == 0 at line 755\0");
+    }
+    if (umountEng() != 0) {
+        return failed(reason, "check failed: vfs_umount(ENG) == 0 at line 758\0");
+    }
+    if (mountEng(bd) != 0) {
+        return failed(reason, "check failed: vfs_mount(ENG, \"cosmofs\", bd, 0) == 0 at line 761\0");
+    }
+    var after = noStats();
+    if (!stats(mut after)) {
+        return failed(reason, "check failed: cosmofs_stats(cfst_mount_of(ENG), &after) == 0 at line 765\0");
+    }
+
+    // The free count is not the instrument here, and trying to use it was wrong in both directions: the unlink frees
+    // the copy-on-write casualties that postdate the snapshot, which raises it, while the deadlist the snapshot grows
+    // and the record itself consume blocks, which lowers it. Either way it moves for reasons that have nothing to do
+    // with the claim.
+    //
+    // The claim is that the snapshot's own blocks did not go back, and the checker states it exactly: a record that
+    // named them would have had the replay clear their bits while the snapshot's tree still reaches them -- reachable
+    // and free, which is `seen_not_alloc`, the direction that hands live data to the allocator.
+    if (check(0) != 0) {
+        return failed(reason, "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, 0) == 0 at line 777\0");
+    }
+    if (seenNotAlloc() != 0) { // the claim: no snapshot block handed back
+        return failed(reason, "check failed: rep.seen_not_alloc.count == 0 at line 780\0");
+    }
+    if (snapshotsSeen() != 1) {
+        return failed(reason, "check failed: rep.snapshots_seen == 1 at line 783\0");
+    }
+
+    // Not `clean`, and the reason is worth writing down: an unmount that frees a block a snapshot holds strands a
+    // couple of blocks, and it is this unit's own defect living in the snapshot path. cfs_snapshot_hold_block appends
+    // to a deadlist from phase 7, after the root is written -- so the block it allocates and the snapshot entry it
+    // dirties belong to a transaction that has already been published, and at an unmount there is no next commit to
+    // carry them.
+    //
+    // The record fixes the frees because they are known before the root. A deadlist append is not: it happens as a
+    // consequence of deciding what to free, which is only final after the bitmap fixpoint, which must come after
+    // every allocation. Breaking that circle for the deadlist needs the same reserve-before-fill treatment this unit
+    // gave the record, in cosmofs_snap.c, and that is a second unit with its own proofs rather than a paragraph in
+    // this one. Inventory row.
+    if (allocNotSeen() != 0) { // was `<= 4`: see below
+        return failed(reason, "check failed: rep.alloc_not_seen.count == 0 at line 798\0");
+    }
+
+    // And the snapshot still reads, which is what the blocks were for.
+    if (!cfst_read_matches(c("/mnt/eng/.snapshots/keep/held\0"), "the snapshot's copy".ptr as *void, 19)) {
+        return failed(reason,
+            "check failed: read_matches(ENG \"/.snapshots/keep/held\", \"the snapshot's copy\", 19) at line 804\0");
+    }
+
+    if (!finish(bd, reason)) {
+        return false;
+    }
+    var buffer = [0u8; 160];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: cosmofs-freelog-snapshot: a snapshot's blocks survive the record and the remount (");
+    line.decimal(after.freeBlocks);
+    line.text(" free either side)");
+    KernelLog.send(LogLevel.Info, line);
+    return true;
+}
+
+// ---- The snapshot deadlists ----
+
+/// The copy, in one commit.
+///
+/// Until this unit the snapshot list was the one metadata chain in the filesystem rewritten where it lay: every other
+/// tree is copied and published by the root that names the copy, and `snap_root` alone pointed at a block a
+/// transaction edited in place. A crash between that write and the superblock left the *previous* root naming a list
+/// belonging to a transaction that did not happen (docs/audit/next-subsystem-snap-deadlist.md).
+///
+/// Two snapshots in a row change the same list block. The claim is that the second change is written into a
+/// different block -- a copy -- and that the block it superseded went back to the allocator rather than onto a
+/// deadlist.
+/// Safety: `reason` writable.
+@cfg("CONFIG_DEBUG")
+@export("selftest_cosmofs_snap_cow")
+unsafe fn selftestSnapCow(reason: *mut *CChar) -> bool {
+    var bd = 0 as *mut blkdev;
+    if (!cfst_engine_mount(borrow mut bd as *mut *mut blkdev, 512, reason)) {
+        return false;
+    }
+
+    if (!cfst_write_file(c("/mnt/eng/held\0"), "the snapshot's copy".ptr as *void, 19)) {
+        return failed(reason,
+            "check failed: cfst_write_file(ENG \"/held\", \"the snapshot's copy\", 19) at line 842\0");
+    }
+    if (vfs_sync() != 0) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 845\0");
+    }
+    if (vfs_mkdir(nov(), c("/mnt/eng/.snapshots/one\0"), 493) != 0) {
+        return failed(reason, "check failed: vfs_mkdir(NULL, ENG \"/.snapshots/one\", 0755) == 0 at line 848\0");
+    }
+
+    // The measurement is taken across **one** commit, and that is not a detail. A block freed by a transaction keeps
+    // its bitmap bit until after that transaction's root, so a copy made inside the transaction cannot land on the
+    // block it supersedes -- but the *next* transaction's allocator starts from the member's first usable block and
+    // hands it straight back. Comparing across two commits therefore compares equal on a filesystem that copies
+    // perfectly, which is how this test first failed.
+    let before = cosmofs_test_snap_root(mnt());
+    if (before == 0) {
+        return failed(reason, "check failed: before != 0 at line 858\0");
+    }
+
+    // One commit that appends to the snapshot's deadlist: it copies the list to write the new head into it.
+    if (vfs_unlink(nov(), c("/mnt/eng/held\0")) != 0) {
+        return failed(reason, "check failed: vfs_unlink(NULL, ENG \"/held\") == 0 at line 863\0");
+    }
+    if (vfs_sync() != 0) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 866\0");
+    }
+    let after = cosmofs_test_snap_root(mnt());
+    if (after == 0) {
+        return failed(reason, "check failed: after != 0 at line 870\0");
+    }
+    if (after == before) { // the claim: written into a copy, not into the block the old root named
+        return failed(reason, "check failed: after != before at line 873\0");
+    }
+
+    // And the superseded block went back exempt rather than deferred. Deferred would send it through the snapshot
+    // filter, which asks whether the newest snapshot's recorded bitmap marks it allocated -- and it does, because it
+    // was allocated before that snapshot was taken. The block would be held on the deadlist of the very list it is a
+    // copy of, which is not a leak and not a finding, so the checker would stay quiet while the chain grew a block per
+    // commit.
+    if (cosmofs_test_deadlist_len(mnt(), before) != 0) {
+        return failed(reason, "check failed: cosmofs_test_deadlist_len(cfst_mount_of(ENG), before) == 0 at line 882\0");
+    }
+
+    // The entries the commit did write are there, and none is doubled.
+    var examined: u64 = 0;
+    if (cosmofs_test_deadlist_dups(mnt(), borrow mut examined as *mut u64, 0 as *mut u64) != 0) {
+        return failed(reason,
+            "check failed: cosmofs_test_deadlist_dups(cfst_mount_of(ENG), &examined, NULL) == 0 at line 889\0");
+    }
+    if (examined == 0) {
+        return failed(reason, "check failed: examined > 0 at line 892\0");
+    }
+
+    if (umountEng() != 0) {
+        return failed(reason, "check failed: vfs_umount(ENG) == 0 at line 896\0");
+    }
+    if (mountEng(bd) != 0) {
+        return failed(reason, "check failed: vfs_mount(ENG, \"cosmofs\", bd, 0) == 0 at line 899\0");
+    }
+    if (cosmofs_test_snap_root(mnt()) != after) {
+        return failed(reason, "check failed: cosmofs_test_snap_root(cfst_mount_of(ENG)) == after at line 902\0");
+    }
+    if (check(0) != 0) {
+        return failed(reason, "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, 0) == 0 at line 905\0");
+    }
+    if (!clean()) {
+        return failed(reason, "check failed: rep.clean at line 908\0");
+    }
+    if (snapshotsSeen() != 1) {
+        return failed(reason, "check failed: rep.snapshots_seen == 1 at line 911\0");
+    }
+    if (!cfst_read_matches(c("/mnt/eng/.snapshots/one/held\0"), "the snapshot's copy".ptr as *void, 19)) {
+        return failed(reason,
+            "check failed: cfst_read_matches(ENG \"/.snapshots/one/held\", \"the snapshot's copy\", 19) at line 915\0");
+    }
+
+    var buffer = [0u8; 192];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: cosmofs-snap-cow: the snapshot list moved from block ");
+    line.decimal(before);
+    line.text(" to ");
+    line.decimal(after);
+    line.text(" in one commit, and ");
+    line.decimal(before);
+    line.text(" went back to the allocator rather than onto a deadlist");
+    KernelLog.send(LogLevel.Info, line);
+    return cfst_engine_unmount(bd, reason);
+}
+
+/// The defect, stated where it hurts: a snapshot, blocks it holds freed in the live tree, and an unmount. The
+/// deadlist entry used to be written after the root, so the unmount's commit -- the last one there will ever be --
+/// left it in memory and threw it away. The block stayed allocated, reachable from nothing, and deleting the snapshot
+/// would never free it because the deadlist had never heard of it.
+/// Safety: `reason` writable.
+@cfg("CONFIG_DEBUG")
+@export("selftest_cosmofs_snap_unmount")
+unsafe fn selftestSnapUnmount(reason: *mut *CChar) -> bool {
+    var bd = 0 as *mut blkdev;
+    if (!cfst_engine_mount(borrow mut bd as *mut *mut blkdev, 512, reason)) {
+        return false;
+    }
+
+    if (!cfst_write_file(c("/mnt/eng/held\0"), "the snapshot's copy".ptr as *void, 19)) {
+        return failed(reason,
+            "check failed: cfst_write_file(ENG \"/held\", \"the snapshot's copy\", 19) at line 946\0");
+    }
+    if (vfs_sync() != 0) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 949\0");
+    }
+    if (vfs_mkdir(nov(), c("/mnt/eng/.snapshots/keep\0"), 493) != 0) {
+        return failed(reason, "check failed: vfs_mkdir(NULL, ENG \"/.snapshots/keep\", 0755) == 0 at line 952\0");
+    }
+
+    // The unmount's own commit is the one that frees: a sync here would be followed by another commit that tidied up
+    // after it, and the defect is precisely the commit that has no successor.
+    if (vfs_unlink(nov(), c("/mnt/eng/held\0")) != 0) {
+        return failed(reason, "check failed: vfs_unlink(NULL, ENG \"/held\") == 0 at line 958\0");
+    }
+    if (umountEng() != 0) {
+        return failed(reason, "check failed: vfs_umount(ENG) == 0 at line 961\0");
+    }
+    if (mountEng(bd) != 0) {
+        return failed(reason, "check failed: vfs_mount(ENG, \"cosmofs\", bd, 0) == 0 at line 964\0");
+    }
+
+    if (check(0) != 0) {
+        return failed(reason, "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, 0) == 0 at line 968\0");
+    }
+    if (!clean()) { // the claim
+        return failed(reason, "check failed: rep.clean at line 971\0");
+    }
+    if (snapshotsSeen() != 1) {
+        return failed(reason, "check failed: rep.snapshots_seen == 1 at line 974\0");
+    }
+
+    // And `clean` is not the answer of a filesystem that recorded nothing: entries exist, and none of them is on two
+    // lists.
+    var examined: u64 = 0;
+    var first: u64 = 0;
+    if (cosmofs_test_deadlist_dups(mnt(), borrow mut examined as *mut u64, borrow mut first as *mut u64) != 0) {
+        return failed(reason,
+            "check failed: cosmofs_test_deadlist_dups(cfst_mount_of(ENG), &examined, &first) == 0 at line 983\0");
+    }
+    if (examined == 0) {
+        return failed(reason, "check failed: examined > 0 at line 986\0");
+    }
+
+    // The blocks are still the snapshot's, which is what holding them was for.
+    if (!cfst_read_matches(c("/mnt/eng/.snapshots/keep/held\0"), "the snapshot's copy".ptr as *void, 19)) {
+        return failed(reason,
+            "check failed: read_matches(ENG \"/.snapshots/keep/held\", \"the snapshot's copy\", 19) at line 992\0");
+    }
+
+    var buffer = [0u8; 160];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: cosmofs-snap-unmount: clean across the unmount, ");
+    line.decimal(examined);
+    line.text(" deadlist entries and no duplicate");
+    KernelLog.send(LogLevel.Info, line);
+    return cfst_engine_unmount(bd, reason);
+}
+
+/// The copies do not accumulate. Every commit that appends to a deadlist copies the snapshot list and the deadlist
+/// head, and every superseded block goes back *exempt* -- outside the snapshot filter. Deferred instead would send
+/// each copy through that filter, which would hold it on the deadlist it is a copy of: not a leak, so the checker
+/// stays quiet, and the chain grows by a block or two on every commit until the filesystem fills.
+///
+/// A hundred commits, and the claim is that not one of the hundred superseded list blocks is named by any deadlist.
+/// Safety: `reason` writable.
+@cfg("CONFIG_DEBUG")
+@export("selftest_cosmofs_snap_nogrow")
+unsafe fn selftestSnapNogrow(reason: *mut *CChar) -> bool {
+    var bd = 0 as *mut blkdev;
+    if (!cfst_engine_mount(borrow mut bd as *mut *mut blkdev, 1024, reason)) {
+        return false;
+    }
+    // A file per commit, all of them in the snapshot, deleted one at a time. Rewriting *one* file a hundred times
+    // would not do: only the first rewrite frees a block the snapshot holds, and the other ninety-nine free blocks
+    // born after it, so only a handful of commits would copy the list and the claim below would be checked against
+    // a handful of superseded blocks.
+    var path = [0u8; 64];
+    for (i in 0u32..SNAP_NOGROW_COMMITS) {
+        if (!cfst_write_file(fpath(mut path, i), "x".ptr as *void, 1)) {
+            return failed(reason, "check failed: cfst_write_file(path, \"x\", 1) at line 1025\0");
+        }
+    }
+    if (vfs_sync() != 0) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 1029\0");
+    }
+    if (vfs_mkdir(nov(), c("/mnt/eng/.snapshots/keep\0"), 493) != 0) {
+        return failed(reason, "check failed: vfs_mkdir(NULL, ENG \"/.snapshots/keep\", 0755) == 0 at line 1032\0");
+    }
+
+    let roots = kzalloc(SNAP_NOGROW_COMMITS as usize * 8) as *mut u64;
+    if (roots.isNull()) {
+        return failed(reason, "check failed: roots != NULL at line 1037\0");
+    }
+    var ok = true;
+    var i: u32 = 0;
+    while (i < SNAP_NOGROW_COMMITS && ok) {
+        roots.add(i as usize).write(cosmofs_test_snap_root(mnt()));
+        ok = vfs_unlink(nov(), fpath(mut path, i)) == 0 && vfs_sync() == 0;
+        i += 1;
+    }
+    if (!ok) {
+        kfree(roots as *mut void);
+        return failed(reason, "a commit in the nogrow loop failed\0");
+    }
+
+    // Not one of them is held -- and the list really did move on each commit, which is the difference between this
+    // test and one run against a filesystem whose snapshot list never changed.
+    //
+    // The measure is how often the root *changed between consecutive commits*, not how many distinct blocks appeared.
+    // Distinct blocks counts the allocator, not the copying: a superseded block is free again by the next transaction
+    // and the metadata allocator starts from the member's first usable block, so a hundred copies land on two blocks
+    // in alternation and "distinct" reads 2 on a filesystem that copied a hundred times. Within one commit the block
+    // being superseded still has its bit set, so the copy cannot land on it and the root must differ across that
+    // commit.
+    var heldRoots: u32 = 0;
+    var moves: u32 = 0;
+    let now = cosmofs_test_snap_root(mnt());
+    for (k in 0u32..SNAP_NOGROW_COMMITS) {
+        let rk = roots.add(k as usize).read();
+        if (rk == 0) {
+            continue;
+        }
+        let next = if (k + 1 < SNAP_NOGROW_COMMITS) roots.add(k as usize + 1).read() else now;
+        if (next != 0 && next != rk) {
+            moves += 1;
+        }
+        if (rk != now && cosmofs_test_deadlist_len(mnt(), rk) != 0) {
+            heldRoots += 1;
+        }
+    }
+    kfree(roots as *mut void);
+    if (heldRoots != 0) {
+        return failed(reason, "check failed: held_roots == 0 at line 1078\0");
+    }
+    // Every commit freed a block the snapshot holds, so every commit copied: a handful of moves would mean the
+    // workload had stopped exercising the thing under test.
+    if (!(moves > SNAP_NOGROW_COMMITS / 2)) {
+        return failed(reason, "check failed: moves > SNAP_NOGROW_COMMITS / 2 at line 1083\0");
+    }
+
+    // And the whole thing still adds up across a remount.
+    if (umountEng() != 0) {
+        return failed(reason, "check failed: vfs_umount(ENG) == 0 at line 1088\0");
+    }
+    if (mountEng(bd) != 0) {
+        return failed(reason, "check failed: vfs_mount(ENG, \"cosmofs\", bd, 0) == 0 at line 1091\0");
+    }
+    if (check(0) != 0) {
+        return failed(reason, "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, 0) == 0 at line 1094\0");
+    }
+    if (!clean()) {
+        return failed(reason, "check failed: rep.clean at line 1097\0");
+    }
+    var examined: u64 = 0;
+    if (cosmofs_test_deadlist_dups(mnt(), borrow mut examined as *mut u64, 0 as *mut u64) != 0) {
+        return failed(reason,
+            "check failed: cosmofs_test_deadlist_dups(cfst_mount_of(ENG), &examined, NULL) == 0 at line 1102\0");
+    }
+    if (examined == 0) {
+        return failed(reason, "check failed: examined > 0 at line 1105\0");
+    }
+
+    var buffer = [0u8; 192];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: cosmofs-snap-nogrow: ");
+    line.decimal(SNAP_NOGROW_COMMITS as u64);
+    line.text(" commits, the snapshot list moved in ");
+    line.decimal(moves as u64);
+    line.text(" of them, ");
+    line.decimal(examined);
+    line.text(" deadlist entries, no superseded list block held");
+    KernelLog.send(LogLevel.Info, line);
+    return cfst_engine_unmount(bd, reason);
+}
+
+/// The reservation, exercised past one block of it. More blocks freed in one transaction than a deadlist block holds,
+/// so the fill needs a *fresh* deadlist block as well as a copied head -- the term in the bound that is one block per
+/// CFS_DEAD_PER_BLOCK holds.
+///
+/// The claim is the ordering one: every block the snapshot list gained is set in the bitmap the root published. A
+/// fill that allocated instead of taking from the reservation would set the bit after commit_bitmap had written it,
+/// so the next mount would read the block as free while the new root reaches it -- `seen_not_alloc`, the direction
+/// that hands live data to the allocator.
+/// Safety: `reason` writable.
+@cfg("CONFIG_DEBUG")
+@export("selftest_cosmofs_snap_reserved")
+unsafe fn selftestSnapReserved(reason: *mut *CChar) -> bool {
+    var bd = 0 as *mut blkdev;
+    if (!cfst_engine_mount(borrow mut bd as *mut *mut blkdev, 4096, reason)) {
+        return false;
+    }
+
+    // More one-block files than a deadlist block holds.
+    let files = truncate<u32>(DEAD_PER_BLOCK) + 40;
+    var path = [0u8; 64];
+    for (i in 0u32..files) {
+        if (!cfst_write_file(fpath(mut path, i), "x".ptr as *void, 1)) {
+            return failed(reason, "check failed: cfst_write_file(path, \"x\", 1) at line 1143\0");
+        }
+    }
+    if (vfs_sync() != 0) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 1147\0");
+    }
+    if (vfs_mkdir(nov(), c("/mnt/eng/.snapshots/keep\0"), 493) != 0) {
+        return failed(reason, "check failed: vfs_mkdir(NULL, ENG \"/.snapshots/keep\", 0755) == 0 at line 1150\0");
+    }
+
+    // All of them in one transaction, so one commit holds them all.
+    for (i in 0u32..files) {
+        if (vfs_unlink(nov(), fpath(mut path, i)) != 0) {
+            return failed(reason, "check failed: vfs_unlink(NULL, path) == 0 at line 1156\0");
+        }
+    }
+    if (vfs_sync() != 0) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 1160\0");
+    }
+
+    let entries = cosmofs_test_deadlist_len(mnt(), 0);
+    if (!(entries > DEAD_PER_BLOCK)) { // the chain really did need a second block
+        return failed(reason, "check failed: entries > CFS_DEAD_PER_BLOCK at line 1165\0");
+    }
+
+    if (umountEng() != 0) {
+        return failed(reason, "check failed: vfs_umount(ENG) == 0 at line 1169\0");
+    }
+    if (mountEng(bd) != 0) {
+        return failed(reason, "check failed: vfs_mount(ENG, \"cosmofs\", bd, 0) == 0 at line 1172\0");
+    }
+    if (check(0) != 0) {
+        return failed(reason, "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, 0) == 0 at line 1175\0");
+    }
+    if (seenNotAlloc() != 0) { // the claim
+        return failed(reason, "check failed: rep.seen_not_alloc.count == 0 at line 1178\0");
+    }
+    if (!clean()) {
+        return failed(reason, "check failed: rep.clean at line 1181\0");
+    }
+    var examined: u64 = 0;
+    if (cosmofs_test_deadlist_dups(mnt(), borrow mut examined as *mut u64, 0 as *mut u64) != 0) {
+        return failed(reason,
+            "check failed: cosmofs_test_deadlist_dups(cfst_mount_of(ENG), &examined, NULL) == 0 at line 1186\0");
+    }
+    if (examined != entries) {
+        return failed(reason, "check failed: examined == entries at line 1189\0");
+    }
+
+    var buffer = [0u8; 160];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: cosmofs-snap-reserved: ");
+    line.decimal(entries);
+    line.text(" blocks held across a chain of deadlist blocks, all accounted");
+    KernelLog.send(LogLevel.Info, line);
+    return cfst_engine_unmount(bd, reason);
+}
+
+/// A deadlist fill that fails partway. It cannot be retried -- the entries already written would be written again,
+/// and one block on two deadlists is the corruption this unit exists to prevent -- so the transaction is abandoned,
+/// which is the answer the snapshot code already gives to a change it cannot publish whole.
+///
+/// What must not survive is the reservation: no root is published, so the next mount reads the previous root's bitmap
+/// and every block the fill had taken is free again.
+/// Safety: `reason` writable.
+@cfg("CONFIG_DEBUG")
+@export("selftest_cosmofs_snap_rollback")
+unsafe fn selftestSnapRollback(reason: *mut *CChar) -> bool {
+    var bd = 0 as *mut blkdev;
+    if (!cfst_engine_mount(borrow mut bd as *mut *mut blkdev, 512, reason)) {
+        return false;
+    }
+    if (!cfst_write_file(c("/mnt/eng/held\0"), "content".ptr as *void, 7)) {
+        return failed(reason, "check failed: cfst_write_file(ENG \"/held\", \"content\", 7) at line 1216\0");
+    }
+    if (vfs_sync() != 0) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 1219\0");
+    }
+    if (vfs_mkdir(nov(), c("/mnt/eng/.snapshots/keep\0"), 493) != 0) {
+        return failed(reason, "check failed: vfs_mkdir(NULL, ENG \"/.snapshots/keep\", 0755) == 0 at line 1222\0");
+    }
+    var before = noStats();
+    if (!stats(mut before)) {
+        return failed(reason, "check failed: cosmofs_stats(cfst_mount_of(ENG), &before) == 0 at line 1226\0");
+    }
+
+    cosmofs_test_fail_snapfill(mnt(), true);
+    if (vfs_unlink(nov(), c("/mnt/eng/held\0")) != 0) {
+        return failed(reason, "check failed: vfs_unlink(NULL, ENG \"/held\") == 0 at line 1231\0");
+    }
+    if (vfs_sync() == 0) { // the commit fails
+        return failed(reason, "check failed: vfs_sync() != 0 at line 1234\0");
+    }
+    cosmofs_test_fail_snapfill(mnt(), false);
+
+    // Abandoned: nothing more is published from this mount.
+    if (vfs_umount2(c(ENG), VFS_UMOUNT_FORCE) != 0) {
+        return failed(reason, "check failed: vfs_umount2(ENG, VFS_UMOUNT_FORCE) == 0 at line 1240\0");
+    }
+    if (mountEng(bd) != 0) {
+        return failed(reason, "check failed: vfs_mount(ENG, \"cosmofs\", bd, 0) == 0 at line 1243\0");
+    }
+    var after = noStats();
+    if (!stats(mut after)) {
+        return failed(reason, "check failed: cosmofs_stats(cfst_mount_of(ENG), &after) == 0 at line 1247\0");
+    }
+    if (after.generation != before.generation) { // no root was published
+        return failed(reason, "check failed: after.generation == before.generation at line 1250\0");
+    }
+    if (after.freeBlocks != before.freeBlocks) { // and nothing was taken
+        return failed(reason, "check failed: after.free_blocks == before.free_blocks at line 1253\0");
+    }
+    if (check(0) != 0) {
+        return failed(reason, "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, 0) == 0 at line 1256\0");
+    }
+    if (!clean()) {
+        return failed(reason, "check failed: rep.clean at line 1259\0");
+    }
+    if (!cfst_read_matches(c("/mnt/eng/held\0"), "content".ptr as *void, 7)) { // the unlink went with it
+        return failed(reason, "check failed: cfst_read_matches(ENG \"/held\", \"content\", 7) at line 1262\0");
+    }
+
+    var buffer = [0u8; 160];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: cosmofs-snap-rollback: the failed fill left generation ");
+    line.decimal(after.generation);
+    line.text(" and ");
+    line.decimal(after.freeBlocks);
+    line.text(" free blocks, as it found them");
+    KernelLog.send(LogLevel.Info, line);
+    return cfst_engine_unmount(bd, reason);
+}
+
+/// One verdict per freed block, not two.
+///
+/// The record asked "does a snapshot hold this" before the root and the release loop asked it again after -- two
+/// walks of the snapshot list per block, and two answers that were equal by argument rather than by construction. The
+/// fill now takes the verdict once and both readers use it. The counter is what says so: a claim about how many times
+/// a thing happened needs a count of it, not a reading of the code.
+///
+/// The one extra walk is the re-ask after the list is copied, which moves the entry to a new block; it happens once
+/// per commit, not per block.
+/// Safety: `reason` writable.
+@cfg("CONFIG_DEBUG")
+@export("selftest_cosmofs_snap_onewalk")
+unsafe fn selftestSnapOnewalk(reason: *mut *CChar) -> bool {
+    var bd = 0 as *mut blkdev;
+    if (!cfst_engine_mount(borrow mut bd as *mut *mut blkdev, 1024, reason)) {
+        return false;
+    }
+    var path = [0u8; 64];
+    for (i in 0u32..24) {
+        if (!cfst_write_file(fpath(mut path, i), "x".ptr as *void, 1)) {
+            return failed(reason, "check failed: cfst_write_file(path, \"x\", 1) at line 1296\0");
+        }
+    }
+    if (vfs_sync() != 0) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 1300\0");
+    }
+    if (vfs_mkdir(nov(), c("/mnt/eng/.snapshots/keep\0"), 493) != 0) {
+        return failed(reason, "check failed: vfs_mkdir(NULL, ENG \"/.snapshots/keep\", 0755) == 0 at line 1303\0");
+    }
+
+    let w0 = cosmofs_test_snap_walks(mnt());
+    let v0 = cosmofs_test_snap_verdicts(mnt());
+    for (i in 0u32..24) {
+        if (vfs_unlink(nov(), fpath(mut path, i)) != 0) {
+            return failed(reason, "check failed: vfs_unlink(NULL, path) == 0 at line 1310\0");
+        }
+    }
+    if (vfs_sync() != 0) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 1314\0");
+    }
+    let walks = cosmofs_test_snap_walks(mnt()).wrappingSub(w0);
+    let verdicts = cosmofs_test_snap_verdicts(mnt()).wrappingSub(v0);
+
+    if (verdicts == 0) { // the commit really did have blocks to judge
+        return failed(reason, "check failed: verdicts > 0 at line 1320\0");
+    }
+    if (walks != verdicts.wrappingAdd(1)) { // the claim: one each, and one re-ask for the copy
+        return failed(reason, "check failed: walks == verdicts + 1 at line 1323\0");
+    }
+
+    var buffer = [0u8; 160];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: cosmofs-snap-onewalk: ");
+    line.decimal(verdicts);
+    line.text(" verdicts, ");
+    line.decimal(walks);
+    line.text(" walks of the snapshot list");
+    KernelLog.send(LogLevel.Info, line);
+    return cfst_engine_unmount(bd, reason);
+}
+
+// ---- The free record, replayed ----
+
+/// The record is not cleared when it is replayed, and that is deliberate. A mount that replays and then goes away
+/// without committing must leave the filesystem exactly as it found it, or the blocks are lost on the *second* mount
+/// -- which no single cycle can see, and which the easy implementation (clear it as you read it) gets wrong.
+/// Safety: `reason` writable.
+@cfg("CONFIG_DEBUG")
+@export("selftest_cosmofs_freelog_idempotent")
+unsafe fn selftestFreelogIdempotent(reason: *mut *CChar) -> bool {
+    var bd = 0 as *mut blkdev;
+    if (!fresh(borrow mut bd as *mut *mut blkdev, 512, 0, reason)) {
+        return false;
+    }
+
+    // Make a record: a file written, deleted, and the unmount's commit the one that frees.
+    if (!cfst_write_file(c("/mnt/eng/gone\0"), zero(), 4096)) {
+        return failed(reason, "check failed: cfst_write_file(ENG \"/gone\", big, sizeof(big)) at line 1353\0");
+    }
+    if (vfs_sync() != 0) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 1356\0");
+    }
+    if (vfs_unlink(nov(), c("/mnt/eng/gone\0")) != 0) {
+        return failed(reason, "check failed: vfs_unlink(NULL, ENG \"/gone\") == 0 at line 1359\0");
+    }
+    if (umountEng() != 0) {
+        return failed(reason, "check failed: vfs_umount(ENG) == 0 at line 1362\0");
+    }
+
+    // First mount: the replay gives the blocks back.
+    if (mountEng(bd) != 0) {
+        return failed(reason, "check failed: vfs_mount(ENG, \"cosmofs\", bd, 0) == 0 at line 1367\0");
+    }
+    var first = noStats();
+    if (!stats(mut first)) {
+        return failed(reason, "check failed: cosmofs_stats(cfst_mount_of(ENG), &first) == 0 at line 1371\0");
+    }
+    if (first.freeRoot == 0) { // still there: retired by a commit, not by a read
+        return failed(reason, "check failed: first.free_root != 0 at line 1374\0");
+    }
+
+    // Away again without committing. A forced unmount skips the sync, so nothing on disk moves and the record still
+    // stands.
+    if (vfs_umount2(c(ENG), VFS_UMOUNT_FORCE) != 0) {
+        return failed(reason, "check failed: vfs_umount2(ENG, VFS_UMOUNT_FORCE) == 0 at line 1380\0");
+    }
+
+    // Second mount: the same list, the same effect, nothing lost and nothing freed twice.
+    if (mountEng(bd) != 0) {
+        return failed(reason, "check failed: vfs_mount(ENG, \"cosmofs\", bd, 0) == 0 at line 1385\0");
+    }
+    var second = noStats();
+    if (!stats(mut second)) {
+        return failed(reason, "check failed: cosmofs_stats(cfst_mount_of(ENG), &second) == 0 at line 1389\0");
+    }
+    if (second.freeBlocks != first.freeBlocks) {
+        return failed(reason, "check failed: second.free_blocks == first.free_blocks at line 1392\0");
+    }
+    if (second.freeRoot != first.freeRoot) {
+        return failed(reason, "check failed: second.free_root == first.free_root at line 1395\0");
+    }
+    if (check(0) != 0) {
+        return failed(reason, "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, 0) == 0 at line 1398\0");
+    }
+    if (!clean()) {
+        return failed(reason, "check failed: rep.clean at line 1401\0");
+    }
+
+    if (!finish(bd, reason)) {
+        return false;
+    }
+    var buffer = [0u8; 160];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: cosmofs-freelog-idempotent: two mounts, one record, ");
+    line.decimal(second.freeBlocks);
+    line.text(" free both times");
+    KernelLog.send(LogLevel.Info, line);
+    return true;
+}
+
+/// A replayed block is the allocator's immediately, in this session, without waiting for a commit. Writing one and
+/// committing makes it live, and the record that named it as free is superseded by the same commit -- so a remount
+/// finds it in use and named by nothing.
+/// Safety: `reason` writable.
+@cfg("CONFIG_DEBUG")
+@export("selftest_cosmofs_freelog_reuse")
+unsafe fn selftestFreelogReuse(reason: *mut *CChar) -> bool {
+    var bd = 0 as *mut blkdev;
+    if (!fresh(borrow mut bd as *mut *mut blkdev, 512, 0, reason)) {
+        return false;
+    }
+    if (!cfst_write_file(c("/mnt/eng/first\0"), zero(), 4096)) {
+        return failed(reason, "check failed: cfst_write_file(ENG \"/first\", big, sizeof(big)) at line 1428\0");
+    }
+    if (vfs_sync() != 0) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 1431\0");
+    }
+    if (vfs_unlink(nov(), c("/mnt/eng/first\0")) != 0) {
+        return failed(reason, "check failed: vfs_unlink(NULL, ENG \"/first\") == 0 at line 1434\0");
+    }
+    if (umountEng() != 0) {
+        return failed(reason, "check failed: vfs_umount(ENG) == 0 at line 1437\0");
+    }
+
+    if (mountEng(bd) != 0) {
+        return failed(reason, "check failed: vfs_mount(ENG, \"cosmofs\", bd, 0) == 0 at line 1441\0");
+    }
+    cosmofs_test_set_writeback(mnt(), false);
+    var afterReplay = noStats();
+    if (!stats(mut afterReplay)) {
+        return failed(reason, "check failed: cosmofs_stats(cfst_mount_of(ENG), &after_replay) == 0 at line 1446\0");
+    }
+
+    // Take the space back out, in this session, and make it durable.
+    if (!cfst_write_file(c("/mnt/eng/second\0"), zero(), 4096)) {
+        return failed(reason, "check failed: cfst_write_file(ENG \"/second\", big, sizeof(big)) at line 1451\0");
+    }
+    if (vfs_sync() != 0) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 1454\0");
+    }
+    if (umountEng() != 0) {
+        return failed(reason, "check failed: vfs_umount(ENG) == 0 at line 1457\0");
+    }
+
+    // It is in use, the filesystem adds up, and the file reads.
+    if (mountEng(bd) != 0) {
+        return failed(reason, "check failed: vfs_mount(ENG, \"cosmofs\", bd, 0) == 0 at line 1462\0");
+    }
+    if (!cfst_read_matches(c("/mnt/eng/second\0"), zero(), 4096)) {
+        return failed(reason, "check failed: cfst_read_matches(ENG \"/second\", big, sizeof(big)) at line 1465\0");
+    }
+    if (check(0) != 0) {
+        return failed(reason, "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, 0) == 0 at line 1468\0");
+    }
+    if (!clean()) {
+        return failed(reason, "check failed: rep.clean at line 1471\0");
+    }
+    if (seenNotAlloc() != 0) { // nothing live is marked free
+        return failed(reason, "check failed: rep.seen_not_alloc.count == 0 at line 1474\0");
+    }
+    var now = noStats();
+    if (!stats(mut now)) {
+        return failed(reason, "check failed: cosmofs_stats(cfst_mount_of(ENG), &now) == 0 at line 1478\0");
+    }
+    if (!(now.freeBlocks < afterReplay.freeBlocks)) { // the file took the space
+        return failed(reason, "check failed: now.free_blocks < after_replay.free_blocks at line 1481\0");
+    }
+
+    if (vfs_unlink(nov(), c("/mnt/eng/second\0")) != 0) {
+        return failed(reason, "check failed: vfs_unlink(NULL, ENG \"/second\") == 0 at line 1485\0");
+    }
+    if (umountEng() != 0) {
+        return failed(reason, "check failed: vfs_umount(ENG) == 0 at line 1488\0");
+    }
+    if (mountEng(bd) != 0) {
+        return failed(reason, "check failed: vfs_mount(ENG, \"cosmofs\", bd, 0) == 0 at line 1491\0");
+    }
+    var back = noStats();
+    if (!stats(mut back)) {
+        return failed(reason, "check failed: cosmofs_stats(cfst_mount_of(ENG), &back) == 0 at line 1495\0");
+    }
+    if (back.freeBlocks != afterReplay.freeBlocks) { // and gave it back again
+        return failed(reason, "check failed: back.free_blocks == after_replay.free_blocks at line 1498\0");
+    }
+
+    if (!finish(bd, reason)) {
+        return false;
+    }
+    var buffer = [0u8; 160];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: cosmofs-freelog-reuse: a replayed block was taken, written, and given back (");
+    line.decimal(back.freeBlocks);
+    line.text(" free either side)");
+    KernelLog.send(LogLevel.Info, line);
+    return true;
+}
+
+/// A record is not a snapshot's to hold. `freelog_release_previous` frees the superseded chain directly rather than
+/// through `cfs_snapshot_hold_block`, and the exception has to be argued: that function asks whether a snapshot's
+/// *recorded bitmap* marks the block allocated, and a record block from before a snapshot is marked exactly that way
+/// -- so the generic path would hold a block no snapshot's tree can ever reach.
+///
+/// The rule: the snapshot filter is for blocks a snapshot's *tree* might name. A snapshot preserves `imap_root` and
+/// `alloc_root`, never `free_root`, so a record is not one of those.
+///
+/// **The deadlist is the instrument, and neither the checker nor the free count is.** A held block goes on the
+/// snapshot's deadlist, and a deadlist is metadata the checker claims -- so a filesystem that held a record it should
+/// have freed is `clean` all the way down. And the loss is one block per snapshot, which is inside the noise of a
+/// transaction in flight.
+///
+/// What is exact is how much the deadlist grows across one named commit. Naming the snapshot is that commit: it runs
+/// with the snapshot already recorded, and it supersedes the record that existed before the snapshot did -- the one
+/// record in the filesystem's life a snapshot's recorded bitmap marks allocated, and therefore the only block on which
+/// this exception can be observed at all. Three blocks go on the deadlist there for good reasons and a fourth would be
+/// the record.
+///
+/// A second, looser assertion says the list then stops growing across thirty more commits in a directory created after
+/// the snapshot, and a third says the free count does not fall.
+/// Safety: `reason` writable.
+@cfg("CONFIG_DEBUG")
+@export("selftest_cosmofs_freelog_not_held")
+unsafe fn selftestFreelogNotHeld(reason: *mut *CChar) -> bool {
+    var bd = 0 as *mut blkdev;
+    if (!fresh(borrow mut bd as *mut *mut blkdev, 512, 0, reason)) {
+        return false;
+    }
+
+    // A record exists, and *then* the snapshot is taken: its bitmap marks that record's blocks allocated, which is
+    // the difficulty.
+    if (!cfst_write_file(c("/mnt/eng/held\0"), "the snapshot's copy".ptr as *void, 19)) {
+        return failed(reason,
+            "check failed: cfst_write_file(ENG \"/held\", \"the snapshot's copy\", 19) at line 1547\0");
+    }
+    if (vfs_sync() != 0) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 1550\0");
+    }
+    // Naming the snapshot is the commit the argument is about, and the deadlist's growth across it is the
+    // measurement.
+    //
+    // That commit runs with the snapshot already recorded, so it supersedes the record that existed before the
+    // snapshot did -- and that record is marked allocated in the bitmap the snapshot keeps, because the bitmap a
+    // commit publishes still has the bits its phase 7 is about to clear. It is the one record in the filesystem's
+    // life the generic filter would hold.
+    //
+    // Three blocks go on the deadlist legitimately there: the root directory block, the inode-map block and the
+    // allocation index, each named by the snapshot's tree and each rewritten by the commit. A fourth is the record.
+    let dead0 = cosmofs_test_deadlist_len(mnt(), 0);
+    if (vfs_mkdir(nov(), c("/mnt/eng/.snapshots/keep\0"), 493) != 0) {
+        return failed(reason, "check failed: vfs_mkdir(NULL, ENG \"/.snapshots/keep\", 0755) == 0 at line 1564\0");
+    }
+    let dead1 = cosmofs_test_deadlist_len(mnt(), 0);
+    if (!(dead1.wrappingSub(dead0) <= 3)) {
+        return failed(reason, "check failed: dead1 - dead0 <= 3 at line 1568\0");
+    }
+
+    // Everything the churn touches is created after the snapshot, and then settled, so the blocks these commits free
+    // are all post-snapshot ones: the only thing they release that a snapshot's bitmap remembers is one record after
+    // another.
+    if (vfs_mkdir(nov(), c("/mnt/eng/post\0"), 493) != 0) {
+        return failed(reason, "check failed: vfs_mkdir(NULL, ENG \"/post\", 0755) == 0 at line 1575\0");
+    }
+    for (i in 0u32..3) {
+        if (!cfst_write_file(c("/mnt/eng/post/churn\0"), "x".ptr as *void, 1)) {
+            return failed(reason, "check failed: cfst_write_file(ENG \"/post/churn\", \"x\", 1) at line 1579\0");
+        }
+        if (vfs_sync() != 0) {
+            return failed(reason, "check failed: vfs_sync() == 0 at line 1582\0");
+        }
+    }
+    var before = noStats();
+    if (!stats(mut before)) {
+        return failed(reason, "check failed: cosmofs_stats(cfst_mount_of(ENG), &before) == 0 at line 1587\0");
+    }
+    let deadBefore = cosmofs_test_deadlist_len(mnt(), 0);
+
+    for (i in 0u32..30) {
+        if (!cfst_write_file(c("/mnt/eng/post/churn\0"), "y".ptr as *void, 1)) {
+            return failed(reason, "check failed: cfst_write_file(ENG \"/post/churn\", \"y\", 1) at line 1593\0");
+        }
+        if (vfs_sync() != 0) {
+            return failed(reason, "check failed: vfs_sync() == 0 at line 1596\0");
+        }
+    }
+    var after = noStats();
+    if (!stats(mut after)) {
+        return failed(reason, "check failed: cosmofs_stats(cfst_mount_of(ENG), &after) == 0 at line 1601\0");
+    }
+    // The transaction in flight can move it a little; thirty commits' worth of held records cannot hide in that.
+    if (!(after.freeBlocks + 6 >= before.freeBlocks)) {
+        return failed(reason, "check failed: after.free_blocks + 6 >= before.free_blocks at line 1605\0");
+    }
+
+    // And the exact statement, which the free count cannot make: the deadlist did not grow. Under the generic filter
+    // a record lands on a block number this snapshot's bitmap remembers and goes on the list, permanently -- one
+    // block, too small to separate from the noise of a transaction in flight, and unambiguous here.
+    if (cosmofs_test_deadlist_len(mnt(), 0) != deadBefore) {
+        return failed(reason,
+            "check failed: cosmofs_test_deadlist_len(cfst_mount_of(ENG), 0) == dead_before at line 1613\0");
+    }
+
+    // And the snapshot is intact: nothing this exception frees was its.
+    if (umountEng() != 0) {
+        return failed(reason, "check failed: vfs_umount(ENG) == 0 at line 1618\0");
+    }
+    if (mountEng(bd) != 0) {
+        return failed(reason, "check failed: vfs_mount(ENG, \"cosmofs\", bd, 0) == 0 at line 1621\0");
+    }
+    if (check(0) != 0) {
+        return failed(reason, "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, 0) == 0 at line 1624\0");
+    }
+    if (seenNotAlloc() != 0) {
+        return failed(reason, "check failed: rep.seen_not_alloc.count == 0 at line 1627\0");
+    }
+    if (snapshotsSeen() != 1) {
+        return failed(reason, "check failed: rep.snapshots_seen == 1 at line 1630\0");
+    }
+    if (!cfst_read_matches(c("/mnt/eng/.snapshots/keep/held\0"), "the snapshot's copy".ptr as *void, 19)) {
+        return failed(reason,
+            "check failed: read_matches(ENG \"/.snapshots/keep/held\", \"the snapshot's copy\", 19) at line 1634\0");
+    }
+
+    if (!finish(bd, reason)) {
+        return false;
+    }
+    var buffer = [0u8; 256];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: cosmofs-freelog-not-held: naming the snapshot put ");
+    line.decimal(dead1.wrappingSub(dead0));
+    line.text(" blocks on its deadlist and the superseded record was not one of them; 30 more commits added none (");
+    line.decimal(after.freeBlocks);
+    line.text(" free either side)");
+    KernelLog.send(LogLevel.Info, line);
+    return true;
+}
+
+/// A commit that fails after reserving the record's blocks must give them back. Nothing names them -- the root that
+/// would have is not going to be published -- so left allocated they are a leak the *next* successful commit makes
+/// durable, because that commit writes this bitmap. The window is any failure between the reservation and the root:
+/// a `kmalloc` for the record's buffer, the bitmap fixpoint, an unwritable block
+/// (docs/audit/next-subsystem-unmount-leak.md).
+/// Safety: `reason` writable.
+@cfg("CONFIG_DEBUG")
+@export("selftest_cosmofs_freelog_rollback")
+unsafe fn selftestFreelogRollback(reason: *mut *CChar) -> bool {
+    var bd = 0 as *mut blkdev;
+    if (!fresh(borrow mut bd as *mut *mut blkdev, 512, 0, reason)) {
+        return false;
+    }
+
+    // Settle, so the count to come back to is a steady one.
+    if (!cfst_write_file(c("/mnt/eng/settle\0"), "s".ptr as *void, 1)) {
+        return failed(reason, "check failed: cfst_write_file(ENG \"/settle\", \"s\", 1) at line 1667\0");
+    }
+    if (vfs_unlink(nov(), c("/mnt/eng/settle\0")) != 0) {
+        return failed(reason, "check failed: vfs_unlink(NULL, ENG \"/settle\") == 0 at line 1670\0");
+    }
+    if (vfs_sync() != 0) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 1673\0");
+    }
+    if (vfs_sync() != 0) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 1676\0");
+    }
+    var before = noStats();
+    if (!stats(mut before)) {
+        return failed(reason, "check failed: cosmofs_stats(cfst_mount_of(ENG), &before) == 0 at line 1680\0");
+    }
+
+    // Something to free, and a commit that fails while freeing it.
+    if (!cfst_write_file(c("/mnt/eng/doomed\0"), "x".ptr as *void, 1)) {
+        return failed(reason, "check failed: cfst_write_file(ENG \"/doomed\", \"x\", 1) at line 1685\0");
+    }
+    if (vfs_sync() != 0) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 1688\0");
+    }
+    if (vfs_unlink(nov(), c("/mnt/eng/doomed\0")) != 0) {
+        return failed(reason, "check failed: vfs_unlink(NULL, ENG \"/doomed\") == 0 at line 1691\0");
+    }
+    cosmofs_test_fail_freelog(mnt(), true);
+    if (vfs_sync() == 0) { // the commit fails, as asked
+        return failed(reason, "check failed: vfs_sync() != 0 at line 1695\0");
+    }
+    cosmofs_test_fail_freelog(mnt(), false);
+
+    // And then one that succeeds. This is the commit that would make a lost reservation durable: it writes the bitmap
+    // the failed attempt left behind.
+    if (vfs_sync() != 0) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 1702\0");
+    }
+    if (umountEng() != 0) {
+        return failed(reason, "check failed: vfs_umount(ENG) == 0 at line 1705\0");
+    }
+
+    if (mountEng(bd) != 0) {
+        return failed(reason, "check failed: vfs_mount(ENG, \"cosmofs\", bd, 0) == 0 at line 1709\0");
+    }
+    if (check(0) != 0) {
+        return failed(reason, "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, 0) == 0 at line 1712\0");
+    }
+    if (allocNotSeen() != 0) { // the reservation, if it was kept
+        return failed(reason, "check failed: rep.alloc_not_seen.count == 0 at line 1715\0");
+    }
+    if (!clean()) {
+        return failed(reason, "check failed: rep.clean at line 1718\0");
+    }
+    var after = noStats();
+    if (!stats(mut after)) {
+        return failed(reason, "check failed: cosmofs_stats(cfst_mount_of(ENG), &after) == 0 at line 1722\0");
+    }
+    if (after.freeBlocks != before.freeBlocks) {
+        return failed(reason, "check failed: after.free_blocks == before.free_blocks at line 1725\0");
+    }
+
+    if (!finish(bd, reason)) {
+        return false;
+    }
+    var buffer = [0u8; 160];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: cosmofs-freelog-rollback: a commit failed with the record reserved and gave every block ");
+    line.text("back (");
+    line.decimal(after.freeBlocks);
+    line.text(" free either side)");
+    KernelLog.send(LogLevel.Info, line);
+    return true;
+}
+
+/// A record whose `count` is past what a block holds is a record this kernel cannot read, and gets the answer an
+/// unreadable one gets: that *root* is refused. Treating it as empty would silently drop every free it names -- the
+/// root says those blocks are free, the bitmap says they are not, and the difference would be reported later as an
+/// ordinary leak with nothing to connect it to its cause.
+///
+/// Refusing a root is not refusing the filesystem. cosmofs keeps two, and a root whose tree does not load falls back
+/// to the older slot, which is a complete and consistent filesystem one generation behind. So the cost of the strict
+/// answer is a generation, not a mount -- and that is what this test measures, because "the mount fails" is what the
+/// report said and it is not what happens.
+/// Safety: `reason` writable.
+@cfg("CONFIG_DEBUG")
+@export("selftest_cosmofs_freelog_malformed")
+unsafe fn selftestFreelogMalformed(reason: *mut *CChar) -> bool {
+    var bd = 0 as *mut blkdev;
+    if (!fresh(borrow mut bd as *mut *mut blkdev, 512, 0, reason)) {
+        return false;
+    }
+
+    // A record with something in it, left on disk by the unmount.
+    if (!cfst_write_file(c("/mnt/eng/gone\0"), "x".ptr as *void, 1)) {
+        return failed(reason, "check failed: cfst_write_file(ENG \"/gone\", \"x\", 1) at line 1761\0");
+    }
+    if (vfs_sync() != 0) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 1764\0");
+    }
+    if (vfs_unlink(nov(), c("/mnt/eng/gone\0")) != 0) {
+        return failed(reason, "check failed: vfs_unlink(NULL, ENG \"/gone\") == 0 at line 1767\0");
+    }
+    if (umountEng() != 0) {
+        return failed(reason, "check failed: vfs_umount(ENG) == 0 at line 1770\0");
+    }
+
+    // Which generation the disk is at, without changing it: the discard hook makes this unmount write nothing.
+    if (mountEng(bd) != 0) {
+        return failed(reason, "check failed: vfs_mount(ENG, \"cosmofs\", bd, 0) == 0 at line 1775\0");
+    }
+    var good = noStats();
+    if (!stats(mut good)) {
+        return failed(reason, "check failed: cosmofs_stats(cfst_mount_of(ENG), &good) == 0 at line 1779\0");
+    }
+    cosmofs_test_discard_on_unmount(mnt(), true);
+    if (umountEng() != 0) {
+        return failed(reason, "check failed: vfs_umount(ENG) == 0 at line 1783\0");
+    }
+
+    // Re-sealed, so the checksum is good and only the count is wrong.
+    if (cosmofs_test_poison_freelog_count(bd, DEAD_PER_BLOCK + 1) != 0) {
+        return failed(reason,
+            "check failed: cosmofs_test_poison_freelog_count(bd, CFS_DEAD_PER_BLOCK + 1) == 0 at line 1789\0");
+    }
+    if (mountEng(bd) != 0) {
+        return failed(reason, "check failed: vfs_mount(ENG, \"cosmofs\", bd, 0) == 0 at line 1792\0");
+    }
+    var fell = noStats();
+    if (!stats(mut fell)) {
+        return failed(reason, "check failed: cosmofs_stats(cfst_mount_of(ENG), &fell) == 0 at line 1796\0");
+    }
+    if (!(fell.generation < good.generation)) { // the newer root was refused
+        return failed(reason, "check failed: fell.generation < good.generation at line 1799\0");
+    }
+
+    // And what it fell back to is a whole filesystem, not a damaged one.
+    if (check(0) != 0) {
+        return failed(reason, "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, 0) == 0 at line 1804\0");
+    }
+    if (!clean()) {
+        return failed(reason, "check failed: rep.clean at line 1807\0");
+    }
+
+    if (!finish(bd, reason)) {
+        return false;
+    }
+    var buffer = [0u8; 256];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: cosmofs-freelog-malformed: a record naming ");
+    line.decimal(DEAD_PER_BLOCK + 1);
+    line.text(" blocks in a block that holds ");
+    line.decimal(DEAD_PER_BLOCK);
+    line.text(" is refused, and the mount falls back from generation ");
+    line.decimal(good.generation);
+    line.text(" to ");
+    line.decimal(fell.generation);
+    line.text(" rather than reading it as empty");
+    KernelLog.send(LogLevel.Info, line);
+    return true;
+}
+
+/// A record block holds 506 block numbers; a transaction can free more than that, so the record is a chain and every
+/// link of it has to be written and replayed. A single block's worth would silently lose the overflow.
+///
+/// This also covers the bound's slack. `freelog_reserve` allocates for what is pending *plus* what the bitmap fixpoint
+/// can add, so it often reserves a block more than the fill needs; those leftovers are listed in the record as free.
+/// If they were dropped instead, the count would come back short by the slack, every commit.
+/// Safety: `reason` writable.
+@cfg("CONFIG_DEBUG")
+@export("selftest_cosmofs_freelog_chain")
+unsafe fn selftestFreelogChain(reason: *mut *CChar) -> bool {
+    var bd = 0 as *mut blkdev;
+    if (!fresh(borrow mut bd as *mut *mut blkdev, 8192, 0, reason)) { // room for more than a record block holds
+        return false;
+    }
+
+    // The same cycle twice, and the count to come back to is the one after the first. A record is retired by the
+    // *next* commit, so a filesystem that has just replayed a two-block chain still holds those two blocks, and
+    // comparing it against a pristine format would count them as lost. Round one puts the filesystem in the shape
+    // round two has to return it to.
+    //
+    // A file of 600 blocks, committed, then deleted in the transaction the unmount commits -- so one record has to
+    // carry more than 506 entries and therefore more than one block.
+    var before = noStats();
+    var full = noStats();
+    for (round in 0u32..2) {
+        if (round == 1 && !stats(mut before)) {
+            return failed(reason, "check failed: cosmofs_stats(cfst_mount_of(ENG), &before) == 0 at line 1854\0");
+        }
+        if (!cfst_write_wide_file(c("/mnt/eng/wide\0"), 600)) {
+            return failed(reason, "check failed: cfst_write_wide_file(ENG \"/wide\", 600) at line 1857\0");
+        }
+        if (vfs_sync() != 0) {
+            return failed(reason, "check failed: vfs_sync() == 0 at line 1860\0");
+        }
+        if (round == 1) {
+            if (!stats(mut full)) {
+                return failed(reason, "check failed: cosmofs_stats(cfst_mount_of(ENG), &full) == 0 at line 1864\0");
+            }
+            // More than one record block holds.
+            if (!(before.freeBlocks.wrappingSub(full.freeBlocks) > DEAD_PER_BLOCK)) {
+                return failed(reason,
+                    "check failed: before.free_blocks - full.free_blocks > CFS_DEAD_PER_BLOCK at line 1869\0");
+            }
+        }
+        if (vfs_unlink(nov(), c("/mnt/eng/wide\0")) != 0) {
+            return failed(reason, "check failed: vfs_unlink(NULL, ENG \"/wide\") == 0 at line 1873\0");
+        }
+        if (umountEng() != 0) { // the unmount's commit frees them
+            return failed(reason, "check failed: vfs_umount(ENG) == 0 at line 1876\0");
+        }
+        if (mountEng(bd) != 0) {
+            return failed(reason, "check failed: vfs_mount(ENG, \"cosmofs\", bd, 0) == 0 at line 1879\0");
+        }
+        cosmofs_test_set_writeback(mnt(), false);
+    }
+
+    // Every block back, across a chain of record blocks.
+    var after = noStats();
+    if (!stats(mut after)) {
+        return failed(reason, "check failed: cosmofs_stats(cfst_mount_of(ENG), &after) == 0 at line 1887\0");
+    }
+    if (after.freeBlocks != before.freeBlocks) {
+        return failed(reason, "check failed: after.free_blocks == before.free_blocks at line 1890\0");
+    }
+    if (check(0) != 0) {
+        return failed(reason, "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, 0) == 0 at line 1893\0");
+    }
+    if (!clean()) {
+        return failed(reason, "check failed: rep.clean at line 1896\0");
+    }
+
+    if (!finish(bd, reason)) {
+        return false;
+    }
+    var buffer = [0u8; 192];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: cosmofs-freelog-chain: ");
+    line.decimal(before.freeBlocks.wrappingSub(full.freeBlocks));
+    line.text(" blocks freed in one transaction, more than the ");
+    line.decimal(DEAD_PER_BLOCK);
+    line.text(" a record block holds, and all of them came back");
+    KernelLog.send(LogLevel.Info, line);
+    return true;
+}

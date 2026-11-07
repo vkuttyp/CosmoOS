@@ -1,0 +1,1397 @@
+// cosmofstest_names.cee - cosmofs's self-tests of old formats, pools of two members, snapshot identity, long names
+// and hard links, in CeeSafe: roadmap 2.0 SA7.
+//
+// cosmofs-v3 (a version-3 disk mounts, writes and keeps a snapshot's holds), cosmofs-pool2 (two members, found by
+// label), cosmofs-snapshot-remount, cosmofs-snap-identity (format version 12), cosmofs-longname and
+// cosmofs-check-longname (format version 15) and cosmofs-link. Debug builds only; the shared helpers are
+// cosmofstest_lib.cee's, a pool's statistics come through cosmofstest_freelog_floor.c. cosmofstest_names_floor.c
+// asserts the values this file writes as its own constants and is the release build's stand-in for the two tests
+// the selftest table names there.
+
+@header("kernel/blk.h", "kernel/vfs.h", "kernel/kmalloc.h", "kernel/ramblk.h", "kernel/string.h", "kernel/cosmofs.h",
+    "uapi/cosmo/syscall.h")
+extern "C" {
+    struct blkdev;
+    struct mount;
+    struct vnode {
+        nlink: u32;
+    }
+    struct file {
+        vn: *mut vnode;
+    }
+    struct cosmofs_check_class {
+        count: u64;
+        repaired: u64;
+        name: [u64; 8];
+    }
+    struct cosmofs_check_report {
+        seen_not_alloc: cosmofs_check_class;
+        dir_bad: cosmofs_check_class;
+        dir_dup_name: cosmofs_check_class;
+        snap_identity: cosmofs_check_class;
+        snapshots_seen: u64;
+        clean: bool;
+    }
+    struct cosmofs_snap_info {
+        id: u64;
+        referenced: u64;
+        unique: u64;
+        uuid: [u8; 16];
+        format: u32;
+        name: [u8; 32];
+    }
+    struct cosmo_stat {
+        ino: u64;
+        size: u64;
+    }
+
+    fn ramblk_create(nblocks: u64) -> *mut blkdev;
+    fn ramblk_destroy(bd: *mut blkdev);
+    fn cosmofs_format_pool(bd: *mut *mut blkdev, n: u32) -> i32;
+    fn vfs_mkdir(start: *mut vnode, path: *CChar, mode: u32) -> i32;
+    fn vfs_rmdir(start: *mut vnode, path: *CChar) -> i32;
+    fn vfs_unlink(start: *mut vnode, path: *CChar) -> i32;
+    fn vfs_rename(start: *mut vnode, from: *CChar, to: *CChar) -> i32;
+    fn vfs_symlink(start: *mut vnode, path: *CChar, target: *CChar) -> i32;
+    fn vfs_link(ostart: *mut vnode, oldpath: *CChar, nstart: *mut vnode, newpath: *CChar, follow: bool) -> i32;
+    fn vfs_stat(start: *mut vnode, path: *CChar, st: *mut cosmo_stat) -> i32;
+    fn vfs_lstat(start: *mut vnode, path: *CChar, st: *mut cosmo_stat) -> i32;
+    fn vfs_open(start: *mut vnode, path: *CChar, flags: u32, mode: u32, out: *mut *mut file) -> i32;
+    fn file_read(f: *mut file, buf: *mut void, len: usize) -> i64;
+    fn file_write(f: *mut file, buf: *void, len: usize) -> i64;
+    fn file_pread(f: *mut file, buf: *mut void, len: usize, off: u64) -> i64;
+    fn file_readdir(f: *mut file, buf: *mut void, len: usize) -> i64;
+    fn vfs_mount(path: *CChar, fsname: *CChar, bd: *mut blkdev, flags: u32) -> i32;
+    fn vfs_umount2(path: *CChar, flags: u32) -> i32;
+    fn vfs_sync() -> i32;
+    fn cosmofs_check(mnt: *mut mount, out: *mut cosmofs_check_report, flags: u32) -> i32;
+    fn cosmofs_test_set_writeback(mnt: *mut mount, on: bool);
+    fn cosmofs_test_format_version(bd: *mut blkdev, version: u32) -> i32;
+    fn cosmofs_test_deadlist_dups(mnt: *mut mount, examined: *mut u64, first: *mut u64) -> u64;
+    fn cosmofs_test_member_free(mnt: *mut mount, vdev: u32) -> u64;
+    fn cosmofs_test_snap_no_raise(mnt: *mut mount, on: bool);
+    fn cosmofs_test_corrupt(mnt: *mut mount, kind: u32, ino: u64, what: *mut u64) -> i32;
+    fn memcmp(a: *void, b: *void, n: usize) -> i32;
+    fn memcpy(dst: *mut void, src: *void, n: usize) -> *mut void;
+    fn strcmp(a: *CChar, b: *CChar) -> i32;
+    /// cosmofstest_freelog_floor.c: cosmofs_stats of `mnt` as six numbers (generation, free_blocks, total_blocks,
+    /// members, version, free_root).
+    fn cfst_fl_stats(mnt: *mut mount, out: *mut u64) -> i32;
+    // cosmofstest_lib.cee's (cosmofstest.h).
+    fn cfst_mount_of(path: *CChar) -> *mut mount;
+    fn cfst_write_file(path: *CChar, data: *void, len: usize) -> bool;
+    fn cfst_read_matches(path: *CChar, data: *void, len: usize) -> bool;
+    fn cfst_fill_incompressible(buf: *mut u8, len: usize, seed: u32);
+    fn cfst_engine_mount(bdp: *mut *mut blkdev, nblocks: u64, reason: *mut *CChar) -> bool;
+    fn cfst_engine_unmount(bd: *mut blkdev, reason: *mut *CChar) -> bool;
+    fn cfst_remount_eng(bd: *mut blkdev, reason: *mut *CChar) -> bool;
+    fn cfst_check_fixture(bd: *mut *mut blkdev, reason: *mut *CChar) -> bool;
+    fn cfst_check_teardown(bd: *mut blkdev);
+    fn cfst_check_why(r: *cosmofs_check_report) -> *CChar;
+    fn cfst_snapctl(op: u32, name: *CChar, out: *mut cosmofs_snap_info, max: u32, count: *mut u32) -> i32;
+    fn cfst_info_named(v: *cosmofs_snap_info, n: u32, name: *CChar) -> *cosmofs_snap_info;
+}
+
+// ---- Values (asserted in cosmofstest_names_floor.c) ----
+
+const EPERM: i32 = 1;
+const ENOENT: i32 = 2;
+const EEXIST: i32 = 17;
+const EINVAL: i32 = 22;
+const EROFS: i32 = 30;
+const ENAMETOOLONG: i32 = 36;
+const EOPNOTSUPP: i32 = 95;
+const O_RDONLY: u32 = 0;
+const O_WRONLY: u32 = 1;
+const O_RDWR: u32 = 2;
+const O_CREAT: u32 = 0x40;
+const VFS_UMOUNT_FORCE: u32 = 1;
+const DT_LNK: u32 = 6;
+const CFS_BLOCK: u64 = 4096;
+const CFS_FORMAT_VERSION: u64 = 11;
+const CFS_NAME_MAX_LONG: usize = 255;
+const CFS_DIRENTS_PER_BLOCK: u32 = 64;
+const SNAP_CREATE: u32 = 1;
+const SNAP_LIST: u32 = 2;
+const SNAP_DELETE: u32 = 3;
+const CHECK_REPAIR: u32 = 1;
+const CORRUPT_DUP_NAME: u32 = 13;
+const CORRUPT_SNAP_UUID: u32 = 17;
+const CORRUPT_LONGNAME_EXTRA: u32 = 20;
+const CORRUPT_LONGNAME_CONT: u32 = 21;
+/// sizeof(struct cosmofs_snap_info).
+const SNAP_INFO: usize = 104;
+/// A cosmo_stat: its type, its link count; and a cosmo_dirent: its size, reclen, namelen and name.
+const STAT_TYPE: usize = 8;
+const STAT_NLINK: usize = 16;
+const DIRENT: usize = 16;
+const DIRENT_RECLEN: usize = 8;
+const DIRENT_NAMELEN: usize = 11;
+const DIRENT_NAME: usize = 12;
+/// strlen(ENG "/").
+const ENG_SLASH: usize = 9;
+
+const ENG: StringView = "/mnt/eng\0";
+
+// ---- Helpers ----
+
+fn c(s: StringView) -> *CChar => s.ptr as *CChar;
+
+fn nov() -> *mut vnode => 0 as *mut vnode;
+
+/// Safety: `reason` writable.
+unsafe fn failed(reason: *mut *CChar, why: StringView) -> bool {
+    reason.write(why.ptr as *CChar);
+    return false;
+}
+
+/// The engine mount.
+/// Safety: none beyond the VFS's own.
+unsafe fn mnt() -> *mut mount => cfst_mount_of(c(ENG));
+
+/// Safety: `bd` is a device.
+unsafe fn mountEng(bd: *mut blkdev) -> i32 => vfs_mount(c(ENG), c("cosmofs\0"), bd, 0);
+
+/// Safety: none beyond the VFS's own.
+unsafe fn umountEng() -> i32 => vfs_umount2(c(ENG), 0);
+
+/// Safety: `f` is an open file.
+unsafe fn filePut(f: *mut file) { kobject_put(f as *mut kobject); }
+
+/// The engine mount's statistics: generation, free_blocks, total_blocks, members, version, free_root.
+/// Safety: none beyond the VFS's own.
+unsafe fn stats(v: borrow mut [u64; 6]) -> bool => cfst_fl_stats(mnt(), borrow mut v[0] as *mut u64) == 0;
+
+/// The engine mount's format version, or 0.
+/// Safety: none beyond the VFS's own.
+unsafe fn poolVersion() -> u64 {
+    var v = [0u64; 6];
+    return if (stats(mut v)) v[4] else 0;
+}
+
+/// The report of the last check: static, since the self-tests run one at a time and the stack has no room for it.
+static mut g_rep: [u64; 256] = [0; 256];
+
+/// Safety: the self-tests run one at a time.
+unsafe fn rep() -> *mut cosmofs_check_report => borrow mut g_rep as *mut [u64; 256] as *mut cosmofs_check_report;
+
+/// The structural check of the engine mount into the report; its result.
+/// Safety: the self-tests run one at a time.
+unsafe fn check(flags: u32) -> i32 => cosmofs_check(mnt(), rep(), flags);
+
+/// Safety: the report is the last check's.
+unsafe fn r() -> *cosmofs_check_report => rep() as *cosmofs_check_report;
+
+/// A stat (or lstat) of `path`: its result, and the inode number, type, link count and size into `out`.
+/// Safety: `path` a terminated string.
+unsafe fn statOf(path: *CChar, link: bool, out: borrow mut [u64; 4]) -> i32 {
+    var slot = [0u64; 8];
+    let st = borrow mut slot as *mut [u64; 8] as *mut cosmo_stat;
+    let rc = if (link) vfs_lstat(nov(), path, st) else vfs_stat(nov(), path, st);
+    let bytes = Slice.fromRaw(st as *u8, 64);
+    out[0] = Ptr.toBorrow(st as *cosmo_stat).ino;
+    out[1] = ByteOrder.readU32LE(bytes, STAT_TYPE) as u64;
+    out[2] = ByteOrder.readU32LE(bytes, STAT_NLINK) as u64;
+    out[3] = Ptr.toBorrow(st as *cosmo_stat).size;
+    return rc;
+}
+
+/// A RAM device of `nblocks` blocks formatted at `version`, mounted at /mnt/eng with write-back off, into `bdp`. As
+/// the C's first lines of each test did it, a failure leaves the device behind.
+/// Safety: `bdp` and `reason` writable.
+unsafe fn freshAt(bdp: *mut *mut blkdev, nblocks: u64, version: u32, reason: *mut *CChar) -> bool {
+    let _ = vfs_umount2(c(ENG), VFS_UMOUNT_FORCE);
+    let bd = ramblk_create(nblocks);
+    bdp.write(bd);
+    if (bd.isNull()) {
+        return failed(reason, "check failed: bd != NULL at line 207\0");
+    }
+    if (cosmofs_test_format_version(bd, version) != 0) {
+        return failed(reason, "check failed: cosmofs_test_format_version(bd, version) == 0 at line 210\0");
+    }
+    let mk = vfs_mkdir(nov(), c(ENG), 493);
+    if (!(mk == 0 || mk == -EEXIST)) {
+        return failed(reason, "check failed: mk == 0 || mk == -EEXIST at line 214\0");
+    }
+    if (mountEng(bd) != 0) {
+        return failed(reason, "check failed: vfs_mount(ENG, \"cosmofs\", bd, 0) == 0 at line 217\0");
+    }
+    cosmofs_test_set_writeback(mnt(), false);
+    return true;
+}
+
+/// Bytes of a terminated string, appended.
+/// Safety: `s` a terminated string.
+unsafe fn appendC(w: borrow mut TextWriter, s: *CChar) {
+    var p = s as *u8;
+    while (p.read() != 0) {
+        w.byte(p.read());
+        p = p.add(1);
+    }
+}
+
+/// The first `len` bytes of a file, whatever the file's length.
+/// Safety: `path` a terminated string; `data` `len` bytes.
+unsafe fn headMatches(path: *CChar, data: *void, len: usize) -> bool {
+    var f = 0 as *mut file;
+    if (vfs_open(nov(), path, O_RDONLY, 0, borrow mut f as *mut *mut file) != 0) {
+        return false;
+    }
+    let b = kmalloc(len, 0) as *mut u8;
+    if (b.isNull()) {
+        filePut(f);
+        return false;
+    }
+    let n = file_read(f, b as *mut void, len);
+    let ok = n == truncate<i64>(len) && memcmp(b as *void, data, len) == 0;
+    kfree(b as *mut void);
+    filePut(f);
+    return ok;
+}
+
+// ---- Long names ----
+
+/// Nine names of up to 300 bytes, and a path of up to 600: static, since the self-tests run one at a time.
+static mut g_names: [u8; 2700] = [0; 2700];
+static mut g_path: [u8; 600] = [0; 600];
+
+/// Name buffer `k` (300 bytes).
+/// Safety: the self-tests run one at a time.
+unsafe fn nb(k: usize) -> *mut u8 => (borrow mut g_names as *mut [u8; 2700] as *mut u8).add(k * 300);
+
+/// Safety: the self-tests run one at a time.
+unsafe fn pathBuf() -> *mut u8 => borrow mut g_path as *mut [u8; 600] as *mut u8;
+
+/// `ENG "/"` and a name of `len` bytes, distinct per `tag`, into `out`.
+/// Safety: `out` holds ENG_SLASH + len + 1 bytes.
+unsafe fn lname(out: *mut u8, len: u32, tag: u8) -> *CChar {
+    let pre = "/mnt/eng/";
+    for (i in 0usize..ENG_SLASH) {
+        out.add(i).write(pre[i]);
+    }
+    out.add(ENG_SLASH).write(tag);
+    for (i in 1u32..len) {
+        out.add(ENG_SLASH + i as usize).write(97 + truncate<u8>((i * 7 + tag as u32) % 26)); // 'a' + ...
+    }
+    out.add(ENG_SLASH + len as usize).write(0);
+    return out as *CChar;
+}
+
+/// The name part of a path lname made.
+/// Safety: `p` a path lname made.
+unsafe fn lbase(p: *CChar) -> *CChar => (p as *u8).add(ENG_SLASH) as *CChar;
+
+/// How many entries of `dir` are named `want`, listed through a buffer of `bufsz` bytes -- small, so the walk resumes
+/// between long names -- and how many entries there were in all, "." and ".." among them: `counts` (hits, total).
+/// Safety: `dir` and `want` terminated strings.
+unsafe fn listCount(dir: *CChar, bufsz: usize, want: *CChar, counts: borrow mut [u32; 2]) -> bool {
+    var f = 0 as *mut file;
+    if (vfs_open(nov(), dir, O_RDONLY, 0, borrow mut f as *mut *mut file) != 0) {
+        return false;
+    }
+    let buf = kmalloc(bufsz, 0) as *mut u8;
+    var ok = !buf.isNull();
+    var wlen: usize = 0;
+    while ((want as *u8).add(wlen).read() != 0) {
+        wlen += 1;
+    }
+    counts[0] = 0;
+    counts[1] = 0;
+    while (ok) {
+        let n = file_readdir(f, buf as *mut void, bufsz);
+        if (n <= 0) {
+            ok = n == 0;
+            break;
+        }
+        let len = truncate<usize>(n);
+        let got = Slice.fromRaw(buf as *u8, len);
+        var o: usize = 0;
+        while (o < len) {
+            let reclen = ByteOrder.readU16LE(got, o + DIRENT_RECLEN) as usize;
+            if (reclen == 0) {
+                ok = false;
+                break;
+            }
+            counts[1] += 1;
+            if (got[o + DIRENT_NAMELEN] as usize == wlen &&
+                memcmp(buf.add(o + DIRENT_NAME) as *void, want as *void, wlen) == 0) {
+                counts[0] += 1;
+            }
+            o += reclen;
+        }
+    }
+    kfree(buf as *mut void);
+    filePut(f);
+    return ok;
+}
+
+// ---- Old formats and two members ----
+
+/// Safety: `reason` writable.
+@cfg("CONFIG_DEBUG")
+@export("selftest_cosmofs_v3")
+unsafe fn selftestV3(reason: *mut *CChar) -> bool {
+    var bd = 0 as *mut blkdev;
+    if (!freshAt(borrow mut bd as *mut *mut blkdev, 512, 3, reason)) {
+        return false;
+    }
+    var st = [0u64; 6];
+    if (!stats(mut st)) {
+        return failed(reason, "check failed: cosmofs_stats(cfst_mount_of(ENG), &st) == 0 at line 340\0");
+    }
+    if (!(st[3] == 1 && st[2] == 512)) {
+        return failed(reason, "check failed: st.members == 1 && st.total_blocks == 512 at line 343\0");
+    }
+    // One member's worth of blocks, and one less metadata block than a version-4 disk: there is no member table.
+    if (st[1] != 512 - 7) {
+        return failed(reason, "check failed: st.free_blocks == 512 - 7 at line 347\0");
+    }
+
+    if (!cfst_write_file(c("/mnt/eng/old\0"), "written by a new kernel".ptr as *void, 23)) {
+        return failed(reason,
+            "check failed: cfst_write_file(ENG \"/old\", \"written by a new kernel\", 23) at line 352\0");
+    }
+    if (vfs_mkdir(nov(), c("/mnt/eng/dir\0"), 493) != 0) {
+        return failed(reason, "check failed: vfs_mkdir(NULL, ENG \"/dir\", 0755) == 0 at line 355\0");
+    }
+    if (!cfst_write_file(c("/mnt/eng/dir/deep\0"), "deep".ptr as *void, 4)) {
+        return failed(reason, "check failed: cfst_write_file(ENG \"/dir/deep\", \"deep\", 4) at line 358\0");
+    }
+    if (vfs_sync() != 0) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 361\0");
+    }
+    if (umountEng() != 0) {
+        return failed(reason, "check failed: vfs_umount(ENG) == 0 at line 364\0");
+    }
+
+    if (mountEng(bd) != 0) {
+        return failed(reason, "check failed: vfs_mount(ENG, \"cosmofs\", bd, 0) == 0 at line 368\0");
+    }
+    cosmofs_test_set_writeback(mnt(), false);
+    if (!cfst_read_matches(c("/mnt/eng/old\0"), "written by a new kernel".ptr as *void, 23)) {
+        return failed(reason,
+            "check failed: cfst_read_matches(ENG \"/old\", \"written by a new kernel\", 23) at line 373\0");
+    }
+    if (!cfst_read_matches(c("/mnt/eng/dir/deep\0"), "deep".ptr as *void, 4)) {
+        return failed(reason, "check failed: cfst_read_matches(ENG \"/dir/deep\", \"deep\", 4) at line 376\0");
+    }
+    // Snapshots work on it too: a version-3 snapshot records the single allocation root, and that is what
+    // cfs_snapshot_references reads.
+    if (vfs_mkdir(nov(), c("/mnt/eng/.snapshots/v3\0"), 493) != 0) {
+        return failed(reason, "check failed: vfs_mkdir(NULL, ENG \"/.snapshots/v3\", 0755) == 0 at line 381\0");
+    }
+    if (!cfst_write_file(c("/mnt/eng/old\0"), "changed".ptr as *void, 7)) {
+        return failed(reason, "check failed: cfst_write_file(ENG \"/old\", \"changed\", 7) at line 384\0");
+    }
+    if (!cfst_read_matches(c("/mnt/eng/.snapshots/v3/old\0"), "written by a new kernel".ptr as *void, 23)) {
+        return failed(reason,
+            "check failed: read_matches(ENG \"/.snapshots/v3/old\", \"written by a new kernel\", 23) at line 388\0");
+    }
+    // And the hold is *recorded*, on a filesystem too old to have a free record. The deadlist's blocks come from the
+    // commit's reservation, and that reservation is not gated on the record's version: gating it would leave this
+    // commit's release loop unable to remember a hold, which means freeing a block the snapshot still names. Read the
+    // entries rather than the file, because the file reads correctly from a freed block until something else takes
+    // it.
+    if (vfs_sync() != 0) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 396\0");
+    }
+    var v3Dead: u64 = 0;
+    if (cosmofs_test_deadlist_dups(mnt(), borrow mut v3Dead as *mut u64, 0 as *mut u64) != 0) {
+        return failed(reason,
+            "check failed: cosmofs_test_deadlist_dups(cfst_mount_of(ENG), &v3_dead, NULL) == 0 at line 401\0");
+    }
+    if (v3Dead == 0) {
+        return failed(reason, "check failed: v3_dead > 0 at line 404\0");
+    }
+    if (check(0) != 0) {
+        return failed(reason, "check failed: cosmofs_check(cfst_mount_of(ENG), &v3rep, 0) == 0 at line 407\0");
+    }
+    if (Ptr.toBorrow(r()).seen_not_alloc.count != 0) {
+        return failed(reason, "check failed: v3rep.seen_not_alloc.count == 0 at line 410\0");
+    }
+    if (Ptr.toBorrow(r()).snapshots_seen != 1) {
+        return failed(reason, "check failed: v3rep.snapshots_seen == 1 at line 413\0");
+    }
+    if (vfs_rmdir(nov(), c("/mnt/eng/.snapshots/v3\0")) != 0) {
+        return failed(reason, "check failed: vfs_rmdir(NULL, ENG \"/.snapshots/v3\") == 0 at line 416\0");
+    }
+    if (!cfst_read_matches(c("/mnt/eng/old\0"), "changed".ptr as *void, 7)) {
+        return failed(reason, "check failed: cfst_read_matches(ENG \"/old\", \"changed\", 7) at line 419\0");
+    }
+
+    if (umountEng() != 0) {
+        return failed(reason, "check failed: vfs_umount(ENG) == 0 at line 423\0");
+    }
+    if (vfs_rmdir(nov(), c(ENG)) != 0) {
+        return failed(reason, "check failed: vfs_rmdir(NULL, ENG) == 0 at line 426\0");
+    }
+    ramblk_destroy(bd);
+    var buffer = [0u8; 96];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: cosmofs-v3: a version-3 disk still mounts and writes");
+    KernelLog.send(LogLevel.Info, line);
+    return true;
+}
+
+/// Sixteen different pages: static, since the self-tests run one at a time.
+static mut g_pages: [u8; 65536] = [0; 65536];
+
+/// `/mnt/eng/f<i>`, terminated, in `buf`.
+/// Safety: the result is used while `buf` lives.
+unsafe fn fpath(buf: borrow mut [u8; 32], i: u32) -> *CChar {
+    var w = TextWriter.create(mut buf[..]);
+    w.text("/mnt/eng/f");
+    w.decimal(i as u64);
+    return w.cText();
+}
+
+/// Safety: `reason` writable.
+@cfg("CONFIG_DEBUG")
+@export("selftest_cosmofs_pool2")
+unsafe fn selftestPool2(reason: *mut *CChar) -> bool {
+    let _ = vfs_umount2(c(ENG), VFS_UMOUNT_FORCE);
+    var bd = [0 as *mut blkdev; 2];
+    bd[0] = ramblk_create(1024);
+    bd[1] = ramblk_create(1024);
+    if (!(!bd[0].isNull() && !bd[1].isNull())) {
+        return failed(reason, "check failed: bd[0] != NULL && bd[1] != NULL at line 457\0");
+    }
+    if (cosmofs_format_pool(borrow mut bd as *mut [*mut blkdev; 2] as *mut *mut blkdev, 2) != 0) {
+        return failed(reason, "check failed: cosmofs_format_pool(bd, 2) == 0 at line 460\0");
+    }
+    let mk = vfs_mkdir(nov(), c(ENG), 493);
+    if (!(mk == 0 || mk == -EEXIST)) {
+        return failed(reason, "check failed: mk == 0 || mk == -EEXIST at line 464\0");
+    }
+    if (mountEng(bd[0]) != 0) {
+        return failed(reason, "check failed: vfs_mount(ENG, \"cosmofs\", bd[0], 0) == 0 at line 467\0");
+    }
+    cosmofs_test_set_writeback(mnt(), false);
+
+    // The first commit touches member 0's metadata while member 1 is emptier, so the allocation index's copy-on-write
+    // lands on member 1 and dirties a bitmap chunk that the reservation pass has already been over. Every dirty chunk
+    // must still have a reserved destination: writing one to DVA 0 would land on member 0's superblock.
+    if (!cfst_write_file(c("/mnt/eng/first\0"), "one".ptr as *void, 3)) {
+        return failed(reason, "check failed: cfst_write_file(ENG \"/first\", \"one\", 3) at line 475\0");
+    }
+    if (vfs_sync() != 0) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 478\0");
+    }
+    if (umountEng() != 0) {
+        return failed(reason, "check failed: vfs_umount(ENG) == 0 at line 481\0");
+    }
+    if (mountEng(bd[0]) != 0) {
+        return failed(reason, "check failed: vfs_mount(ENG, \"cosmofs\", bd[0], 0) == 0 at line 484\0");
+    }
+    cosmofs_test_set_writeback(mnt(), false);
+    if (!cfst_read_matches(c("/mnt/eng/first\0"), "one".ptr as *void, 3)) {
+        return failed(reason, "check failed: cfst_read_matches(ENG \"/first\", \"one\", 3) at line 488\0");
+    }
+
+    // Both members' blocks are in the pool's total.
+    var st = [0u64; 6];
+    if (!stats(mut st)) {
+        return failed(reason, "check failed: cosmofs_stats(cfst_mount_of(ENG), &st) == 0 at line 494\0");
+    }
+    if (st[2] != 2048) {
+        return failed(reason, "check failed: st.total_blocks == 2048 at line 497\0");
+    }
+
+    // Enough data that a one-member pool of this size could not hold it: the allocator has to reach the second
+    // member. Sixteen *different* pages per file: the same page written sixteen times is one of the most
+    // compressible things there is, and this test is about where blocks land, not how few of them there are.
+    let buf = borrow mut g_pages as *mut [u8; 65536] as *mut u8;
+    cfst_fill_incompressible(buf, 65536, 0x9e37);
+    var name = [0u8; 32];
+    for (i in 0u32..24) {
+        var f = 0 as *mut file;
+        if (vfs_open(nov(), fpath(mut name, i), O_RDWR | O_CREAT, 420, borrow mut f as *mut *mut file) != 0) {
+            return failed(reason,
+                "check failed: vfs_open(NULL, name, COSMO_O_RDWR | COSMO_O_CREAT, 0644, &f) == 0 at line 510\0");
+        }
+        for (k in 0usize..16) {
+            if (file_write(f, buf.add(k * 4096) as *void, 4096) != 4096) {
+                return failed(reason,
+                    "check failed: file_write(f, buf + (size_t)k * 4096, 4096) == 4096 at line 515\0");
+            }
+        }
+        filePut(f);
+    }
+    if (vfs_sync() != 0) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 521\0");
+    }
+    if (!stats(mut st)) {
+        return failed(reason, "check failed: cosmofs_stats(cfst_mount_of(ENG), &st) == 0 at line 524\0");
+    }
+    if (st[3] != 2) {
+        return failed(reason, "check failed: st.members == 2 at line 527\0");
+    }
+    if (!(st[1] < 2048 - 24 * 16)) {
+        return failed(reason, "check failed: st.free_blocks < 2048 - 24 * 16 at line 530\0");
+    }
+    // Both members carry blocks -- the allocator prefers whichever has more room, so neither is left untouched -- and
+    // the pool's free count is exactly theirs.
+    let f0 = cosmofs_test_member_free(mnt(), 0);
+    let f1 = cosmofs_test_member_free(mnt(), 1);
+    if (!(f0 < 1024 && f1 < 1024)) {
+        return failed(reason, "check failed: f0 < 1024 && f1 < 1024 at line 537\0");
+    }
+    if (f0 + f1 != st[1]) {
+        return failed(reason, "check failed: f0 + f1 == st.free_blocks at line 540\0");
+    }
+    if (cosmofs_test_member_free(mnt(), 2) != 0xFFFFFFFFFFFFFFFF) {
+        return failed(reason,
+            "check failed: cosmofs_test_member_free(cfst_mount_of(ENG), 2) == UINT64_MAX at line 544\0");
+    }
+
+    // A remount is handed member 0 only and has to find the other one by its label; the data reads back through
+    // both.
+    if (umountEng() != 0) {
+        return failed(reason, "check failed: vfs_umount(ENG) == 0 at line 550\0");
+    }
+    if (mountEng(bd[0]) != 0) {
+        return failed(reason, "check failed: vfs_mount(ENG, \"cosmofs\", bd[0], 0) == 0 at line 553\0");
+    }
+    cosmofs_test_set_writeback(mnt(), false);
+    if (!(stats(mut st) && st[2] == 2048)) {
+        return failed(reason,
+            "check failed: cosmofs_stats(cfst_mount_of(ENG), &st) == 0 && st.total_blocks == 2048 at line 558\0");
+    }
+    for (i in 0u32..24) {
+        var s = [0u64; 4];
+        if (!(statOf(fpath(mut name, i), false, mut s) == 0 && s[3] == 16 * 4096)) {
+            return failed(reason, "check failed: vfs_stat(NULL, name, &s) == 0 && s.size == 16 * 4096 at line 563\0");
+        }
+    }
+    if (!headMatches(c("/mnt/eng/f7\0"), buf as *void, 4096)) {
+        return failed(reason, "check failed: head_matches(ENG \"/f7\", buf, 4096) at line 567\0");
+    }
+
+    // A snapshot spans the members too: its record pins the member table of its generation, so every member's bitmap
+    // is held.
+    if (vfs_mkdir(nov(), c("/mnt/eng/.snapshots/two\0"), 493) != 0) {
+        return failed(reason, "check failed: vfs_mkdir(NULL, ENG \"/.snapshots/two\", 0755) == 0 at line 573\0");
+    }
+    if (vfs_unlink(nov(), c("/mnt/eng/f3\0")) != 0) {
+        return failed(reason, "check failed: vfs_unlink(NULL, ENG \"/f3\") == 0 at line 576\0");
+    }
+    if (vfs_sync() != 0) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 579\0");
+    }
+    if (!headMatches(c("/mnt/eng/.snapshots/two/f3\0"), buf as *void, 4096)) {
+        return failed(reason, "check failed: head_matches(ENG \"/.snapshots/two/f3\", buf, 4096) at line 582\0");
+    }
+    if (vfs_rmdir(nov(), c("/mnt/eng/.snapshots/two\0")) != 0) {
+        return failed(reason, "check failed: vfs_rmdir(NULL, ENG \"/.snapshots/two\") == 0 at line 585\0");
+    }
+
+    if (umountEng() != 0) {
+        return failed(reason, "check failed: vfs_umount(ENG) == 0 at line 589\0");
+    }
+
+    if (vfs_rmdir(nov(), c(ENG)) != 0) {
+        return failed(reason, "check failed: vfs_rmdir(NULL, ENG) == 0 at line 593\0");
+    }
+    ramblk_destroy(bd[0]);
+    ramblk_destroy(bd[1]);
+    var buffer = [0u8; 96];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: cosmofs-pool2: two members, ");
+    line.decimal(st[2]);
+    line.text(" blocks");
+    KernelLog.send(LogLevel.Info, line);
+    return true;
+}
+
+// ---- Snapshots ----
+
+/// A snapshot survives an unmount: its entry is on disk, not in memory.
+/// Safety: `reason` writable.
+@cfg("CONFIG_DEBUG")
+@export("selftest_cosmofs_snapshot_remount")
+unsafe fn selftestSnapshotRemount(reason: *mut *CChar) -> bool {
+    var bd = 0 as *mut blkdev;
+    if (!cfst_engine_mount(borrow mut bd as *mut *mut blkdev, 512, reason)) {
+        return false;
+    }
+    if (!cfst_write_file(c("/mnt/eng/f\0"), "v1".ptr as *void, 2)) {
+        return failed(reason, "check failed: cfst_write_file(ENG \"/f\", \"v1\", 2) at line 618\0");
+    }
+    if (vfs_mkdir(nov(), c("/mnt/eng/.snapshots/s1\0"), 493) != 0) {
+        return failed(reason, "check failed: vfs_mkdir(NULL, ENG \"/.snapshots/s1\", 0755) == 0 at line 621\0");
+    }
+    if (!cfst_write_file(c("/mnt/eng/f\0"), "v2".ptr as *void, 2)) {
+        return failed(reason, "check failed: cfst_write_file(ENG \"/f\", \"v2\", 2) at line 624\0");
+    }
+    if (umountEng() != 0) {
+        return failed(reason, "check failed: vfs_umount(ENG) == 0 at line 627\0");
+    }
+    if (mountEng(bd) != 0) {
+        return failed(reason, "check failed: vfs_mount(ENG, \"cosmofs\", bd, 0) == 0 at line 630\0");
+    }
+    cosmofs_test_set_writeback(mnt(), false);
+    if (!cfst_read_matches(c("/mnt/eng/f\0"), "v2".ptr as *void, 2)) {
+        return failed(reason, "check failed: cfst_read_matches(ENG \"/f\", \"v2\", 2) at line 634\0");
+    }
+    if (!cfst_read_matches(c("/mnt/eng/.snapshots/s1/f\0"), "v1".ptr as *void, 2)) {
+        return failed(reason, "check failed: cfst_read_matches(ENG \"/.snapshots/s1/f\", \"v1\", 2) at line 637\0");
+    }
+    if (vfs_rmdir(nov(), c("/mnt/eng/.snapshots/s1\0")) != 0) {
+        return failed(reason, "check failed: vfs_rmdir(NULL, ENG \"/.snapshots/s1\") == 0 at line 640\0");
+    }
+    var buffer = [0u8; 96];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: cosmofs-snapshot-remount: the snapshot survived the unmount");
+    KernelLog.send(LogLevel.Info, line);
+    return cfst_engine_unmount(bd, reason);
+}
+
+/// Eight snapshot records and a file of 32 incompressible blocks: static, since the self-tests run one at a time and
+/// the kernel stack has no room for them.
+static mut g_info: [u64; 104] = [0; 104];
+static mut g_big: [u8; 131072] = [0; 131072];
+
+/// Safety: the self-tests run one at a time.
+unsafe fn info() -> *mut cosmofs_snap_info => borrow mut g_info as *mut [u64; 104] as *mut cosmofs_snap_info;
+
+/// Record `i` of a listing.
+/// Safety: `i` < 8.
+unsafe fn infoAt(i: u32) -> *cosmofs_snap_info => (info() as *u8).add(i as usize * SNAP_INFO) as *cosmofs_snap_info;
+
+/// Whether record `p`'s uuid is all zeros (the C compared it with a zero array).
+/// Safety: `p` a record.
+unsafe fn uuidZero(p: *cosmofs_snap_info) -> bool {
+    let zero = [0u8; 16];
+    return memcmp(borrow Ptr.toBorrow(p).uuid as *[u8; 16] as *void, borrow zero as *[u8; 16] as *void, 16) == 0;
+}
+
+/// Format version 12's snapshot identity (roadmap 1.2 B1; design.md, "Format version 12"): a pool formatted at 11
+/// stays at 11 until a snapshot is taken, which raises it and converts the list an older kernel left -- every
+/// snapshot gains a uuid and stays readable; ids are never reused, across a remount too (inventory §3, CFS-3); a
+/// list's sizes say what each snapshot alone holds; a pool older than 11 refuses identity and keeps its version; and
+/// the checker names a snapshot with no uuid and repairs it.
+/// Safety: `reason` writable.
+@cfg("CONFIG_DEBUG")
+@export("selftest_cosmofs_snap_identity")
+unsafe fn selftestSnapIdentity(reason: *mut *CChar) -> bool {
+    var bd = 0 as *mut blkdev;
+    if (!cfst_engine_mount(borrow mut bd as *mut *mut blkdev, 1024, reason)) {
+        return false;
+    }
+    var n: u32 = 0;
+    let np = borrow mut n as *mut u32;
+
+    if (poolVersion() != 11) { // formatted at 11, not 12
+        return failed(reason, "check failed: st.version == 11 at line 685\0");
+    }
+
+    // The list an older kernel would have left: one version-11 snapshot.
+    if (!cfst_write_file(c("/mnt/eng/f\0"), "old".ptr as *void, 3)) {
+        return failed(reason, "check failed: cfst_write_file(ENG \"/f\", \"old\", 3) at line 690\0");
+    }
+    cosmofs_test_snap_no_raise(mnt(), true);
+    if (vfs_mkdir(nov(), c("/mnt/eng/.snapshots/legacy\0"), 493) != 0) {
+        return failed(reason, "check failed: vfs_mkdir(NULL, ENG \"/.snapshots/legacy\", 0755) == 0 at line 694\0");
+    }
+    cosmofs_test_snap_no_raise(mnt(), false);
+    if (poolVersion() != 11) {
+        return failed(reason,
+            "check failed: cosmofs_stats(cfst_mount_of(ENG), &st) == 0 && st.version == 11 at line 699\0");
+    }
+
+    // The first snapshot with identity raises the pool and the list.
+    if (!cfst_write_file(c("/mnt/eng/f\0"), "new".ptr as *void, 3)) {
+        return failed(reason, "check failed: cfst_write_file(ENG \"/f\", \"new\", 3) at line 704\0");
+    }
+    if (!(cfst_snapctl(SNAP_CREATE, c("a\0"), info(), 1, np) == 0 && n == 1)) {
+        return failed(reason,
+            "check failed: cfst_snapctl(COSMOFS_SNAP_CREATE, \"a\", info, 1, &n) == 0 && n == 1 at line 708\0");
+    }
+    if (poolVersion() != 12) {
+        return failed(reason,
+            "check failed: cosmofs_stats(cfst_mount_of(ENG), &st) == 0 && st.version == 12 at line 712\0");
+    }
+    if (!(!uuidZero(info() as *cosmofs_snap_info) && Ptr.toBorrow(infoAt(0)).format == 12)) {
+        return failed(reason,
+            "check failed: memcmp(info[0].uuid, zero, 16) != 0 && info[0].format == 12 at line 716\0");
+    }
+    var uuidA = [0u8; 16];
+    let info0 = infoAt(0);
+    memcpy(borrow mut uuidA as *mut [u8; 16] as *mut void, borrow Ptr.toBorrow(info0).uuid as *[u8; 16] as *void, 16);
+    if (cfst_snapctl(SNAP_CREATE, c("a\0"), info(), 1, np) != -EEXIST) {
+        return failed(reason,
+            "check failed: cfst_snapctl(COSMOFS_SNAP_CREATE, \"a\", info, 1, &n) == -EEXIST at line 723\0");
+    }
+    if (cfst_snapctl(SNAP_CREATE, c("b\0"), info(), 1, np) != 0) {
+        return failed(reason, "check failed: cfst_snapctl(COSMOFS_SNAP_CREATE, \"b\", info, 1, &n) == 0 at line 726\0");
+    }
+    let ua = borrow uuidA as *[u8; 16] as *void;
+    if (memcmp(borrow Ptr.toBorrow(infoAt(0)).uuid as *[u8; 16] as *void, ua, 16) == 0) {
+        return failed(reason, "check failed: memcmp(info[0].uuid, uuid_a, 16) != 0 at line 730\0");
+    }
+    let idB = Ptr.toBorrow(infoAt(0)).id;
+    if (!cfst_read_matches(c("/mnt/eng/.snapshots/legacy/f\0"), "old".ptr as *void, 3)) { // converted, still readable
+        return failed(reason,
+            "check failed: cfst_read_matches(ENG \"/.snapshots/legacy/f\", \"old\", 3) at line 735\0");
+    }
+    if (!cfst_read_matches(c("/mnt/eng/.snapshots/a/f\0"), "new".ptr as *void, 3)) {
+        return failed(reason, "check failed: cfst_read_matches(ENG \"/.snapshots/a/f\", \"new\", 3) at line 738\0");
+    }
+
+    // Every entry, the converted one included, has a uuid of its own.
+    if (!(cfst_snapctl(SNAP_LIST, 0 as *CChar, info(), 8, np) == 0 && n == 3)) {
+        return failed(reason,
+            "check failed: cfst_snapctl(COSMOFS_SNAP_LIST, NULL, info, 8, &n) == 0 && n == 3 at line 744\0");
+    }
+    let legacy = cfst_info_named(info() as *cosmofs_snap_info, n, c("legacy\0"));
+    if (!(!legacy.isNull())) {
+        return failed(reason, "check failed: legacy != NULL at line 748\0");
+    }
+    if (!(!uuidZero(legacy))) {
+        return failed(reason, "check failed: memcmp(legacy->uuid, zero, 16) != 0 at line 751\0");
+    }
+    if (!(memcmp(borrow Ptr.toBorrow(legacy).uuid as *[u8; 16] as *void, ua, 16) != 0)) {
+        return failed(reason, "check failed: memcmp(legacy->uuid, uuid_a, 16) != 0 at line 754\0");
+    }
+
+    // Ids are never reused, across a remount (CFS-3): delete the newest, remount, take another -- it gets a new id,
+    // not b's.
+    if (cfst_snapctl(SNAP_DELETE, c("b\0"), 0 as *mut cosmofs_snap_info, 0, 0 as *mut u32) != 0) {
+        return failed(reason,
+            "check failed: cfst_snapctl(COSMOFS_SNAP_DELETE, \"b\", NULL, 0, NULL) == 0 at line 761\0");
+    }
+    if (umountEng() != 0) {
+        return failed(reason, "check failed: vfs_umount(ENG) == 0 at line 764\0");
+    }
+    if (mountEng(bd) != 0) {
+        return failed(reason, "check failed: vfs_mount(ENG, \"cosmofs\", bd, 0) == 0 at line 767\0");
+    }
+    cosmofs_test_set_writeback(mnt(), false);
+    if (cfst_snapctl(SNAP_CREATE, c("c\0"), info(), 1, np) != 0) {
+        return failed(reason, "check failed: cfst_snapctl(COSMOFS_SNAP_CREATE, \"c\", info, 1, &n) == 0 at line 771\0");
+    }
+    if (!(Ptr.toBorrow(infoAt(0)).id > idB)) {
+        return failed(reason, "check failed: info[0].id > id_b at line 774\0");
+    }
+
+    // What a snapshot alone holds: a file of 32 blocks written, taken by "d", then removed from the live tree.
+    // Incompressible: new files are LZ4 (format version 6), and a file that compresses holds fewer blocks than it has.
+    let big = borrow mut g_big as *mut [u8; 131072] as *mut u8;
+    var x: u64 = 0x9E3779B97F4A7C15;
+    for (i in 0usize..131072) {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        big.add(i).write(truncate<u8>(x));
+    }
+    if (!cfst_write_file(c("/mnt/eng/big\0"), big as *void, 131072)) {
+        return failed(reason, "check failed: cfst_write_file(ENG \"/big\", big, sizeof(big)) at line 788\0");
+    }
+    if (cfst_snapctl(SNAP_CREATE, c("d\0"), info(), 1, np) != 0) {
+        return failed(reason, "check failed: cfst_snapctl(COSMOFS_SNAP_CREATE, \"d\", info, 1, &n) == 0 at line 791\0");
+    }
+    if (vfs_unlink(nov(), c("/mnt/eng/big\0")) != 0) {
+        return failed(reason, "check failed: vfs_unlink(NULL, ENG \"/big\") == 0 at line 794\0");
+    }
+    if (vfs_sync() != 0) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 797\0");
+    }
+    if (!(cfst_snapctl(SNAP_LIST, 0 as *CChar, info(), 8, np) == 0 && n == 4)) { // legacy, a, c, d
+        return failed(reason,
+            "check failed: cfst_snapctl(COSMOFS_SNAP_LIST, NULL, info, 8, &n) == 0 && n == 4 at line 801\0");
+    }
+    let d = cfst_info_named(info() as *cosmofs_snap_info, n, c("d\0"));
+    let cs = cfst_info_named(info() as *cosmofs_snap_info, n, c("c\0"));
+    if (!(!d.isNull() && !cs.isNull())) {
+        return failed(reason, "check failed: d != NULL && c != NULL at line 806\0");
+    }
+    if (!(Ptr.toBorrow(d).unique >= 32 * 4096 && Ptr.toBorrow(d).referenced >= Ptr.toBorrow(d).unique)) {
+        return failed(reason, "check failed: d->unique >= 32ull * 4096 && d->referenced >= d->unique at line 809\0");
+    }
+    if (!(Ptr.toBorrow(cs).unique < 32 * 4096)) { // the file was born after c
+        return failed(reason, "check failed: c->unique < 32ull * 4096 at line 812\0");
+    }
+    // Oldest first.
+    if (!(strcmp(borrow Ptr.toBorrow(infoAt(0)).name as *[u8; 32] as *CChar, c("legacy\0")) == 0)) {
+        return failed(reason, "check failed: strcmp(info[0].name, \"legacy\") == 0 at line 816\0");
+    }
+    if (!(strcmp(borrow Ptr.toBorrow(infoAt(n - 1)).name as *[u8; 32] as *CChar, c("d\0")) == 0)) {
+        return failed(reason, "check failed: strcmp(info[n - 1].name, \"d\") == 0 at line 819\0");
+    }
+
+    // The checker: clean, then a snapshot with no uuid is named and repaired.
+    if (!(check(0) == 0 && Ptr.toBorrow(r()).clean)) {
+        return failed(reason,
+            "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, 0) == 0 && rep.clean at line 825\0");
+    }
+    var victim: u64 = 0;
+    if (cosmofs_test_corrupt(mnt(), CORRUPT_SNAP_UUID, 0, borrow mut victim as *mut u64) != 0) {
+        return failed(reason,
+            "check failed: cosmofs_test_corrupt(mount_of(ENG), CORRUPT_SNAP_UUID, 0, &victim) == 0 at line 830\0");
+    }
+    if (!(check(0) == 0 && !Ptr.toBorrow(r()).clean)) {
+        return failed(reason,
+            "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, 0) == 0 && !rep.clean at line 834\0");
+    }
+    if (!(Ptr.toBorrow(r()).snap_identity.count == 1 && Ptr.toBorrow(r()).snap_identity.name[0] == victim)) {
+        return failed(reason,
+            "check failed: rep.snap_identity.count == 1 && rep.snap_identity.name[0] == victim at line 838\0");
+    }
+    if (!(check(CHECK_REPAIR) == 0)) {
+        return failed(reason,
+            "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, COSMOFS_CHECK_REPAIR) == 0 at line 842\0");
+    }
+    if (!(Ptr.toBorrow(r()).snap_identity.repaired == 1)) {
+        return failed(reason, "check failed: rep.snap_identity.repaired == 1 at line 845\0");
+    }
+    if (!(check(0) == 0 && Ptr.toBorrow(r()).clean)) {
+        return failed(reason,
+            "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, 0) == 0 && rep.clean at line 849\0");
+    }
+
+    if (cfst_snapctl(SNAP_DELETE, c("nope\0"), 0 as *mut cosmofs_snap_info, 0, 0 as *mut u32) != -ENOENT) {
+        return failed(reason,
+            "check failed: cfst_snapctl(COSMOFS_SNAP_DELETE, \"nope\", NULL, 0, NULL) == -ENOENT at line 854\0");
+    }
+    if (cfst_snapctl(SNAP_CREATE, c("bad/name\0"), info(), 1, np) != -EINVAL) {
+        return failed(reason,
+            "check failed: cfst_snapctl(COSMOFS_SNAP_CREATE, \"bad/name\", info, 1, &n) == -EINVAL at line 858\0");
+    }
+    if (cfst_snapctl(SNAP_DELETE, c("legacy\0"), 0 as *mut cosmofs_snap_info, 0, 0 as *mut u32) != 0) {
+        return failed(reason,
+            "check failed: cfst_snapctl(COSMOFS_SNAP_DELETE, \"legacy\", NULL, 0, NULL) == 0 at line 862\0");
+    }
+    if (cfst_snapctl(SNAP_DELETE, c("a\0"), 0 as *mut cosmofs_snap_info, 0, 0 as *mut u32) != 0) {
+        return failed(reason,
+            "check failed: cfst_snapctl(COSMOFS_SNAP_DELETE, \"a\", NULL, 0, NULL) == 0 at line 866\0");
+    }
+    if (cfst_snapctl(SNAP_DELETE, c("c\0"), 0 as *mut cosmofs_snap_info, 0, 0 as *mut u32) != 0) {
+        return failed(reason,
+            "check failed: cfst_snapctl(COSMOFS_SNAP_DELETE, \"c\", NULL, 0, NULL) == 0 at line 870\0");
+    }
+    if (cfst_snapctl(SNAP_DELETE, c("d\0"), 0 as *mut cosmofs_snap_info, 0, 0 as *mut u32) != 0) {
+        return failed(reason,
+            "check failed: cfst_snapctl(COSMOFS_SNAP_DELETE, \"d\", NULL, 0, NULL) == 0 at line 874\0");
+    }
+    if (!(check(0) == 0 && Ptr.toBorrow(r()).clean)) {
+        return failed(reason,
+            "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, 0) == 0 && rep.clean at line 878\0");
+    }
+    if (!cfst_engine_unmount(bd, reason)) {
+        return failed(reason, "check failed: cfst_engine_unmount(bd, reason) at line 881\0");
+    }
+
+    // A pool older than 11 refuses identity and keeps its version; its own kind of snapshot still works.
+    if (!freshAt(borrow mut bd as *mut *mut blkdev, 512, 10, reason)) {
+        return false;
+    }
+    if (cfst_snapctl(SNAP_CREATE, c("x\0"), info(), 1, np) != -EOPNOTSUPP) {
+        return failed(reason,
+            "check failed: cfst_snapctl(COSMOFS_SNAP_CREATE, \"x\", info, 1, &n) == -EOPNOTSUPP at line 890\0");
+    }
+    if (vfs_mkdir(nov(), c("/mnt/eng/.snapshots/old\0"), 493) != 0) {
+        return failed(reason, "check failed: vfs_mkdir(NULL, ENG \"/.snapshots/old\", 0755) == 0 at line 893\0");
+    }
+    if (poolVersion() != 10) {
+        return failed(reason,
+            "check failed: cosmofs_stats(cfst_mount_of(ENG), &st) == 0 && st.version == 10 at line 897\0");
+    }
+    if (vfs_rmdir(nov(), c("/mnt/eng/.snapshots/old\0")) != 0) {
+        return failed(reason, "check failed: vfs_rmdir(NULL, ENG \"/.snapshots/old\") == 0 at line 900\0");
+    }
+    var buffer = [0u8; 256];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: cosmofs-snap-identity: raised 11 -> 12 with a legacy snapshot converted; ids not reused ");
+    line.text("after a remount (");
+    line.decimal(Ptr.toBorrow(cs).id);
+    line.text(" > ");
+    line.decimal(idB);
+    line.text("); d holds ");
+    line.decimal(Ptr.toBorrow(d).unique / 1024);
+    line.text(" KiB alone; a version-10 pool refuses identity");
+    KernelLog.send(LogLevel.Info, line);
+    return cfst_engine_unmount(bd, reason);
+}
+
+// ---- Long names (roadmap 1.2 A2; design.md, "Format version 15"; CF13) ----
+
+/// cosmofs-longname: names of 48 to 255 bytes. A version-11 pool takes short names and stays 11, finds no long name,
+/// and is raised to 15 by its first name over 47 bytes; then files, a directory and a symbolic link with long names
+/// are created, read back, listed whole through a buffer that holds one long entry at a time, renamed long to long,
+/// long to short and short to long, and removed. A 255-byte name that does not fit the slots its block has left goes
+/// to the next block. All of it survives a remount and the checker calls the pool clean. A version-10 pool cannot be
+/// raised: there a long name is -ENAMETOOLONG and the pool stays 10. 256 bytes is the VFS's -ENAMETOOLONG everywhere.
+/// Safety: `reason` writable.
+@cfg("CONFIG_DEBUG")
+@export("selftest_cosmofs_longname")
+unsafe fn selftestLongname(reason: *mut *CChar) -> bool {
+    var bd = 0 as *mut blkdev;
+    var st = [0u64; 4];
+    var f = 0 as *mut file;
+    let fp = borrow mut f as *mut *mut file;
+    var cnt = [0u32; 2]; // hits, total
+    let p48 = nb(0);
+    let p49 = nb(1);
+    let p104 = nb(2);
+    let p105 = nb(3);
+    let p255 = nb(4);
+    let pdir = nb(5);
+    let plnk = nb(6);
+    let p256 = nb(7);
+    let pnew = nb(8);
+
+    if (!cfst_engine_mount(borrow mut bd as *mut *mut blkdev, 2048, reason)) {
+        return failed(reason, "check failed: cfst_engine_mount(&bd, 2048, reason) at line 944\0");
+    }
+    if (!(cfst_write_file(c("/mnt/eng/a\0"), "short".ptr as *void, 5))) {
+        return failed(reason, "check failed: cfst_write_file(ENG \"/a\", \"short\", 5) at line 947\0");
+    }
+    if (!(poolVersion() == CFS_FORMAT_VERSION)) {
+        return failed(reason, "check failed: pool_version() == CFS_FORMAT_VERSION at line 950\0");
+    }
+    if (vfs_open(nov(), lname(p105, 105, 102), O_RDONLY, 0, fp) != -ENOENT) {
+        return failed(reason,
+            "check failed: vfs_open(NULL, lname(p105, 105, 'f'), COSMO_O_RDONLY, 0, &f) == -ENOENT at line 954\0");
+    }
+    if (poolVersion() != CFS_FORMAT_VERSION) { // a lookup raises nothing
+        return failed(reason, "check failed: pool_version() == CFS_FORMAT_VERSION at line 957\0");
+    }
+
+    if (!(cfst_write_file(lname(p48, 48, 97), "48".ptr as *void, 2) && poolVersion() == 15)) {
+        return failed(reason,
+            "check failed: cfst_write_file(lname(p48, 48, 'a'), \"48\", 2) && pool_version() == 15 at line 962\0");
+    }
+    if (!cfst_write_file(lname(p49, 49, 98), "49".ptr as *void, 2)) {
+        return failed(reason, "check failed: cfst_write_file(lname(p49, 49, 'b'), \"49\", 2) at line 965\0");
+    }
+    if (!cfst_write_file(lname(p104, 104, 99), "104".ptr as *void, 3)) {
+        return failed(reason, "check failed: cfst_write_file(lname(p104, 104, 'c'), \"104\", 3) at line 968\0");
+    }
+    if (!cfst_write_file(p105 as *CChar, "105".ptr as *void, 3)) {
+        return failed(reason, "check failed: cfst_write_file(p105, \"105\", 3) at line 971\0");
+    }
+    if (!cfst_write_file(lname(p255, 255, 101), "255".ptr as *void, 3)) {
+        return failed(reason, "check failed: cfst_write_file(lname(p255, 255, 'e'), \"255\", 3) at line 974\0");
+    }
+    if (vfs_mkdir(nov(), lname(pdir, 200, 103), 493) != 0) {
+        return failed(reason, "check failed: vfs_mkdir(NULL, lname(pdir, 200, 'g'), 0755) == 0 at line 977\0");
+    }
+    if (vfs_symlink(nov(), lname(plnk, 150, 104), c("a\0")) != 0) {
+        return failed(reason, "check failed: vfs_symlink(NULL, lname(plnk, 150, 'h'), \"a\") == 0 at line 980\0");
+    }
+    if (vfs_open(nov(), lname(p256, 256, 105), O_WRONLY | O_CREAT, 420, fp) != -ENAMETOOLONG) {
+        return failed(reason,
+            "check failed: vfs_open(NULL, lname(p256, 256, 'i'), ..., &f) == -ENAMETOOLONG at line 984\0");
+    }
+    if (!(cfst_read_matches(p48 as *CChar, "48".ptr as *void, 2))) {
+        return failed(reason, "check failed: cfst_read_matches(p48, \"48\", 2) at line 987\0");
+    }
+    if (!(cfst_read_matches(p104 as *CChar, "104".ptr as *void, 3))) {
+        return failed(reason, "check failed: cfst_read_matches(p104, \"104\", 3) at line 990\0");
+    }
+    if (!(cfst_read_matches(p255 as *CChar, "255".ptr as *void, 3))) {
+        return failed(reason, "check failed: cfst_read_matches(p255, \"255\", 3) at line 993\0");
+    }
+    if (!cfst_read_matches(plnk as *CChar, "short".ptr as *void, 5)) { // through the link
+        return failed(reason, "check failed: cfst_read_matches(plnk, \"short\", 5) at line 996\0");
+    }
+
+    // Listed whole, one long entry per call at the smallest buffer.
+    let one = DIRENT + CFS_NAME_MAX_LONG + 8;
+    if (!(listCount(c(ENG), one, lbase(p255 as *CChar), mut cnt))) {
+        return failed(reason, "check failed: list_count(ENG, one, LBASE(p255), &hits, &total) at line 1002\0");
+    }
+    if (!(cnt[0] == 1)) {
+        return failed(reason, "check failed: hits == 1 at line 1005\0");
+    }
+    if (!(cnt[1] == 2 + 8)) {
+        return failed(reason, "check failed: total == 2 + 8 at line 1008\0");
+    }
+    if (!(listCount(c(ENG), one, lbase(pdir as *CChar), mut cnt) && cnt[0] == 1)) {
+        return failed(reason,
+            "check failed: list_count(ENG, one, LBASE(pdir), &hits, &total) && hits == 1 at line 1012\0");
+    }
+    if (!(listCount(c(ENG), 4096, lbase(p49 as *CChar), mut cnt))) {
+        return failed(reason, "check failed: list_count(ENG, 4096, LBASE(p49), &hits, &total) at line 1015\0");
+    }
+    if (!(cnt[0] == 1)) {
+        return failed(reason, "check failed: hits == 1 at line 1018\0");
+    }
+    if (!(cnt[1] == 2 + 8)) {
+        return failed(reason, "check failed: total == 2 + 8 at line 1021\0");
+    }
+
+    // Renames: long to long, long to short, short to long.
+    if (vfs_rename(nov(), p255 as *CChar, lname(pnew, 230, 106)) != 0) {
+        return failed(reason, "check failed: vfs_rename(NULL, p255, lname(pnew, 230, 'j')) == 0 at line 1026\0");
+    }
+    if (!(statOf(p255 as *CChar, false, mut st) == -ENOENT)) {
+        return failed(reason, "check failed: vfs_stat(NULL, p255, &st) == -ENOENT at line 1029\0");
+    }
+    if (!(cfst_read_matches(pnew as *CChar, "255".ptr as *void, 3))) {
+        return failed(reason, "check failed: cfst_read_matches(pnew, \"255\", 3) at line 1032\0");
+    }
+    if (!(vfs_rename(nov(), p104 as *CChar, c("/mnt/eng/s\0")) == 0)) {
+        return failed(reason, "check failed: vfs_rename(NULL, p104, ENG \"/s\") == 0 at line 1035\0");
+    }
+    if (!(cfst_read_matches(c("/mnt/eng/s\0"), "104".ptr as *void, 3))) {
+        return failed(reason, "check failed: cfst_read_matches(ENG \"/s\", \"104\", 3) at line 1038\0");
+    }
+    if (!(vfs_rename(nov(), c("/mnt/eng/s\0"), p104 as *CChar) == 0)) {
+        return failed(reason, "check failed: vfs_rename(NULL, ENG \"/s\", p104) == 0 at line 1041\0");
+    }
+    if (!(cfst_read_matches(p104 as *CChar, "104".ptr as *void, 3))) {
+        return failed(reason, "check failed: cfst_read_matches(p104, \"104\", 3) at line 1044\0");
+    }
+    if (!(vfs_unlink(nov(), p49 as *CChar) == 0 && statOf(p49 as *CChar, false, mut st) == -ENOENT)) {
+        return failed(reason,
+            "check failed: vfs_unlink(NULL, p49) == 0 && vfs_stat(NULL, p49, &st) == -ENOENT at line 1048\0");
+    }
+    if (!(listCount(c(ENG), one, lbase(pnew as *CChar), mut cnt))) {
+        return failed(reason, "check failed: list_count(ENG, one, LBASE(pnew), &hits, &total) at line 1051\0");
+    }
+    if (!(cnt[0] == 1)) {
+        return failed(reason, "check failed: hits == 1 at line 1054\0");
+    }
+    if (!(cnt[1] == 2 + 7)) {
+        return failed(reason, "check failed: total == 2 + 7 at line 1057\0");
+    }
+
+    // A directory whose first block has four free slots left: the 255-byte name (five slots) is put in the next
+    // block.
+    let sub = pdir as *CChar;
+    let path = pathBuf(); // the 200-byte directory, a slash, a 255-byte name
+    for (i in 0u32..CFS_DIRENTS_PER_BLOCK - 4) {
+        var w = TextWriter.create(SliceMut.fromRaw(path, 600));
+        appendC(mut w, sub);
+        w.text("/");
+        w.decimal(i as u64);
+        if (!cfst_write_file(path as *CChar, "x".ptr as *void, 1)) {
+            return failed(reason, "check failed: cfst_write_file(path, \"x\", 1) at line 1070\0");
+        }
+    }
+    if (!(statOf(sub, false, mut st) == 0 && st[3] == CFS_BLOCK)) {
+        return failed(reason, "check failed: vfs_stat(NULL, sub, &st) == 0 && st.size == CFS_BLOCK at line 1074\0");
+    }
+    var w = TextWriter.create(SliceMut.fromRaw(path, 600));
+    appendC(mut w, sub);
+    w.text("/");
+    appendC(mut w, lbase(lname(p256, 255, 107)));
+    if (!(cfst_write_file(path as *CChar, "next".ptr as *void, 4))) {
+        return failed(reason, "check failed: cfst_write_file(path, \"next\", 4) at line 1081\0");
+    }
+    if (!(cfst_read_matches(path as *CChar, "next".ptr as *void, 4))) {
+        return failed(reason, "check failed: cfst_read_matches(path, \"next\", 4) at line 1084\0");
+    }
+    if (!(statOf(sub, false, mut st) == 0 && st[3] == 2 * CFS_BLOCK)) {
+        return failed(reason, "check failed: vfs_stat(NULL, sub, &st) == 0 && st.size == 2 * CFS_BLOCK at line 1087\0");
+    }
+    if (!(listCount(sub, one, lbase(p256 as *CChar), mut cnt))) {
+        return failed(reason, "check failed: list_count(sub, one, LBASE(p256), &hits, &total) at line 1090\0");
+    }
+    if (!(cnt[0] == 1)) {
+        return failed(reason, "check failed: hits == 1 at line 1093\0");
+    }
+    if (!(cnt[1] == 2 + CFS_DIRENTS_PER_BLOCK - 3)) {
+        return failed(reason, "check failed: total == 2 + CFS_DIRENTS_PER_BLOCK - 3 at line 1096\0");
+    }
+
+    if (vfs_sync() != 0) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 1100\0");
+    }
+    if (!cfst_remount_eng(bd, reason)) {
+        return failed(reason, "check failed: cfst_remount_eng(bd, reason) at line 1103\0");
+    }
+    if (poolVersion() != 15) {
+        return failed(reason, "check failed: pool_version() == 15 at line 1106\0");
+    }
+    if (!(cfst_read_matches(p48 as *CChar, "48".ptr as *void, 2))) {
+        return failed(reason, "check failed: cfst_read_matches(p48, \"48\", 2) at line 1109\0");
+    }
+    if (!(cfst_read_matches(pnew as *CChar, "255".ptr as *void, 3))) {
+        return failed(reason, "check failed: cfst_read_matches(pnew, \"255\", 3) at line 1112\0");
+    }
+    if (!(cfst_read_matches(path as *CChar, "next".ptr as *void, 4))) {
+        return failed(reason, "check failed: cfst_read_matches(path, \"next\", 4) at line 1115\0");
+    }
+    if (!(listCount(c(ENG), one, lbase(p104 as *CChar), mut cnt))) {
+        return failed(reason, "check failed: list_count(ENG, one, LBASE(p104), &hits, &total) at line 1118\0");
+    }
+    if (!(cnt[0] == 1)) {
+        return failed(reason, "check failed: hits == 1 at line 1121\0");
+    }
+    if (!(cnt[1] == 2 + 7)) {
+        return failed(reason, "check failed: total == 2 + 7 at line 1124\0");
+    }
+    if (check(0) != 0) {
+        return failed(reason, "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, 0) == 0 at line 1127\0");
+    }
+    if (!Ptr.toBorrow(r()).clean) {
+        reason.write(cfst_check_why(rep() as *cosmofs_check_report));
+        return false;
+    }
+    if (!cfst_engine_unmount(bd, reason)) {
+        return failed(reason, "check failed: cfst_engine_unmount(bd, reason) at line 1134\0");
+    }
+
+    // A version-10 pool cannot be raised: the version-14 answer.
+    if (!freshAt(borrow mut bd as *mut *mut blkdev, 512, 10, reason)) {
+        return false;
+    }
+    if (vfs_open(nov(), p48 as *CChar, O_WRONLY | O_CREAT, 420, fp) != -ENAMETOOLONG) {
+        return failed(reason,
+            "check failed: vfs_open(NULL, p48, O_WRONLY | O_CREAT, 0644, &f) == -ENAMETOOLONG at line 1143\0");
+    }
+    if (vfs_mkdir(nov(), p105 as *CChar, 493) != -ENAMETOOLONG) {
+        return failed(reason, "check failed: vfs_mkdir(NULL, p105, 0755) == -ENAMETOOLONG at line 1146\0");
+    }
+    if (!(cfst_write_file(c("/mnt/eng/a\0"), "short".ptr as *void, 5) && poolVersion() == 10)) {
+        return failed(reason,
+            "check failed: cfst_write_file(ENG \"/a\", \"short\", 5) && pool_version() == 10 at line 1150\0");
+    }
+    var buffer = [0u8; 224];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: cosmofs-longname: names of 48-255 bytes created, listed, renamed and removed on a pool ");
+    line.text("raised 11 -> 15 by the first; a 255-byte name went to the next block; a version-10 pool refuses them");
+    KernelLog.send(LogLevel.Info, line);
+    return cfst_engine_unmount(bd, reason);
+}
+
+/// cosmofs-check-longname: version 15's two malformed shapes (CF13) -- a head whose `extra` is not what its length
+/// needs, and continuations whose head is gone -- are each `dir_bad`, refused before the name is read; and one long
+/// name twice in a directory is `dir_dup_name`.
+/// Safety: `reason` writable.
+@cfg("CONFIG_DEBUG")
+@export("selftest_cosmofs_check_longname")
+unsafe fn selftestCheckLongname(reason: *mut *CChar) -> bool {
+    let kinds = [CORRUPT_LONGNAME_EXTRA, CORRUPT_LONGNAME_CONT];
+    let p = pathBuf();
+    let q = nb(0);
+    var st = [0u64; 4];
+    var bd = 0 as *mut blkdev;
+    var what: u64 = 0;
+
+    for (k in 0usize..2) {
+        if (!cfst_check_fixture(borrow mut bd as *mut *mut blkdev, reason)) {
+            return failed(reason, "check failed: cfst_check_fixture(&bd, reason) at line 1176\0");
+        }
+        var w = TextWriter.create(SliceMut.fromRaw(p, 600));
+        w.text("/mnt/eng/sub/");
+        appendC(mut w, lbase(lname(q, 120, 108)));
+        if (!(cfst_write_file(p as *CChar, "x".ptr as *void, 1) && vfs_sync() == 0)) {
+            return failed(reason, "check failed: cfst_write_file(p, \"x\", 1) && vfs_sync() == 0 at line 1182\0");
+        }
+        if (statOf(c("/mnt/eng/sub\0"), false, mut st) != 0) {
+            return failed(reason, "check failed: vfs_stat(NULL, ENG \"/sub\", &st) == 0 at line 1185\0");
+        }
+        if (!(check(0) == 0 && Ptr.toBorrow(r()).dir_bad.count == 0)) {
+            return failed(reason,
+                "check failed: cosmofs_check(cfst_mount_of(ENG), &r, 0) == 0 && r.dir_bad.count == 0 at line 1189\0");
+        }
+        if (cosmofs_test_corrupt(mnt(), kinds[k], st[0], borrow mut what as *mut u64) != 0) {
+            return failed(reason,
+                "check failed: cosmofs_test_corrupt(mount_of(ENG), kinds[k], st.ino, &what) == 0 at line 1193\0");
+        }
+        if (check(0) != 0) {
+            return failed(reason, "check failed: cosmofs_check(cfst_mount_of(ENG), &r, 0) == 0 at line 1196\0");
+        }
+        if (!(Ptr.toBorrow(r()).dir_bad.count >= 1 && Ptr.toBorrow(r()).dir_bad.name[0] == st[0])) {
+            return failed(reason, "check failed: r.dir_bad.count >= 1 && r.dir_bad.name[0] == st.ino at line 1199\0");
+        }
+        cfst_check_teardown(bd);
+    }
+
+    if (!cfst_check_fixture(borrow mut bd as *mut *mut blkdev, reason)) {
+        return failed(reason, "check failed: cfst_check_fixture(&bd, reason) at line 1205\0");
+    }
+    var w = TextWriter.create(SliceMut.fromRaw(p, 600));
+    w.text("/mnt/eng/sub/");
+    appendC(mut w, lbase(lname(q, 200, 109)));
+    if (!(cfst_write_file(p as *CChar, "x".ptr as *void, 1) && vfs_sync() == 0)) {
+        return failed(reason, "check failed: cfst_write_file(p, \"x\", 1) && vfs_sync() == 0 at line 1211\0");
+    }
+    if (statOf(c("/mnt/eng/sub\0"), false, mut st) != 0) {
+        return failed(reason, "check failed: vfs_stat(NULL, ENG \"/sub\", &st) == 0 at line 1214\0");
+    }
+    if (cosmofs_test_corrupt(mnt(), CORRUPT_DUP_NAME, st[0], borrow mut what as *mut u64) != 0) {
+        return failed(reason,
+            "check failed: cosmofs_test_corrupt(mount_of(ENG), CORRUPT_DUP_NAME, st.ino, &what) == 0 at line 1218\0");
+    }
+    if (check(0) != 0) {
+        return failed(reason, "check failed: cosmofs_check(cfst_mount_of(ENG), &r, 0) == 0 at line 1221\0");
+    }
+    if (!(Ptr.toBorrow(r()).dir_dup_name.count >= 1 && Ptr.toBorrow(r()).dir_dup_name.name[0] == st[0])) {
+        return failed(reason,
+            "check failed: r.dir_dup_name.count >= 1 && r.dir_dup_name.name[0] == st.ino at line 1225\0");
+    }
+    cfst_check_teardown(bd);
+
+    var buffer = [0u8; 192];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: cosmofs-check-longname: a wrong continuation count and continuations without a head are ");
+    line.text("dir_bad; a 200-byte name twice is a duplicate");
+    KernelLog.send(LogLevel.Info, line);
+    return true;
+}
+
+// ---- Hard links ----
+
+/// cosmofs-link (VFS-4; design.md, "Hard links"): one file, four names in two directories (one of them long enough to
+/// raise the pool to 15); a directory and an existing name refused; a link to a symbolic link is that link. Names go
+/// one by one and the file stays readable through the rest; the count survives a remount and the checker counts every
+/// name. An open file outlives its last name and is freed after it (checked clean). A snapshot is read-only to a
+/// link, either way.
+/// Safety: `reason` writable.
+@cfg("CONFIG_DEBUG")
+@export("selftest_cosmofs_link")
+unsafe fn selftestLink(reason: *mut *CChar) -> bool {
+    var bd = 0 as *mut blkdev;
+    var st = [0u64; 4];
+    var st2 = [0u64; 4];
+    var f = 0 as *mut file;
+    let lng = nb(0);
+    var buf = [0u8; 4];
+
+    if (!cfst_engine_mount(borrow mut bd as *mut *mut blkdev, 1024, reason)) {
+        return failed(reason, "check failed: cfst_engine_mount(&bd, 1024, reason) at line 1256\0");
+    }
+    if (!(cfst_write_file(c("/mnt/eng/a\0"), "one".ptr as *void, 3))) {
+        return failed(reason, "check failed: cfst_write_file(ENG \"/a\", \"one\", 3) at line 1259\0");
+    }
+    if (!(vfs_mkdir(nov(), c("/mnt/eng/d\0"), 493) == 0)) {
+        return failed(reason, "check failed: vfs_mkdir(NULL, ENG \"/d\", 0755) == 0 at line 1262\0");
+    }
+    if (vfs_link(nov(), c("/mnt/eng/a\0"), nov(), c("/mnt/eng/b\0"), false) != 0) {
+        return failed(reason, "check failed: vfs_link(NULL, ENG \"/a\", NULL, ENG \"/b\", false) == 0 at line 1265\0");
+    }
+    if (vfs_link(nov(), c("/mnt/eng/a\0"), nov(), c("/mnt/eng/d/c\0"), false) != 0) {
+        return failed(reason,
+            "check failed: vfs_link(NULL, ENG \"/a\", NULL, ENG \"/d/c\", false) == 0 at line 1269\0");
+    }
+    if (!(vfs_link(nov(), c("/mnt/eng/b\0"), nov(), lname(lng, 60, 110), false) == 0)) {
+        return failed(reason,
+            "check failed: vfs_link(NULL, ENG \"/b\", NULL, lname(lng, 60, 'n'), false) == 0 at line 1273\0");
+    }
+    if (!(poolVersion() == 15)) {
+        return failed(reason, "check failed: pool_version() == 15 at line 1276\0");
+    }
+    if (!(statOf(c("/mnt/eng/a\0"), false, mut st) == 0)) {
+        return failed(reason, "check failed: vfs_stat(NULL, ENG \"/a\", &st) == 0 at line 1279\0");
+    }
+    if (!(statOf(c("/mnt/eng/d/c\0"), false, mut st2) == 0)) {
+        return failed(reason, "check failed: vfs_stat(NULL, ENG \"/d/c\", &st2) == 0 at line 1282\0");
+    }
+    if (!(st[0] == st2[0] && st[2] == 4)) {
+        return failed(reason, "check failed: st.ino == st2.ino && st.nlink == 4 at line 1285\0");
+    }
+    if (vfs_link(nov(), c("/mnt/eng/d\0"), nov(), c("/mnt/eng/e\0"), false) != -EPERM) {
+        return failed(reason,
+            "check failed: vfs_link(NULL, ENG \"/d\", NULL, ENG \"/e\", false) == -EPERM at line 1289\0");
+    }
+    if (vfs_link(nov(), c("/mnt/eng/a\0"), nov(), c("/mnt/eng/b\0"), false) != -EEXIST) {
+        return failed(reason,
+            "check failed: vfs_link(NULL, ENG \"/a\", NULL, ENG \"/b\", false) == -EEXIST at line 1293\0");
+    }
+    if (!(vfs_symlink(nov(), c("/mnt/eng/s\0"), c("a\0")) == 0)) {
+        return failed(reason, "check failed: vfs_symlink(NULL, ENG \"/s\", \"a\") == 0 at line 1296\0");
+    }
+    if (!(vfs_link(nov(), c("/mnt/eng/s\0"), nov(), c("/mnt/eng/s2\0"), false) == 0)) {
+        return failed(reason, "check failed: vfs_link(NULL, ENG \"/s\", NULL, ENG \"/s2\", false) == 0 at line 1299\0");
+    }
+    if (!(statOf(c("/mnt/eng/s2\0"), true, mut st2) == 0)) {
+        return failed(reason, "check failed: vfs_lstat(NULL, ENG \"/s2\", &st2) == 0 at line 1302\0");
+    }
+    if (!(st2[1] == DT_LNK as u64)) {
+        return failed(reason, "check failed: st2.type == COSMO_DT_LNK at line 1305\0");
+    }
+    if (!(st2[2] == 2)) {
+        return failed(reason, "check failed: st2.nlink == 2 at line 1308\0");
+    }
+
+    if (!(vfs_unlink(nov(), c("/mnt/eng/a\0")) == 0)) {
+        return failed(reason, "check failed: vfs_unlink(NULL, ENG \"/a\") == 0 at line 1312\0");
+    }
+    if (!(cfst_read_matches(c("/mnt/eng/b\0"), "one".ptr as *void, 3))) {
+        return failed(reason, "check failed: cfst_read_matches(ENG \"/b\", \"one\", 3) at line 1315\0");
+    }
+    if (!(statOf(c("/mnt/eng/b\0"), false, mut st) == 0 && st[2] == 3)) {
+        return failed(reason, "check failed: vfs_stat(NULL, ENG \"/b\", &st) == 0 && st.nlink == 3 at line 1318\0");
+    }
+    if (!(vfs_sync() == 0 && cfst_remount_eng(bd, reason))) {
+        return failed(reason, "check failed: vfs_sync() == 0 && cfst_remount_eng(bd, reason) at line 1321\0");
+    }
+    if (!(statOf(c("/mnt/eng/d/c\0"), false, mut st) == 0)) {
+        return failed(reason, "check failed: vfs_stat(NULL, ENG \"/d/c\", &st) == 0 at line 1324\0");
+    }
+    if (!(st[2] == 3)) {
+        return failed(reason, "check failed: st.nlink == 3 at line 1327\0");
+    }
+    if (!(cfst_read_matches(lng as *CChar, "one".ptr as *void, 3))) {
+        return failed(reason, "check failed: cfst_read_matches(lng, \"one\", 3) at line 1330\0");
+    }
+    if (check(0) != 0) {
+        return failed(reason, "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, 0) == 0 at line 1333\0");
+    }
+    if (!Ptr.toBorrow(r()).clean) {
+        reason.write(cfst_check_why(rep() as *cosmofs_check_report));
+        return false;
+    }
+
+    // Read-only both ways in a snapshot: no name made there, none taken out.
+    var n: u32 = 0;
+    if (cfst_snapctl(SNAP_CREATE, c("lk\0"), info(), 1, borrow mut n as *mut u32) != 0) {
+        return failed(reason,
+            "check failed: cfst_snapctl(COSMOFS_SNAP_CREATE, \"lk\", info, 1, &n) == 0 at line 1344\0");
+    }
+    if (vfs_link(nov(), c("/mnt/eng/b\0"), nov(), c("/mnt/eng/.snapshots/lk/z\0"), false) != -EROFS) {
+        return failed(reason,
+            "check failed: vfs_link(NULL, ENG \"/b\", NULL, ENG \"/.snapshots/lk/z\", false) == -EROFS at line 1348\0");
+    }
+    if (vfs_link(nov(), c("/mnt/eng/.snapshots/lk/b\0"), nov(), c("/mnt/eng/z\0"), false) != -EROFS) {
+        return failed(reason,
+            "check failed: vfs_link(NULL, ENG \"/.snapshots/lk/b\", NULL, ENG \"/z\", false) == -EROFS at line 1352\0");
+    }
+    if (vfs_rmdir(nov(), c("/mnt/eng/.snapshots/lk\0")) != 0) {
+        return failed(reason, "check failed: vfs_rmdir(NULL, ENG \"/.snapshots/lk\") == 0 at line 1355\0");
+    }
+
+    // An open file outlives its last name, and is freed after it.
+    if (vfs_open(nov(), c("/mnt/eng/b\0"), O_RDONLY, 0, borrow mut f as *mut *mut file) != 0) {
+        return failed(reason, "check failed: vfs_open(NULL, ENG \"/b\", COSMO_O_RDONLY, 0, &f) == 0 at line 1360\0");
+    }
+    if (!(vfs_unlink(nov(), c("/mnt/eng/b\0")) == 0)) {
+        return failed(reason, "check failed: vfs_unlink(NULL, ENG \"/b\") == 0 at line 1363\0");
+    }
+    if (!(vfs_unlink(nov(), c("/mnt/eng/d/c\0")) == 0)) {
+        return failed(reason, "check failed: vfs_unlink(NULL, ENG \"/d/c\") == 0 at line 1366\0");
+    }
+    if (!(vfs_unlink(nov(), lng as *CChar) == 0)) {
+        return failed(reason, "check failed: vfs_unlink(NULL, lng) == 0 at line 1369\0");
+    }
+    if (!(Ptr.toBorrow(Ptr.toBorrow(f as *file).vn as *vnode).nlink == 0)) {
+        return failed(reason, "check failed: f->vn->nlink == 0 at line 1372\0");
+    }
+    if (!(file_pread(f, borrow mut buf as *mut [u8; 4] as *mut void, 3, 0) == 3)) {
+        return failed(reason, "check failed: file_pread(f, buf, 3, 0) == 3 at line 1375\0");
+    }
+    if (!(memcmp(borrow buf as *[u8; 4] as *void, "one".ptr as *void, 3) == 0)) {
+        return failed(reason, "check failed: memcmp(buf, \"one\", 3) == 0 at line 1378\0");
+    }
+    filePut(f);
+    if (!(vfs_sync() == 0 && cfst_remount_eng(bd, reason))) {
+        return failed(reason, "check failed: vfs_sync() == 0 && cfst_remount_eng(bd, reason) at line 1382\0");
+    }
+    if (check(0) != 0) {
+        return failed(reason, "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, 0) == 0 at line 1385\0");
+    }
+    if (!Ptr.toBorrow(r()).clean) {
+        reason.write(cfst_check_why(rep() as *cosmofs_check_report));
+        return false;
+    }
+    var buffer = [0u8; 224];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: cosmofs-link: four names for one file in two directories, a link to a link, the count ");
+    line.text("across a remount, a snapshot read-only both ways, an open file outliving its last name");
+    KernelLog.send(LogLevel.Info, line);
+    return cfst_engine_unmount(bd, reason);
+}
