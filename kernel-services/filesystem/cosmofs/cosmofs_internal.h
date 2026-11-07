@@ -732,6 +732,15 @@ int cfs_record_write(struct cfs *fs, struct cfs_inode *in, uint64_t lblk0, const
  * read-only (a snapshot's), and the tree's write lock (a clone's entered
  * with it). */
 int cfs_vnode_inode_sync(struct cfs *fs, struct vnode *vn);
+/* cosmofs_vnode.c, for the directories: a vnode's fields and operations
+ * from its inode, and the vnode of `ino` in a snapshot's tree (`tag`). */
+void cfs_fill_vnode(struct vnode *vn, const struct cfs_inode *in);
+int cfs_vnode_get_tagged(struct cfs *fs, uint64_t ino, unsigned tag, const struct cfs_snapshot *snap,
+                         struct vnode **out);
+/* cosmofs.c: the operations of a directory, a regular file and a link. */
+extern const struct vnode_ops cfs_dir_ops;
+extern const struct vnode_ops cfs_file_ops;
+extern const struct vnode_ops cfs_lnk_ops;
 int cfs_vnode_prepare(struct cfs *fs, struct vnode *vn);
 bool cfs_tree_readonly(struct cfs *fs, struct vnode *vn);
 int cfs_lock_tree_w(struct cfs *fs, struct vnode *vn);
