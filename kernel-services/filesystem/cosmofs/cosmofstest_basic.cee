@@ -1,0 +1,1354 @@
+// cosmofstest_basic.cee - The first of cosmofs's self-tests, in CeeSafe: roadmap 2.0 SA7.
+//
+// The storage pool and cosmofs on the scratch virtio disk (vda) -- pool, cosmofs-format, cosmofs-ops, cosmofs-crash,
+// which format the disk and so run only when it exists, and leave a filesystem behind for init's user-mode test:
+// /hello.txt and /dir/nested.txt -- and the transaction engine on RAM devices (audit milestone 7): holes, checksums,
+// fsync, the metadata reserve, the fallback to the older root, the writeback thread, the metadata header's checksum
+// algorithm. The engine tests are a debug build's.
+//
+// The pool, the statistics and the on-disk records stay C (kernel/storage.h, kernel/cosmofs.h, cosmofs_format.h);
+// what this file reads of a record it reads at offsets cosmofstest_basic_floor.c asserts, and that file is the engine
+// tests in a build without CONFIG_DEBUG.
+
+@header("kernel/blk.h", "kernel/vfs.h", "kernel/kmalloc.h", "kernel/string.h", "kernel/storage.h", "kernel/timer.h",
+    "kernel/wait.h", "kernel/crc32c.h", "kernel/cosmofs.h", "uapi/cosmo/syscall.h", "cosmofs_internal.h")
+extern "C" {
+    struct blkdev {
+        obj: kobject;
+        capacity: u64;
+    }
+    struct mount;
+    struct vnode;
+    struct file;
+    struct cfs_mac;
+    struct pool_copy {
+        sectors_per_block: u32;
+    }
+    struct spool_member {
+        copy: [pool_copy; 4];
+        ncopies: u32;
+    }
+    struct spool {
+        m: *mut spool_member;
+        nmembers: u32;
+        block_size: u32;
+        nblocks: u64;
+    }
+    struct cosmo_stat {
+        ino: u64;
+        @cname("type") dtype: u32;
+        nlink: u32;
+        size: u64;
+    }
+    struct cosmofs_stats {
+        generation: u64;
+        free_blocks: u64;
+        total_blocks: u64;
+        inode_count: u64;
+        reserve_blocks: u64;
+        commits: u64;
+        wb_commits: u64;
+        csum_failures: u64;
+    }
+
+    fn pool_open(bd: *mut blkdev, out: *mut *mut spool) -> i32;
+    fn pool_close(p: *mut spool);
+    fn pool_read(p: *mut spool, dva: u64, buf: *mut void) -> i32;
+    fn pool_write(p: *mut spool, dva: u64, buf: *void) -> i32;
+    fn pool_flush(p: *mut spool) -> i32;
+    fn vfs_open(start: *mut vnode, path: *CChar, flags: u32, mode: u32, out: *mut *mut file) -> i32;
+    fn vfs_mkdir(start: *mut vnode, path: *CChar, mode: u32) -> i32;
+    fn vfs_rmdir(start: *mut vnode, path: *CChar) -> i32;
+    fn vfs_unlink(start: *mut vnode, path: *CChar) -> i32;
+    fn vfs_rename(start: *mut vnode, from: *CChar, to: *CChar) -> i32;
+    fn vfs_mount(path: *CChar, fsname: *CChar, bd: *mut blkdev, flags: u32) -> i32;
+    fn vfs_umount2(path: *CChar, flags: u32) -> i32;
+    fn vfs_stat(start: *mut vnode, path: *CChar, st: *mut cosmo_stat) -> i32;
+    fn vfs_sync() -> i32;
+    fn file_write(f: *mut file, buf: *void, len: usize) -> i64;
+    fn file_pread(f: *mut file, buf: *mut void, len: usize, off: u64) -> i64;
+    fn file_pwrite(f: *mut file, buf: *void, len: usize, off: u64) -> i64;
+    fn file_sync(f: *mut file) -> i32;
+    fn file_stat(f: *mut file, st: *mut cosmo_stat) -> i32;
+    fn cosmofs_format(bd: *mut blkdev) -> i32;
+    /// cosmofstest_basic_floor.c: cosmofs_stats, whose name is its record's too.
+    fn cfst_basic_floor_stats(mnt: *mut mount, out: *mut cosmofs_stats) -> i32;
+    fn cosmofs_test_set_writeback(mnt: *mut mount, on: bool);
+    fn cosmofs_test_set_writeback_interval(mnt: *mut mount, ms: u32);
+    fn cosmofs_test_discard_on_unmount(mnt: *mut mount, discard: bool);
+    fn cfs_mhdr_seal_raw(mac: *cfs_mac, block: *mut void, kind: u32, dva: u64, generation: u64);
+    fn cfs_mhdr_fault_of(mac: *cfs_mac, block: *void, dva: u64, kind: u32) -> u32; // enum mhdr_fault
+    fn clock_now_ns() -> u64;
+    fn thread_sleep_ns(ns: u64);
+    fn memcmp(a: *void, b: *void, n: usize) -> i32;
+    fn memset(p: *mut void, c: i32, n: usize) -> *mut void;
+    fn memcpy(dst: *mut void, src: *void, n: usize) -> *mut void;
+    // cosmofstest_lib.cee's
+    fn cfst_scratch() -> *mut blkdev;
+    fn cfst_write_file(path: *CChar, data: *void, len: usize) -> bool;
+    fn cfst_read_matches(path: *CChar, data: *void, len: usize) -> bool;
+    fn cfst_mount_of(path: *CChar) -> *mut mount;
+    fn cfst_fill_incompressible(buf: *mut u8, len: usize, seed: u32);
+    fn cfst_engine_mount(bdp: *mut *mut blkdev, nblocks: u64, reason: *mut *CChar) -> bool;
+    fn cfst_engine_unmount(bd: *mut blkdev, reason: *mut *CChar) -> bool;
+    fn cfst_corrupt_block(bd: *mut blkdev, blkno: u64, off: u32) -> bool;
+    fn cfst_block_crc(block: *u8) -> u32;
+}
+
+// ---- Values (asserted in cosmofstest_basic_floor.c) ----
+
+const ENOENT: i32 = 2;
+const EIO: i32 = 5;
+const EEXIST: i32 = 17;
+const EXDEV: i32 = 18;
+const EINVAL: i32 = 22;
+const ENOSPC: i32 = 28;
+const ENAMETOOLONG: i32 = 36;
+const ENOTEMPTY: i32 = 39;
+const O_RDONLY: u32 = 0;
+const O_WRONLY: u32 = 1;
+const O_RDWR: u32 = 2;
+const O_CREAT: u32 = 0x40;
+const O_TRUNC: u32 = 0x200;
+const DT_DIR: u32 = 2;
+const POOL_DVA_SHIFT: u64 = 56;
+const BLOCK: usize = 4096;
+const MHDR_SIZE: usize = 32;
+const MHDR_CRC: usize = 24;
+const MHDR_CSUM_ALGO: usize = 28;
+const KIND_INODES: u32 = 3;
+const CSUM_NONE: u32 = 0;
+const CSUM_CRC32C: u32 = 1;
+const CSUM_POLY1305: u32 = 2;
+const MHDR_OK: u32 = 0;
+const MHDR_ALGO: u32 = 4;
+const MHDR_CRC_FAULT: u32 = 5;
+const SUPER_GENERATION: usize = 24;
+const SUPER_IMAP_ROOT: usize = 32;
+const DIRENT_SIZE: usize = 64;
+const DIRENT_NAMELEN: usize = 9;
+const DIRENT_NAME: usize = 16;
+
+/// A terminated string literal's C pointer.
+fn c(s: StringView) -> *CChar => s.ptr as *CChar;
+
+/// Safety: `reason` writable.
+unsafe fn failed(reason: *mut *CChar, why: StringView) -> bool {
+    reason.write(why.ptr as *CChar);
+    return false;
+}
+
+/// Safety: `f` is an open file.
+unsafe fn filePut(f: *mut file) { kobject_put(f as *mut kobject); }
+
+/// Safety: `bd` is a referenced device.
+unsafe fn blkdevPut(bd: *mut blkdev) { kobject_put(bd as *mut kobject); }
+
+/// Safety: `path` a terminated string.
+unsafe fn umount(path: *CChar) -> i32 => vfs_umount2(path, 0);
+
+/// Statistics, read through the slot a test keeps them in.
+/// Safety: `st` a slot cosmofs_stats filled.
+unsafe fn sv(st: *mut cosmofs_stats) -> borrow(static) cosmofs_stats => Ptr.toBorrow(st as *cosmofs_stats);
+
+/// Safety: `st` a slot vfs_stat filled.
+unsafe fn cs(st: *mut cosmo_stat) -> borrow(static) cosmo_stat => Ptr.toBorrow(st as *cosmo_stat);
+
+/// The scratch disk is not there: the self-test passes without running.
+fn noScratch() -> bool {
+    KernelLog.write(LogLevel.Info, "selftest: no vda; skipping");
+    return true;
+}
+
+/// Safety: `reason` writable.
+@export("selftest_pool")
+unsafe fn selftestPool(reason: *mut *CChar) -> bool {
+    let bd = cfst_scratch();
+    if (bd.isNull()) {
+        return noScratch();
+    }
+    var p = 0 as *mut spool;
+    if (!(pool_open(bd, borrow mut p as *mut *mut spool) == 0)) {
+        return failed(reason, "check failed: pool_open(bd, &p) == 0 at line 172\0");
+    }
+    let ps = Ptr.toBorrow(p as *spool);
+    let m0 = Ptr.toBorrow(ps.m as *spool_member);
+    let shape = ps.block_size == 4096 && ps.nmembers == 1 && m0.ncopies == 1 && m0.copy[0].sectors_per_block == 8;
+    if (!(shape && ps.nblocks == Ptr.toBorrow(bd as *blkdev).capacity / 8)) {
+        return failed(reason,
+            "check failed: p->block_size == 4096 && p->nmembers == 1 && p->...locks == bd->capacity / 8 at line 179\0");
+    }
+    let w = kmalloc(BLOCK, 0) as *mut u8;
+    let r = kmalloc(BLOCK, 0) as *mut u8;
+    if (w.isNull() || r.isNull()) {
+        kfree(w as *mut void);
+        kfree(r as *mut void);
+        pool_close(p);
+        blkdevPut(bd);
+        return failed(reason, "kmalloc failed\0");
+    }
+    for (i in 0usize..BLOCK) {
+        w.add(i).write(truncate<u8>(i) ^ 0x3c);
+    }
+    // Member 0 addresses are the DVAs they always were, and a DVA naming a member the pool does not have addresses
+    // nothing.
+    let last = ps.nblocks - 1;
+    let dva37 = (3u64 << POOL_DVA_SHIFT) | 7;
+    let ok = pool_write(p, last, w as *void) == 0 && pool_flush(p) == 0 && pool_read(p, last, r as *mut void) == 0 &&
+        memcmp(w as *void, r as *void, BLOCK) == 0 && pool_read(p, ps.nblocks, r as *mut void) == -EINVAL &&
+        pool_write(p, ps.nblocks, w as *void) == -EINVAL &&
+        pool_read(p, 1u64 << POOL_DVA_SHIFT, r as *mut void) == -EINVAL && dva37 >> POOL_DVA_SHIFT == 3 &&
+        (dva37 & ((1u64 << POOL_DVA_SHIFT) - 1)) == 7;
+    kfree(w as *mut void);
+    kfree(r as *mut void);
+    pool_close(p);
+    blkdevPut(bd);
+    if (!(ok)) {
+        return failed(reason, "check failed: ok at line 207\0");
+    }
+    return true;
+}
+
+/// Safety: `reason` writable.
+@export("selftest_cosmofs_format")
+unsafe fn selftestFormat(reason: *mut *CChar) -> bool {
+    let bd = cfst_scratch();
+    if (bd.isNull()) {
+        return noScratch();
+    }
+    let mnt = c("/mnt\0");
+    let fs = c("cosmofs\0");
+    // An unformatted (zeroed) disk is refused.
+    if (!(vfs_mount(mnt, fs, bd, 0) == -EIO)) {
+        return failed(reason, "check failed: vfs_mount(\"/mnt\", \"cosmofs\", bd, 0) == -EIO at line 223\0");
+    }
+    if (!(cosmofs_format(bd) == 0)) {
+        return failed(reason, "check failed: cosmofs_format(bd) == 0 at line 226\0");
+    }
+    if (!(vfs_mount(mnt, fs, bd, 0) == 0)) {
+        return failed(reason, "check failed: vfs_mount(\"/mnt\", \"cosmofs\", bd, 0) == 0 at line 229\0");
+    }
+    var stSlot = [0u64; 16];
+    let st = borrow mut stSlot as *mut [u64; 16] as *mut cosmofs_stats;
+    if (!(cfst_basic_floor_stats(cfst_mount_of(mnt), st) == 0)) {
+        return failed(reason, "check failed: cosmofs_stats(mount_of(\"/mnt\"), &st) == 0 at line 234\0");
+    }
+    let total = Ptr.toBorrow(bd as *blkdev).capacity / 8;
+    if (!(sv(st).generation == 1 && sv(st).total_blocks == total && sv(st).inode_count == 1)) {
+        return failed(reason,
+            "check failed: st.generation == 1 && st.total_blocks == bd->cap... 8 && st.inode_count == 1 at line 239\0");
+    }
+    // 2 supers, members, index, bitmap, L1, L0, inodes
+    if (!(sv(st).free_blocks == sv(st).total_blocks - 8)) {
+        return failed(reason, "check failed: st.free_blocks == st.total_blocks - 8 at line 243\0");
+    }
+    var sSlot = [0u64; 8];
+    let s = borrow mut sSlot as *mut [u64; 8] as *mut cosmo_stat;
+    if (!(vfs_stat(0 as *mut vnode, mnt, s) == 0 && cs(s).dtype == DT_DIR && cs(s).ino == 1 && cs(s).nlink == 2)) {
+        return failed(reason,
+            "check failed: vfs_stat(NULL, \"/mnt\", &s) == 0 && s.type == CO...ino == 1 && s.nlink == 2 at line 249\0");
+    }
+    if (!(vfs_stat(0 as *mut vnode, c("/mnt/anything\0"), s) == -ENOENT)) {
+        return failed(reason, "check failed: vfs_stat(NULL, \"/mnt/anything\", &s) == -ENOENT at line 252\0");
+    }
+    if (!(umount(mnt) == 0)) {
+        return failed(reason, "check failed: vfs_umount(\"/mnt\") == 0 at line 255\0");
+    }
+    // Unmount committed nothing new: still generation 1.
+    if (!(vfs_mount(mnt, fs, bd, 0) == 0)) {
+        return failed(reason, "check failed: vfs_mount(\"/mnt\", \"cosmofs\", bd, 0) == 0 at line 259\0");
+    }
+    if (!(cfst_basic_floor_stats(cfst_mount_of(mnt), st) == 0 && sv(st).generation == 1)) {
+        return failed(reason,
+            "check failed: cosmofs_stats(mount_of(\"/mnt\"), &st) == 0 && st.generation == 1 at line 263\0");
+    }
+    if (!(umount(mnt) == 0)) {
+        return failed(reason, "check failed: vfs_umount(\"/mnt\") == 0 at line 266\0");
+    }
+    blkdevPut(bd);
+    return true;
+}
+
+static mut g_toolong: [u8; 266] = [0; 266];
+
+/// Safety: `reason` writable.
+@export("selftest_cosmofs_ops")
+unsafe fn selftestOps(reason: *mut *CChar) -> bool {
+    let bd = cfst_scratch();
+    if (bd.isNull()) {
+        return noScratch();
+    }
+    let mnt = c("/mnt\0");
+    let fs = c("cosmofs\0");
+    let none = 0 as *mut vnode;
+    let hello = "hello from the kernel";
+    if (!(vfs_mount(mnt, fs, bd, 0) == 0)) {
+        return failed(reason, "check failed: vfs_mount(\"/mnt\", \"cosmofs\", bd, 0) == 0 at line 286\0");
+    }
+    cosmofs_test_set_writeback(cfst_mount_of(mnt), false); // the generation arithmetic below is exact
+    var s0Slot = [0u64; 16];
+    var s1Slot = [0u64; 16];
+    let st0 = borrow mut s0Slot as *mut [u64; 16] as *mut cosmofs_stats;
+    let st = borrow mut s1Slot as *mut [u64; 16] as *mut cosmofs_stats;
+    if (!(cfst_basic_floor_stats(cfst_mount_of(mnt), st0) == 0)) {
+        return failed(reason, "check failed: cosmofs_stats(mount_of(\"/mnt\"), &st0) == 0 at line 294\0");
+    }
+
+    // Files and directories.
+    if (!(cfst_write_file(c("/mnt/hello.txt\0"), hello.ptr as *void, 21))) {
+        return failed(reason,
+            "check failed: write_file(\"/mnt/hello.txt\", \"hello from the kernel\", 21) at line 300\0");
+    }
+    if (!(vfs_mkdir(none, c("/mnt/dir\0"), 493) == 0)) {
+        return failed(reason, "check failed: vfs_mkdir(NULL, \"/mnt/dir\", 0755) == 0 at line 303\0");
+    }
+    if (!(cfst_write_file(c("/mnt/dir/nested.txt\0"), "nested".ptr as *void, 6))) {
+        return failed(reason, "check failed: write_file(\"/mnt/dir/nested.txt\", \"nested\", 6) at line 306\0");
+    }
+    if (!(cfst_read_matches(c("/mnt/hello.txt\0"), hello.ptr as *void, 21))) {
+        return failed(reason,
+            "check failed: read_matches(\"/mnt/hello.txt\", \"hello from the kernel\", 21) at line 310\0");
+    }
+    var sSlot = [0u64; 8];
+    let s = borrow mut sSlot as *mut [u64; 8] as *mut cosmo_stat;
+    if (!(vfs_stat(none, c("/mnt/dir\0"), s) == 0 && cs(s).nlink == 2)) {
+        return failed(reason, "check failed: vfs_stat(NULL, \"/mnt/dir\", &s) == 0 && s.nlink == 2 at line 315\0");
+    }
+    if (!(vfs_stat(none, mnt, s) == 0 && cs(s).nlink == 3)) {
+        return failed(reason, "check failed: vfs_stat(NULL, \"/mnt\", &s) == 0 && s.nlink == 3 at line 318\0");
+    }
+    if (!(vfs_stat(none, c("/mnt/dir/..\0"), s) == 0 && cs(s).ino == 1)) {
+        return failed(reason, "check failed: vfs_stat(NULL, \"/mnt/dir/..\", &s) == 0 && s.ino == 1 at line 321\0");
+    }
+
+    // A file spanning many blocks with a rewrite in the middle: the extents split, merge, and read back exactly.
+    let big: usize = 45 * 4096 + 123;
+    let buf = kmalloc(big, 0) as *mut u8;
+    if (!(!buf.isNull())) {
+        return failed(reason, "check failed: buf != NULL at line 328\0");
+    }
+    for (i in 0usize..big) {
+        buf.add(i).write(truncate<u8>(i.wrappingMul(31).wrappingAdd(7)));
+    }
+    if (!(cfst_write_file(c("/mnt/big.bin\0"), buf as *void, big))) {
+        return failed(reason, "check failed: write_file(\"/mnt/big.bin\", buf, big) at line 334\0");
+    }
+    var f = 0 as *mut file;
+    if (!(vfs_open(none, c("/mnt/big.bin\0"), O_RDWR, 0, borrow mut f as *mut *mut file) == 0)) {
+        return failed(reason, "check failed: vfs_open(NULL, \"/mnt/big.bin\", COSMO_O_RDWR, 0, &f) == 0 at line 338\0");
+    }
+    let mid: usize = 20 * 4096 + 10;
+    memset(buf.add(mid) as *mut void, 0xee, 5000);
+    if (!(file_pwrite(f, buf.add(mid) as *void, 5000, mid as u64) == 5000)) {
+        return failed(reason,
+            "check failed: file_pwrite(f, buf + 20 * 4096 + 10, 5000, 20 * 4096 + 10) == 5000 at line 344\0");
+    }
+    if (!(file_sync(f) == 0)) {
+        return failed(reason, "check failed: file_sync(f) == 0 at line 347\0");
+    }
+    filePut(f);
+    if (!(cfst_read_matches(c("/mnt/big.bin\0"), buf as *void, big))) {
+        return failed(reason, "check failed: read_matches(\"/mnt/big.bin\", buf, big) at line 351\0");
+    }
+    if (!(cfst_basic_floor_stats(cfst_mount_of(mnt), st) == 0 && sv(st).generation == sv(st0).generation + 1)) {
+        return failed(reason,
+            "check failed: cosmofs_stats(mount_of(\"/mnt\"), &st) == 0 && st...on == st0.generation + 1 at line 355\0");
+    }
+    s0Slot = s1Slot;
+
+    // Rename, replace, unlink, rmdir.
+    if (!(cfst_write_file(c("/mnt/dir/other.txt\0"), "other".ptr as *void, 5))) {
+        return failed(reason, "check failed: write_file(\"/mnt/dir/other.txt\", \"other\", 5) at line 361\0");
+    }
+    if (!(vfs_rename(none, c("/mnt/dir/other.txt\0"), c("/mnt/dir/nested.txt\0")) == 0)) {
+        return failed(reason,
+            "check failed: vfs_rename(NULL, \"/mnt/dir/other.txt\", \"/mnt/dir/nested.txt\") == 0 at line 365\0");
+    }
+    if (!(cfst_read_matches(c("/mnt/dir/nested.txt\0"), "other".ptr as *void, 5))) {
+        return failed(reason, "check failed: read_matches(\"/mnt/dir/nested.txt\", \"other\", 5) at line 368\0");
+    }
+    if (!(vfs_rename(none, c("/mnt/dir/nested.txt\0"), c("/mnt/moved.txt\0")) == 0)) {
+        return failed(reason,
+            "check failed: vfs_rename(NULL, \"/mnt/dir/nested.txt\", \"/mnt/moved.txt\") == 0 at line 372\0");
+    }
+    if (!(vfs_stat(none, c("/mnt/dir/nested.txt\0"), s) == -ENOENT)) {
+        return failed(reason, "check failed: vfs_stat(NULL, \"/mnt/dir/nested.txt\", &s) == -ENOENT at line 375\0");
+    }
+    if (!(vfs_rmdir(none, c("/mnt/dir\0")) == 0)) {
+        return failed(reason, "check failed: vfs_rmdir(NULL, \"/mnt/dir\") == 0 at line 378\0");
+    }
+    if (!(vfs_stat(none, mnt, s) == 0 && cs(s).nlink == 2)) {
+        return failed(reason, "check failed: vfs_stat(NULL, \"/mnt\", &s) == 0 && s.nlink == 2 at line 381\0");
+    }
+    if (!(vfs_rename(none, c("/mnt/moved.txt\0"), c("/mnt/dir\0")) == 0)) {
+        return failed(reason, "check failed: vfs_rename(NULL, \"/mnt/moved.txt\", \"/mnt/dir\") == 0 at line 384\0");
+    }
+    if (!(vfs_mkdir(none, c("/mnt/dir\0"), 493) == -EEXIST)) {
+        return failed(reason, "check failed: vfs_mkdir(NULL, \"/mnt/dir\", 0755) == -EEXIST at line 387\0");
+    }
+    if (!(vfs_unlink(none, c("/mnt/dir\0")) == 0)) {
+        return failed(reason, "check failed: vfs_unlink(NULL, \"/mnt/dir\") == 0 at line 390\0");
+    }
+    if (!(vfs_mkdir(none, c("/mnt/dir\0"), 493) == 0)) {
+        return failed(reason, "check failed: vfs_mkdir(NULL, \"/mnt/dir\", 0755) == 0 at line 393\0");
+    }
+    if (!(cfst_write_file(c("/mnt/dir/nested.txt\0"), "nested".ptr as *void, 6))) {
+        return failed(reason, "check failed: write_file(\"/mnt/dir/nested.txt\", \"nested\", 6) at line 396\0");
+    }
+
+    // Commit, remount, and everything is still there.
+    if (!(vfs_sync() == 0)) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 401\0");
+    }
+    if (!(cfst_basic_floor_stats(cfst_mount_of(mnt), st) == 0 && sv(st).generation == sv(st0).generation + 1)) {
+        return failed(reason,
+            "check failed: cosmofs_stats(mount_of(\"/mnt\"), &st) == 0 && st...on == st0.generation + 1 at line 405\0");
+    }
+    if (!(umount(mnt) == 0)) {
+        return failed(reason, "check failed: vfs_umount(\"/mnt\") == 0 at line 408\0");
+    }
+    if (!(vfs_mount(mnt, fs, bd, 0) == 0)) {
+        return failed(reason, "check failed: vfs_mount(\"/mnt\", \"cosmofs\", bd, 0) == 0 at line 411\0");
+    }
+    if (!(cfst_read_matches(c("/mnt/hello.txt\0"), hello.ptr as *void, 21))) {
+        return failed(reason,
+            "check failed: read_matches(\"/mnt/hello.txt\", \"hello from the kernel\", 21) at line 415\0");
+    }
+    if (!(cfst_read_matches(c("/mnt/big.bin\0"), buf as *void, big))) {
+        return failed(reason, "check failed: read_matches(\"/mnt/big.bin\", buf, big) at line 418\0");
+    }
+    if (!(cfst_read_matches(c("/mnt/dir/nested.txt\0"), "nested".ptr as *void, 6))) {
+        return failed(reason, "check failed: read_matches(\"/mnt/dir/nested.txt\", \"nested\", 6) at line 421\0");
+    }
+    if (!(vfs_stat(none, c("/mnt/moved.txt\0"), s) == -ENOENT)) {
+        return failed(reason, "check failed: vfs_stat(NULL, \"/mnt/moved.txt\", &s) == -ENOENT at line 424\0");
+    }
+    if (!(vfs_stat(none, c("/mnt/dir/..\0"), s) == 0 && cs(s).ino == 1)) {
+        return failed(reason, "check failed: vfs_stat(NULL, \"/mnt/dir/..\", &s) == 0 && s.ino == 1 at line 427\0");
+    }
+
+    // Deleting the big file returns its blocks after the next commit.
+    if (!(cfst_basic_floor_stats(cfst_mount_of(mnt), st0) == 0)) {
+        return failed(reason, "check failed: cosmofs_stats(mount_of(\"/mnt\"), &st0) == 0 at line 432\0");
+    }
+    if (!(vfs_unlink(none, c("/mnt/big.bin\0")) == 0)) {
+        return failed(reason, "check failed: vfs_unlink(NULL, \"/mnt/big.bin\") == 0 at line 435\0");
+    }
+    if (!(vfs_sync() == 0)) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 438\0");
+    }
+    if (!(cfst_basic_floor_stats(cfst_mount_of(mnt), st) == 0)) {
+        return failed(reason, "check failed: cosmofs_stats(mount_of(\"/mnt\"), &st) == 0 at line 441\0");
+    }
+    // Fewer than the 45 blocks it covers: its contents repeat, so it is stored as compressed records (cosmofs-compress
+    // measures that).
+    if (!(sv(st).free_blocks > sv(st0).free_blocks + 5)) {
+        return failed(reason, "check failed: st.free_blocks > st0.free_blocks + 5 at line 446\0");
+    }
+    if (!(sv(st).inode_count == sv(st0).inode_count - 1)) {
+        return failed(reason, "check failed: st.inode_count == st0.inode_count - 1 at line 449\0");
+    }
+
+    // Truncate through O_TRUNC and re-extend.
+    if (!(cfst_write_file(c("/mnt/hello.txt\0"), hello.ptr as *void, 21))) {
+        return failed(reason,
+            "check failed: write_file(\"/mnt/hello.txt\", \"hello from the kernel\", 21) at line 455\0");
+    }
+    if (!(vfs_stat(none, c("/mnt/hello.txt\0"), s) == 0 && cs(s).size == 21)) {
+        return failed(reason,
+            "check failed: vfs_stat(NULL, \"/mnt/hello.txt\", &s) == 0 && s.size == 21 at line 459\0");
+    }
+
+    // Errors. A name longer than 255 bytes; one of 48 to 255 is format 15's (design.md, "Format version 15";
+    // cosmofs-longname).
+    let toolong = borrow mut g_toolong as *mut [u8; 266] as *mut u8;
+    memcpy(toolong as *mut void, "/mnt/dir/".ptr as *void, 9);
+    memset(toolong.add(9) as *mut void, 0x6e, 256); // 'n'
+    toolong.add(9 + 256).write(0);
+    if (!(vfs_mkdir(none, toolong as *CChar, 493) == -ENAMETOOLONG)) {
+        return failed(reason, "check failed: vfs_mkdir(NULL, toolong, 0755) == -ENAMETOOLONG at line 469\0");
+    }
+    if (!(vfs_rmdir(none, c("/mnt/dir\0")) == -ENOTEMPTY)) {
+        return failed(reason, "check failed: vfs_rmdir(NULL, \"/mnt/dir\") == -ENOTEMPTY at line 472\0");
+    }
+    if (!(vfs_rename(none, c("/mnt/dir\0"), c("/tmp/x\0")) == -EXDEV)) {
+        return failed(reason, "check failed: vfs_rename(NULL, \"/mnt/dir\", \"/tmp/x\") == -EXDEV at line 475\0");
+    }
+
+    kfree(buf as *mut void);
+    if (!(umount(mnt) == 0)) {
+        return failed(reason, "check failed: vfs_umount(\"/mnt\") == 0 at line 480\0");
+    }
+    blkdevPut(bd);
+    return true;
+}
+
+// static: off the 16 KiB kernel stack (scripts/frame-baseline.txt); the runner runs one test at a time
+static mut g_saved_a: [u8; 4096] = [0; 4096];
+static mut g_saved_b: [u8; 4096] = [0; 4096];
+
+/// Safety: `reason` writable.
+@export("selftest_cosmofs_crash")
+unsafe fn selftestCrash(reason: *mut *CChar) -> bool {
+    let bd = cfst_scratch();
+    if (bd.isNull()) {
+        return noScratch();
+    }
+    let mnt = c("/mnt\0");
+    let fs = c("cosmofs\0");
+    let none = 0 as *mut vnode;
+    let hello = "hello from the kernel";
+    // Mutate, then "crash" before the root is written: the previous committed state must be intact and the free space
+    // unchanged.
+    if (!(vfs_mount(mnt, fs, bd, 0) == 0)) {
+        return failed(reason, "check failed: vfs_mount(\"/mnt\", \"cosmofs\", bd, 0) == 0 at line 504\0");
+    }
+    cosmofs_test_set_writeback(cfst_mount_of(mnt), false); // nothing may commit before the discard
+    var bSlot = [0u64; 16];
+    var aSlot = [0u64; 16];
+    let before = borrow mut bSlot as *mut [u64; 16] as *mut cosmofs_stats;
+    let after = borrow mut aSlot as *mut [u64; 16] as *mut cosmofs_stats;
+    if (!(cfst_basic_floor_stats(cfst_mount_of(mnt), before) == 0)) {
+        return failed(reason, "check failed: cosmofs_stats(mount_of(\"/mnt\"), &before) == 0 at line 512\0");
+    }
+    if (!(cfst_write_file(c("/mnt/lost.txt\0"), "this never lands".ptr as *void, 16))) {
+        return failed(reason, "check failed: write_file(\"/mnt/lost.txt\", \"this never lands\", 16) at line 515\0");
+    }
+    if (!(vfs_mkdir(none, c("/mnt/lostdir\0"), 493) == 0)) {
+        return failed(reason, "check failed: vfs_mkdir(NULL, \"/mnt/lostdir\", 0755) == 0 at line 518\0");
+    }
+    if (!(vfs_unlink(none, c("/mnt/hello.txt\0")) == 0)) {
+        return failed(reason, "check failed: vfs_unlink(NULL, \"/mnt/hello.txt\") == 0 at line 521\0");
+    }
+    if (!(cfst_write_file(c("/mnt/dir/nested.txt\0"), "overwritten".ptr as *void, 11))) {
+        return failed(reason, "check failed: write_file(\"/mnt/dir/nested.txt\", \"overwritten\", 11) at line 524\0");
+    }
+    var sSlot = [0u64; 8];
+    let s = borrow mut sSlot as *mut [u64; 8] as *mut cosmo_stat;
+    if (!(vfs_stat(none, c("/mnt/hello.txt\0"), s) == -ENOENT)) {
+        return failed(reason, "check failed: vfs_stat(NULL, \"/mnt/hello.txt\", &s) == -ENOENT at line 529\0");
+    }
+    cosmofs_test_discard_on_unmount(cfst_mount_of(mnt), true);
+    if (!(umount(mnt) == 0)) {
+        return failed(reason, "check failed: vfs_umount(\"/mnt\") == 0 at line 533\0");
+    }
+
+    if (!(vfs_mount(mnt, fs, bd, 0) == 0)) {
+        return failed(reason, "check failed: vfs_mount(\"/mnt\", \"cosmofs\", bd, 0) == 0 at line 537\0");
+    }
+    if (!(cfst_basic_floor_stats(cfst_mount_of(mnt), after) == 0)) {
+        return failed(reason, "check failed: cosmofs_stats(mount_of(\"/mnt\"), &after) == 0 at line 540\0");
+    }
+    if (!(sv(after).generation == sv(before).generation && sv(after).free_blocks == sv(before).free_blocks)) {
+        return failed(reason,
+            "check failed: after.generation == before.generation && after.f...cks == before.free_blocks at line 544\0");
+    }
+    if (!(vfs_stat(none, c("/mnt/lost.txt\0"), s) == -ENOENT)) {
+        return failed(reason, "check failed: vfs_stat(NULL, \"/mnt/lost.txt\", &s) == -ENOENT at line 547\0");
+    }
+    if (!(vfs_stat(none, c("/mnt/lostdir\0"), s) == -ENOENT)) {
+        return failed(reason, "check failed: vfs_stat(NULL, \"/mnt/lostdir\", &s) == -ENOENT at line 550\0");
+    }
+    if (!(cfst_read_matches(c("/mnt/hello.txt\0"), hello.ptr as *void, 21))) {
+        return failed(reason,
+            "check failed: read_matches(\"/mnt/hello.txt\", \"hello from the kernel\", 21) at line 554\0");
+    }
+    if (!(cfst_read_matches(c("/mnt/dir/nested.txt\0"), "nested".ptr as *void, 6))) {
+        return failed(reason, "check failed: read_matches(\"/mnt/dir/nested.txt\", \"nested\", 6) at line 557\0");
+    }
+    if (!(umount(mnt) == 0)) {
+        return failed(reason, "check failed: vfs_umount(\"/mnt\") == 0 at line 560\0");
+    }
+
+    // A torn superblock slot is ignored in favour of the other.
+    var p = 0 as *mut spool;
+    if (!(pool_open(bd, borrow mut p as *mut *mut spool) == 0)) {
+        return failed(reason, "check failed: pool_open(bd, &p) == 0 at line 566\0");
+    }
+    let blk = kmalloc(BLOCK, 0) as *mut u8;
+    if (!(!blk.isNull())) {
+        return failed(reason, "check failed: blk != NULL at line 570\0");
+    }
+    let savedA = borrow mut g_saved_a as *mut [u8; 4096] as *mut u8;
+    let savedB = borrow mut g_saved_b as *mut [u8; 4096] as *mut u8;
+    if (!(pool_read(p, 0, blk as *mut void) == 0)) {
+        return failed(reason, "check failed: pool_read(p, 0, blk) == 0 at line 575\0");
+    }
+    memcpy(savedA as *mut void, blk as *void, BLOCK);
+    if (!(pool_read(p, 1, blk as *mut void) == 0)) {
+        return failed(reason, "check failed: pool_read(p, 1, blk) == 0 at line 579\0");
+    }
+    memcpy(savedB as *mut void, blk as *void, BLOCK);
+    // Corrupt whichever slot holds the newer generation.
+    let genA = (savedA as *u64).add(3).read();
+    let genB = (savedB as *u64).add(3).read();
+    let newer: u64 = if (genA >= genB) 0 else 1;
+    memcpy(blk as *mut void, (if (newer == 0) savedA else savedB) as *void, BLOCK);
+    blk.add(100).write(blk.add(100).read() ^ 0xff);
+    if (!(pool_write(p, newer, blk as *void) == 0 && pool_flush(p) == 0)) {
+        return failed(reason, "check failed: pool_write(p, newer, blk) == 0 && pool_flush(p) == 0 at line 589\0");
+    }
+    kfree(blk as *mut void);
+    pool_close(p);
+    if (!(vfs_mount(mnt, fs, bd, 0) == 0)) {
+        return failed(reason, "check failed: vfs_mount(\"/mnt\", \"cosmofs\", bd, 0) == 0 at line 594\0");
+    }
+    if (!(cfst_basic_floor_stats(cfst_mount_of(mnt), after) == 0)) {
+        return failed(reason, "check failed: cosmofs_stats(mount_of(\"/mnt\"), &after) == 0 at line 597\0");
+    }
+    if (!(sv(after).generation == sv(before).generation - 1 || sv(after).generation == sv(before).generation)) {
+        return failed(reason,
+            "check failed: after.generation == before.generation - 1 || aft...tion == before.generation at line 601\0");
+    }
+    var buffer = [0u8; 96];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: cosmofs: fell back to generation ");
+    line.decimal(sv(after).generation);
+    line.text(" after a torn slot");
+    KernelLog.send(LogLevel.Info, line);
+    // Leave a healthy pair behind: a commit rewrites the torn slot.
+    if (!(cfst_write_file(c("/mnt/touch.txt\0"), "x".ptr as *void, 1)
+            && vfs_unlink(none, c("/mnt/touch.txt\0")) == 0)) {
+        return failed(reason,
+            "check failed: write_file(\"/mnt/touch.txt\", \"x\", 1) && vfs_... \"/mnt/touch.txt\") == 0 at line 613\0");
+    }
+    if (!(vfs_sync() == 0)) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 616\0");
+    }
+    if (!(umount(mnt) == 0)) {
+        return failed(reason, "check failed: vfs_umount(\"/mnt\") == 0 at line 619\0");
+    }
+    if (!(vfs_mount(mnt, fs, bd, 0) == 0)) {
+        return failed(reason, "check failed: vfs_mount(\"/mnt\", \"cosmofs\", bd, 0) == 0 at line 622\0");
+    }
+    if (!(cfst_read_matches(c("/mnt/hello.txt\0"), hello.ptr as *void, 21))) {
+        return failed(reason,
+            "check failed: read_matches(\"/mnt/hello.txt\", \"hello from the kernel\", 21) at line 626\0");
+    }
+    if (!(cfst_read_matches(c("/mnt/dir/nested.txt\0"), "nested".ptr as *void, 6))) {
+        return failed(reason, "check failed: read_matches(\"/mnt/dir/nested.txt\", \"nested\", 6) at line 629\0");
+    }
+    if (!(umount(mnt) == 0)) {
+        return failed(reason, "check failed: vfs_umount(\"/mnt\") == 0 at line 632\0");
+    }
+    blkdevPut(bd);
+    return true;
+}
+
+// ---- The transaction engine (audit milestone 7), on RAM devices; a debug build's ----
+
+/// The engine tests' mount point.
+fn eng() -> *CChar => c("/mnt/eng\0");
+
+/// Holes: a write far into a file allocates only its own block.
+/// Safety: `reason` writable.
+@cfg("CONFIG_DEBUG")
+@export("selftest_cosmofs_holes")
+unsafe fn selftestHoles(reason: *mut *CChar) -> bool {
+    var bd = 0 as *mut blkdev;
+    if (!cfst_engine_mount(borrow mut bd as *mut *mut blkdev, 1024, reason)) {
+        return false;
+    }
+    let none = 0 as *mut vnode;
+    let sparse = c("/mnt/eng/sparse\0");
+    var s0Slot = [0u64; 16];
+    var s1Slot = [0u64; 16];
+    let st0 = borrow mut s0Slot as *mut [u64; 16] as *mut cosmofs_stats;
+    let st1 = borrow mut s1Slot as *mut [u64; 16] as *mut cosmofs_stats;
+    if (!(cfst_basic_floor_stats(cfst_mount_of(eng()), st0) == 0)) {
+        return failed(reason, "check failed: cosmofs_stats(mount_of(ENG), &st0) == 0 at line 659\0");
+    }
+    var f = 0 as *mut file;
+    if (!(vfs_open(none, sparse, O_RDWR | O_CREAT, 420, borrow mut f as *mut *mut file) == 0)) {
+        return failed(reason,
+            "check failed: vfs_open(NULL, ENG \"/sparse\", COSMO_O_RDWR | COSMO_O_CREAT, 0644, &f) == 0 at line 664\0");
+    }
+    let tail = "tail".ptr as *void;
+    if (!(file_pwrite(f, tail, 4, 200u64 << 20) == 4)) {
+        return failed(reason, "check failed: file_pwrite(f, tail, 4, 200ull << 20) == 4 at line 668\0");
+    }
+    if (!(file_sync(f) == 0)) {
+        return failed(reason, "check failed: file_sync(f) == 0 at line 671\0");
+    }
+    if (!(cfst_basic_floor_stats(cfst_mount_of(eng()), st1) == 0)) {
+        return failed(reason, "check failed: cosmofs_stats(mount_of(ENG), &st1) == 0 at line 674\0");
+    }
+    // one data block and a few metadata blocks, no zero fill
+    if (!(sv(st0).free_blocks - sv(st1).free_blocks <= 12)) {
+        return failed(reason, "check failed: st0.free_blocks - st1.free_blocks <= 12 at line 678\0");
+    }
+    var bufArr = [0u8; 16];
+    let buf = borrow mut bufArr as *mut [u8; 16] as *mut u8;
+    if (!(file_pread(f, buf as *mut void, 8, 100u64 << 20) == 8)) {
+        return failed(reason, "check failed: file_pread(f, buf, 8, 100ull << 20) == 8 at line 683\0");
+    }
+    for (i in 0usize..8) {
+        if (!(bufArr[i] == 0)) {
+            return failed(reason, "check failed: buf[i] == 0 at line 687\0");
+        }
+    }
+    if (!(file_pread(f, buf as *mut void, 4, 200u64 << 20) == 4 && memcmp(buf as *void, tail, 4) == 0)) {
+        return failed(reason,
+            "check failed: file_pread(f, buf, 4, 200ull << 20) == 4 && memcmp(buf, tail, 4) == 0 at line 692\0");
+    }
+    // A block in the middle of the hole, then the first block: the runs stay sorted and every read agrees.
+    if (!(file_pwrite(f, "mid".ptr as *void, 3, 50u64 << 20) == 3)) {
+        return failed(reason, "check failed: file_pwrite(f, \"mid\", 3, 50ull << 20) == 3 at line 696\0");
+    }
+    if (!(file_pwrite(f, "head".ptr as *void, 4, 0) == 4)) {
+        return failed(reason, "check failed: file_pwrite(f, \"head\", 4, 0) == 4 at line 699\0");
+    }
+    if (!(file_sync(f) == 0)) {
+        return failed(reason, "check failed: file_sync(f) == 0 at line 702\0");
+    }
+    if (!(file_pread(f, buf as *mut void, 4, 0) == 4 && memcmp(buf as *void, "head".ptr as *void, 4) == 0)) {
+        return failed(reason,
+            "check failed: file_pread(f, buf, 4, 0) == 4 && memcmp(buf, \"head\", 4) == 0 at line 706\0");
+    }
+    if (!(file_pread(f, buf as *mut void, 3, 50u64 << 20) == 3 && memcmp(buf as *void, "mid".ptr as *void, 3) == 0)) {
+        return failed(reason,
+            "check failed: file_pread(f, buf, 3, 50ull << 20) == 3 && memcmp(buf, \"mid\", 3) == 0 at line 710\0");
+    }
+    if (!(file_pread(f, buf as *mut void, 4, 200u64 << 20) == 4 && memcmp(buf as *void, tail, 4) == 0)) {
+        return failed(reason,
+            "check failed: file_pread(f, buf, 4, 200ull << 20) == 4 && memcmp(buf, tail, 4) == 0 at line 714\0");
+    }
+    if (!(file_pread(f, buf as *mut void, 4, 1u64 << 20) == 4 && bufArr[0] == 0 && bufArr[3] == 0)) {
+        return failed(reason,
+            "check failed: file_pread(f, buf, 4, 1ull << 20) == 4 && buf[0] == 0 && buf[3] == 0 at line 718\0");
+    }
+    filePut(f);
+    // Remount: the holes and the data survive the commit.
+    if (!(umount(eng()) == 0)) {
+        return failed(reason, "check failed: vfs_umount(ENG) == 0 at line 723\0");
+    }
+    if (!(vfs_mount(eng(), c("cosmofs\0"), bd, 0) == 0)) {
+        return failed(reason, "check failed: vfs_mount(ENG, \"cosmofs\", bd, 0) == 0 at line 726\0");
+    }
+    // the file is 200 MiB + 4, not 4 bytes
+    if (!(cfst_read_matches(sparse, "head".ptr as *void, 4) == false)) {
+        return failed(reason, "check failed: read_matches(ENG \"/sparse\", \"head\", 4) == false at line 730\0");
+    }
+    if (!(vfs_open(none, sparse, O_RDONLY, 0, borrow mut f as *mut *mut file) == 0)) {
+        return failed(reason,
+            "check failed: vfs_open(NULL, ENG \"/sparse\", COSMO_O_RDONLY, 0, &f) == 0 at line 734\0");
+    }
+    if (!(file_pread(f, buf as *mut void, 3, 50u64 << 20) == 3 && memcmp(buf as *void, "mid".ptr as *void, 3) == 0)) {
+        return failed(reason,
+            "check failed: file_pread(f, buf, 3, 50ull << 20) == 3 && memcmp(buf, \"mid\", 3) == 0 at line 738\0");
+    }
+    var sSlot = [0u64; 8];
+    let s = borrow mut sSlot as *mut [u64; 8] as *mut cosmo_stat;
+    let _ = file_stat(f, s);
+    if (!(cs(s).size == (200u64 << 20) + 4)) {
+        return failed(reason, "check failed: s.size == (200ull << 20) + 4 at line 744\0");
+    }
+    filePut(f);
+    // Truncate into the hole keeps the head, frees the tail.
+    if (!(vfs_open(none, sparse, O_WRONLY | O_TRUNC, 0, borrow mut f as *mut *mut file) == 0)) {
+        return failed(reason,
+            "check failed: vfs_open(NULL, ENG \"/sparse\", COSMO_O_WRONLY | COSMO_O_TRUNC, 0, &f) == 0 at line 750\0");
+    }
+    filePut(f);
+    if (!(vfs_sync() == 0)) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 754\0");
+    }
+    if (!(cfst_basic_floor_stats(cfst_mount_of(eng()), st1) == 0)) {
+        return failed(reason, "check failed: cosmofs_stats(mount_of(ENG), &st1) == 0 at line 757\0");
+    }
+    // Back to within a few blocks of where it started. The slack covers what an empty file still costs -- its
+    // checksum tree is gone, its inode is not -- and, from format version 9, the record of what the last commit freed:
+    // a version-9 filesystem always has one, so the count it is compared against was taken before there was one
+    // (docs/audit/next-subsystem-unmount-leak.md).
+    var buffer = [0u8; 120];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: cosmofs-holes: ");
+    line.decimal(sv(st0).free_blocks.wrappingSub(sv(st1).free_blocks));
+    line.text(" blocks still held after truncating a 200 MiB sparse file");
+    KernelLog.send(LogLevel.Info, line);
+    if (!(sv(st1).free_blocks + 8 >= sv(st0).free_blocks)) {
+        return failed(reason, "check failed: st1.free_blocks + 8 >= st0.free_blocks at line 770\0");
+    }
+    return cfst_engine_unmount(bd, reason);
+}
+
+/// The pool block holding a 4 KiB pattern, or -1 (the test's way to corrupt data).
+/// Safety: `bd` is a device; `pattern` BLOCK bytes.
+unsafe fn findBlock(bd: *mut blkdev, pattern: *u8) -> i64 {
+    var p = 0 as *mut spool;
+    if (pool_open(bd, borrow mut p as *mut *mut spool) != 0) {
+        return -1;
+    }
+    let blk = kmalloc(BLOCK, 0) as *mut u8;
+    var found: i64 = -1;
+    let n = Ptr.toBorrow(p as *spool).nblocks;
+    var i: u64 = 2;
+    while (!blk.isNull() && i < n && found < 0) {
+        if (pool_read(p, i, blk as *mut void) == 0 && memcmp(blk as *void, pattern as *void, BLOCK) == 0) {
+            found = truncate<i64>(i);
+        }
+        i += 1;
+    }
+    kfree(blk as *mut void);
+    pool_close(p);
+    return found;
+}
+
+/// Checksums: a flipped byte in a data block or a directory block is -EIO.
+/// Safety: `reason` writable.
+@cfg("CONFIG_DEBUG")
+@export("selftest_cosmofs_csum")
+unsafe fn selftestCsum(reason: *mut *CChar) -> bool {
+    var bd = 0 as *mut blkdev;
+    if (!cfst_engine_mount(borrow mut bd as *mut *mut blkdev, 512, reason)) {
+        return false;
+    }
+    let none = 0 as *mut vnode;
+    let data = c("/mnt/eng/data\0");
+    let other = c("/mnt/eng/other\0");
+    let pat = kmalloc(BLOCK, 0) as *mut u8;
+    if (!(!pat.isNull())) {
+        return failed(reason, "check failed: pat != NULL at line 811\0");
+    }
+    for (i in 0usize..BLOCK) {
+        pat.add(i).write(truncate<u8>(i.wrappingMul(13).wrappingAdd(5)));
+    }
+    if (!(cfst_write_file(data, pat as *void, BLOCK))) {
+        return failed(reason, "check failed: write_file(ENG \"/data\", pat, 4096) at line 817\0");
+    }
+    if (!(cfst_write_file(other, "fine".ptr as *void, 4))) {
+        return failed(reason, "check failed: write_file(ENG \"/other\", \"fine\", 4) at line 820\0");
+    }
+    if (!(vfs_mkdir(none, c("/mnt/eng/d\0"), 493) == 0)) {
+        return failed(reason, "check failed: vfs_mkdir(NULL, ENG \"/d\", 0755) == 0 at line 823\0");
+    }
+    if (!(cfst_write_file(c("/mnt/eng/d/x\0"), "x".ptr as *void, 1))) {
+        return failed(reason, "check failed: write_file(ENG \"/d/x\", \"x\", 1) at line 826\0");
+    }
+    if (!(vfs_sync() == 0)) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 829\0");
+    }
+    if (!(umount(eng()) == 0)) {
+        return failed(reason, "check failed: vfs_umount(ENG) == 0 at line 832\0");
+    }
+    let dataBlk = findBlock(bd, pat as *u8);
+    if (!(dataBlk > 0)) {
+        return failed(reason, "check failed: data_blk > 0 at line 836\0");
+    }
+    if (!(cfst_corrupt_block(bd, truncate<u64>(dataBlk), 1000))) {
+        return failed(reason, "check failed: corrupt_block(bd, (uint64_t)data_blk, 1000) at line 839\0");
+    }
+    if (!(vfs_mount(eng(), c("cosmofs\0"), bd, 0) == 0)) {
+        return failed(reason, "check failed: vfs_mount(ENG, \"cosmofs\", bd, 0) == 0 at line 842\0");
+    }
+    var f = 0 as *mut file;
+    if (!(vfs_open(none, data, O_RDONLY, 0, borrow mut f as *mut *mut file) == 0)) {
+        return failed(reason, "check failed: vfs_open(NULL, ENG \"/data\", COSMO_O_RDONLY, 0, &f) == 0 at line 846\0");
+    }
+    var bufArr = [0u8; 64];
+    // refused, not returned wrong
+    if (!(file_pread(f, borrow mut bufArr as *mut [u8; 64] as *mut void, 64, 0) == -EIO as i64)) {
+        return failed(reason, "check failed: file_pread(f, buf, 64, 0) == -EIO at line 851\0");
+    }
+    filePut(f);
+    if (!(cfst_read_matches(other, "fine".ptr as *void, 4))) {
+        return failed(reason, "check failed: read_matches(ENG \"/other\", \"fine\", 4) at line 855\0");
+    }
+    var stSlot = [0u64; 16];
+    let st = borrow mut stSlot as *mut [u64; 16] as *mut cosmofs_stats;
+    if (!(cfst_basic_floor_stats(cfst_mount_of(eng()), st) == 0 && sv(st).csum_failures >= 1)) {
+        return failed(reason,
+            "check failed: cosmofs_stats(mount_of(ENG), &st) == 0 && st.csum_failures >= 1 at line 861\0");
+    }
+    // Repair by rewriting: a new block, a new checksum.
+    if (!(cfst_write_file(data, pat as *void, BLOCK))) {
+        return failed(reason, "check failed: write_file(ENG \"/data\", pat, 4096) at line 865\0");
+    }
+    if (!(cfst_read_matches(data, pat as *void, BLOCK))) {
+        return failed(reason, "check failed: read_matches(ENG \"/data\", pat, 4096) at line 868\0");
+    }
+    // A directory block: /d holds one entry, "x"; flip a byte in it and the lookup that reads the block is refused.
+    if (!(vfs_sync() == 0)) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 872\0");
+    }
+    if (!(umount(eng()) == 0)) {
+        return failed(reason, "check failed: vfs_umount(ENG) == 0 at line 875\0");
+    }
+    var p = 0 as *mut spool;
+    if (!(pool_open(bd, borrow mut p as *mut *mut spool) == 0)) {
+        return failed(reason, "check failed: pool_open(bd, &p) == 0 at line 879\0");
+    }
+    let blk = kmalloc(BLOCK, 0) as *mut u8;
+    if (!(!blk.isNull())) {
+        return failed(reason, "check failed: blk != NULL at line 883\0");
+    }
+    var dirBlk: i64 = -1;
+    let n = Ptr.toBorrow(p as *spool).nblocks;
+    var i: u64 = 2;
+    while (i < n && dirBlk < 0) {
+        if (pool_read(p, i, blk as *mut void) == 0) {
+            let d = Slice.fromRaw(blk as *u8, BLOCK);
+            let ino0 = ByteOrder.readU64LE(d, 0);
+            if (ino0 != 0 && ino0 < 1000 && d[DIRENT_NAMELEN] == 1 && d[DIRENT_NAME] == 0x78 &&
+                ByteOrder.readU64LE(d, DIRENT_SIZE) == 0) {
+                dirBlk = truncate<i64>(i);
+            }
+        }
+        i += 1;
+    }
+    kfree(blk as *mut void);
+    pool_close(p);
+    if (!(dirBlk > 0)) {
+        return failed(reason, "check failed: dir_blk > 0 at line 902\0");
+    }
+    // inside the entry's name bytes
+    if (!(cfst_corrupt_block(bd, truncate<u64>(dirBlk), 40))) {
+        return failed(reason, "check failed: corrupt_block(bd, (uint64_t)dir_blk, 40) at line 906\0");
+    }
+    if (!(vfs_mount(eng(), c("cosmofs\0"), bd, 0) == 0)) {
+        return failed(reason, "check failed: vfs_mount(ENG, \"cosmofs\", bd, 0) == 0 at line 909\0");
+    }
+    var sSlot = [0u64; 8];
+    let s = borrow mut sSlot as *mut [u64; 8] as *mut cosmo_stat;
+    if (!(vfs_stat(none, c("/mnt/eng/d/x\0"), s) == -EIO)) {
+        return failed(reason, "check failed: vfs_stat(NULL, ENG \"/d/x\", &cs) == -EIO at line 914\0");
+    }
+    if (!(vfs_stat(none, other, s) == 0)) {
+        return failed(reason, "check failed: vfs_stat(NULL, ENG \"/other\", &cs) == 0 at line 917\0");
+    }
+    // this mount's count
+    if (!(cfst_basic_floor_stats(cfst_mount_of(eng()), st) == 0 && sv(st).csum_failures >= 1)) {
+        return failed(reason,
+            "check failed: cosmofs_stats(mount_of(ENG), &st) == 0 && st.csum_failures >= 1 at line 922\0");
+    }
+    kfree(pat as *mut void);
+    var buffer = [0u8; 140];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: cosmofs-csum: a corrupted data block reads -EIO and a rewrite repairs it (");
+    line.decimal(sv(st).csum_failures);
+    line.text(" failures counted)");
+    KernelLog.send(LogLevel.Info, line);
+    return cfst_engine_unmount(bd, reason);
+}
+
+/// fsync is durable: a file synced before a "crash" survives, one not synced does not.
+/// Safety: `reason` writable.
+@cfg("CONFIG_DEBUG")
+@export("selftest_cosmofs_fsync")
+unsafe fn selftestFsync(reason: *mut *CChar) -> bool {
+    var bd = 0 as *mut blkdev;
+    if (!cfst_engine_mount(borrow mut bd as *mut *mut blkdev, 512, reason)) {
+        return false;
+    }
+    let none = 0 as *mut vnode;
+    var s0Slot = [0u64; 16];
+    var s1Slot = [0u64; 16];
+    let st0 = borrow mut s0Slot as *mut [u64; 16] as *mut cosmofs_stats;
+    let st1 = borrow mut s1Slot as *mut [u64; 16] as *mut cosmofs_stats;
+    if (!(cfst_basic_floor_stats(cfst_mount_of(eng()), st0) == 0)) {
+        return failed(reason, "check failed: cosmofs_stats(mount_of(ENG), &st0) == 0 at line 949\0");
+    }
+    var f = 0 as *mut file;
+    if (!(vfs_open(none, c("/mnt/eng/durable\0"), O_RDWR | O_CREAT, 420, borrow mut f as *mut *mut file) == 0)) {
+        return failed(reason,
+            "check failed: vfs_open(NULL, ENG \"/durable\", COSMO_O_RDWR | C..._O_CREAT, 0644, &f) == 0 at line 954\0");
+    }
+    if (!(file_write(f, "kept".ptr as *void, 4) == 4)) {
+        return failed(reason, "check failed: file_write(f, \"kept\", 4) == 4 at line 957\0");
+    }
+    if (!(file_sync(f) == 0)) {
+        return failed(reason, "check failed: file_sync(f) == 0 at line 960\0");
+    }
+    filePut(f);
+    if (!(cfst_basic_floor_stats(cfst_mount_of(eng()), st1) == 0)) {
+        return failed(reason, "check failed: cosmofs_stats(mount_of(ENG), &st1) == 0 at line 964\0");
+    }
+    if (!(sv(st1).generation == sv(st0).generation + 1 && sv(st1).commits == sv(st0).commits + 1)) {
+        return failed(reason,
+            "check failed: st1.generation == st0.generation + 1 && st1.commits == st0.commits + 1 at line 968\0");
+    }
+    // not synced
+    if (!(cfst_write_file(c("/mnt/eng/lost\0"), "gone".ptr as *void, 4))) {
+        return failed(reason, "check failed: write_file(ENG \"/lost\", \"gone\", 4) at line 972\0");
+    }
+    cosmofs_test_discard_on_unmount(cfst_mount_of(eng()), true);
+    if (!(umount(eng()) == 0)) {
+        return failed(reason, "check failed: vfs_umount(ENG) == 0 at line 976\0");
+    }
+    if (!(vfs_mount(eng(), c("cosmofs\0"), bd, 0) == 0)) {
+        return failed(reason, "check failed: vfs_mount(ENG, \"cosmofs\", bd, 0) == 0 at line 979\0");
+    }
+    if (!(cfst_read_matches(c("/mnt/eng/durable\0"), "kept".ptr as *void, 4))) {
+        return failed(reason, "check failed: read_matches(ENG \"/durable\", \"kept\", 4) at line 982\0");
+    }
+    var sSlot = [0u64; 8];
+    let s = borrow mut sSlot as *mut [u64; 8] as *mut cosmo_stat;
+    if (!(vfs_stat(none, c("/mnt/eng/lost\0"), s) == -ENOENT)) {
+        return failed(reason, "check failed: vfs_stat(NULL, ENG \"/lost\", &s) == -ENOENT at line 987\0");
+    }
+    KernelLog.write(LogLevel.Info,
+        "selftest: cosmofs-fsync: the synced file survived the discarded transaction, the unsynced one did not");
+    return cfst_engine_unmount(bd, reason);
+}
+
+/// The metadata reserve: a full disk can still delete and commit.
+/// Safety: `reason` writable.
+@cfg("CONFIG_DEBUG")
+@export("selftest_cosmofs_reserve")
+unsafe fn selftestReserve(reason: *mut *CChar) -> bool {
+    var bd = 0 as *mut blkdev;
+    if (!cfst_engine_mount(borrow mut bd as *mut *mut blkdev, 256, reason)) {
+        return false;
+    }
+    let none = 0 as *mut vnode;
+    var stSlot = [0u64; 16];
+    let st = borrow mut stSlot as *mut [u64; 16] as *mut cosmofs_stats;
+    if (!(cfst_basic_floor_stats(cfst_mount_of(eng()), st) == 0)) {
+        return failed(reason, "check failed: cosmofs_stats(mount_of(ENG), &st) == 0 at line 1007\0");
+    }
+    if (!(sv(st).reserve_blocks == 32)) {
+        return failed(reason, "check failed: st.reserve_blocks == 32 at line 1010\0");
+    }
+    let page = kmalloc(BLOCK, 0) as *mut u8;
+    if (!(!page.isNull())) {
+        return failed(reason, "check failed: page != NULL at line 1014\0");
+    }
+    cfst_fill_incompressible(page, BLOCK, 0x42); // the reserve is about space, not compression
+    // Fill until data allocation is refused (pages are cached at write and allocated at the sync that writes them
+    // back); the reserve stays free.
+    var files: u32 = 0;
+    var pages: u32 = 0;
+    var enospc = false;
+    while (files < 64 && !enospc) {
+        var pathBuf = [0u8; 32];
+        var path = TextWriter.create(mut pathBuf[..]);
+        path.text("/mnt/eng/f");
+        path.decimal(files as u64);
+        var f = 0 as *mut file;
+        let orc = vfs_open(none, path.cText(), O_RDWR | O_CREAT, 420, borrow mut f as *mut *mut file);
+        if (orc == -ENOSPC) {
+            enospc = true;
+            break;
+        }
+        if (!(orc == 0)) {
+            return failed(reason, "check failed: orc == 0 at line 1034\0");
+        }
+        files += 1;
+        for (i in 0u32..16) {
+            // Different bytes every time: the same page written sixteen times is a record that compresses to almost
+            // nothing, and this test is about running out of space.
+            cfst_fill_incompressible(page, BLOCK, 0x42u32.wrappingAdd(files.wrappingMul(16)).wrappingAdd(i));
+            let rc = file_write(f, page as *void, BLOCK);
+            if (rc == 4096) {
+                pages += 1;
+                continue;
+            }
+            if (!(rc == -ENOSPC as i64)) {
+                return failed(reason, "check failed: rc == -ENOSPC at line 1047\0");
+            }
+            enospc = true;
+            break;
+        }
+        let src = file_sync(f);
+        filePut(f);
+        if (src == -ENOSPC) {
+            enospc = true;
+        } else {
+            if (!(src == 0)) {
+                return failed(reason, "check failed: src == 0 at line 1058\0");
+            }
+        }
+    }
+    if (!(enospc)) {
+        return failed(reason, "check failed: enospc at line 1063\0");
+    }
+    if (!(cfst_basic_floor_stats(cfst_mount_of(eng()), st) == 0)) {
+        return failed(reason, "check failed: cosmofs_stats(mount_of(ENG), &st) == 0 at line 1066\0");
+    }
+    // Stopped at the reserve, less the allowance a dirty page is charged on top of its block (CF34: CFS_DIRTY_META, 4
+    // blocks with no page dirty); before MEM-9 the write was taken and its commit failed.
+    if (!(sv(st).free_blocks <= sv(st).reserve_blocks + 2 + 4 && sv(st).free_blocks > 0)) {
+        return failed(reason,
+            "check failed: st.free_blocks <= st.reserve_blocks + 2 + 4 && st.free_blocks > 0 at line 1072\0");
+    }
+    let fullFree = sv(st).free_blocks;
+    // Deletion needs metadata blocks: the reserve provides them.
+    if (!(vfs_unlink(none, c("/mnt/eng/f0\0")) == 0)) {
+        return failed(reason, "check failed: vfs_unlink(NULL, ENG \"/f0\") == 0 at line 1077\0");
+    }
+    if (!(vfs_unlink(none, c("/mnt/eng/f1\0")) == 0)) {
+        return failed(reason, "check failed: vfs_unlink(NULL, ENG \"/f1\") == 0 at line 1080\0");
+    }
+    if (!(vfs_sync() == 0)) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 1083\0");
+    }
+    if (!(cfst_basic_floor_stats(cfst_mount_of(eng()), st) == 0)) {
+        return failed(reason, "check failed: cosmofs_stats(mount_of(ENG), &st) == 0 at line 1086\0");
+    }
+    if (!(sv(st).free_blocks > fullFree + 20)) {
+        return failed(reason, "check failed: st.free_blocks > full_free + 20 at line 1089\0");
+    }
+    // space is back
+    if (!(cfst_write_file(c("/mnt/eng/again\0"), page as *void, BLOCK))) {
+        return failed(reason, "check failed: write_file(ENG \"/again\", page, 4096) at line 1093\0");
+    }
+    kfree(page as *mut void);
+    var buffer = [0u8; 160];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: cosmofs-reserve: ");
+    line.decimal(files as u64);
+    line.text(" files, ");
+    line.decimal(pages as u64);
+    line.text(" pages until -ENOSPC with ");
+    line.decimal(sv(st).reserve_blocks);
+    line.text(" blocks kept for metadata; unlink and commit freed ");
+    line.decimal(sv(st).free_blocks - fullFree);
+    KernelLog.send(LogLevel.Info, line);
+    return cfst_engine_unmount(bd, reason);
+}
+
+/// The newer root's tree is unreadable: mount falls back to the older slot.
+/// Safety: `reason` writable.
+@cfg("CONFIG_DEBUG")
+@export("selftest_cosmofs_fallback")
+unsafe fn selftestFallback(reason: *mut *CChar) -> bool {
+    var bd = 0 as *mut blkdev;
+    if (!cfst_engine_mount(borrow mut bd as *mut *mut blkdev, 512, reason)) {
+        return false;
+    }
+    let none = 0 as *mut vnode;
+    let old = c("/mnt/eng/old\0");
+    if (!(cfst_write_file(old, "old".ptr as *void, 3))) {
+        return failed(reason, "check failed: write_file(ENG \"/old\", \"old\", 3) at line 1122\0");
+    }
+    if (!(vfs_sync() == 0)) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 1125\0");
+    }
+    if (!(cfst_write_file(c("/mnt/eng/new\0"), "new".ptr as *void, 3))) {
+        return failed(reason, "check failed: write_file(ENG \"/new\", \"new\", 3) at line 1128\0");
+    }
+    if (!(vfs_sync() == 0)) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 1131\0");
+    }
+    var stSlot = [0u64; 16];
+    let st = borrow mut stSlot as *mut [u64; 16] as *mut cosmofs_stats;
+    if (!(cfst_basic_floor_stats(cfst_mount_of(eng()), st) == 0 && sv(st).generation == 3)) {
+        return failed(reason,
+            "check failed: cosmofs_stats(mount_of(ENG), &st) == 0 && st.generation == 3 at line 1137\0");
+    }
+    // Unmount without the bitmap-only commit that reclaims the pending frees, so the slots hold exactly generations 2
+    // and 3.
+    cosmofs_test_discard_on_unmount(cfst_mount_of(eng()), true);
+    if (!(umount(eng()) == 0)) {
+        return failed(reason, "check failed: vfs_umount(ENG) == 0 at line 1143\0");
+    }
+    // Corrupt the newer root's inode map root block: the tree does not load.
+    var p = 0 as *mut spool;
+    if (!(pool_open(bd, borrow mut p as *mut *mut spool) == 0)) {
+        return failed(reason, "check failed: pool_open(bd, &p) == 0 at line 1148\0");
+    }
+    let blk = kmalloc(BLOCK, 0) as *mut u8;
+    if (!(!blk.isNull())) {
+        return failed(reason, "check failed: blk != NULL at line 1152\0");
+    }
+    var imapRoot: u64 = 0;
+    var newerGen: u64 = 0;
+    for (slot in 0u64..2) {
+        if (!(pool_read(p, slot, blk as *mut void) == 0)) {
+            return failed(reason, "check failed: pool_read(p, slot, blk) == 0 at line 1158\0");
+        }
+        let sb = Slice.fromRaw(blk as *u8, BLOCK);
+        let gen = ByteOrder.readU64LE(sb, SUPER_GENERATION);
+        if (memcmp(blk as *void, "COSMOFS1".ptr as *void, 8) == 0 && gen > newerGen) {
+            newerGen = gen;
+            imapRoot = ByteOrder.readU64LE(sb, SUPER_IMAP_ROOT);
+        }
+    }
+    kfree(blk as *mut void);
+    pool_close(p);
+    if (!(newerGen == 3 && imapRoot >= 2)) {
+        return failed(reason, "check failed: newer_gen == 3 && imap_root >= 2 at line 1170\0");
+    }
+    if (!(cfst_corrupt_block(bd, imapRoot, 100))) {
+        return failed(reason, "check failed: corrupt_block(bd, imap_root, 100) at line 1173\0");
+    }
+    // falls back with a warning
+    if (!(vfs_mount(eng(), c("cosmofs\0"), bd, 0) == 0)) {
+        return failed(reason, "check failed: vfs_mount(ENG, \"cosmofs\", bd, 0) == 0 at line 1177\0");
+    }
+    if (!(cfst_basic_floor_stats(cfst_mount_of(eng()), st) == 0 && sv(st).generation == 2)) {
+        return failed(reason,
+            "check failed: cosmofs_stats(mount_of(ENG), &st) == 0 && st.generation == 2 at line 1181\0");
+    }
+    if (!(cfst_read_matches(old, "old".ptr as *void, 3))) {
+        return failed(reason, "check failed: read_matches(ENG \"/old\", \"old\", 3) at line 1184\0");
+    }
+    var sSlot = [0u64; 8];
+    let s = borrow mut sSlot as *mut [u64; 8] as *mut cosmo_stat;
+    // generation 3's work is gone with its root
+    if (!(vfs_stat(none, c("/mnt/eng/new\0"), s) == -ENOENT)) {
+        return failed(reason, "check failed: vfs_stat(NULL, ENG \"/new\", &s) == -ENOENT at line 1190\0");
+    }
+    // The next commit writes over the broken slot and the pair is healthy.
+    if (!(cfst_write_file(c("/mnt/eng/after\0"), "after".ptr as *void, 5))) {
+        return failed(reason, "check failed: write_file(ENG \"/after\", \"after\", 5) at line 1194\0");
+    }
+    if (!(vfs_sync() == 0)) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 1197\0");
+    }
+    if (!(umount(eng()) == 0)) {
+        return failed(reason, "check failed: vfs_umount(ENG) == 0 at line 1200\0");
+    }
+    if (!(vfs_mount(eng(), c("cosmofs\0"), bd, 0) == 0)) {
+        return failed(reason, "check failed: vfs_mount(ENG, \"cosmofs\", bd, 0) == 0 at line 1203\0");
+    }
+    // 3, plus the unmount's bitmap commit
+    if (!(cfst_basic_floor_stats(cfst_mount_of(eng()), st) == 0 && sv(st).generation >= 3)) {
+        return failed(reason,
+            "check failed: cosmofs_stats(mount_of(ENG), &st) == 0 && st.generation >= 3 at line 1208\0");
+    }
+    if (!(cfst_read_matches(c("/mnt/eng/after\0"), "after".ptr as *void, 5)
+            && cfst_read_matches(old, "old".ptr as *void, 3))) {
+        return failed(reason,
+            "check failed: read_matches(ENG \"/after\", \"after\", 5) && ...(ENG \"/old\", \"old\", 3) at line 1213\0");
+    }
+    KernelLog.write(LogLevel.Info,
+        "selftest: cosmofs-fallback: an unreadable generation-3 tree fell back to generation 2 and was replaced");
+    return cfst_engine_unmount(bd, reason);
+}
+
+/// The writeback thread commits on its own once the interval has passed.
+/// Safety: `reason` writable.
+@cfg("CONFIG_DEBUG")
+@export("selftest_cosmofs_writeback")
+unsafe fn selftestWriteback(reason: *mut *CChar) -> bool {
+    var bd = 0 as *mut blkdev;
+    if (!cfst_engine_mount(borrow mut bd as *mut *mut blkdev, 512, reason)) {
+        return false;
+    }
+    let mnt = cfst_mount_of(eng());
+    cosmofs_test_set_writeback(mnt, true);
+    cosmofs_test_set_writeback_interval(mnt, 50);
+    var s0Slot = [0u64; 16];
+    var s1Slot = [0u64; 16];
+    var s2Slot = [0u64; 16];
+    let st0 = borrow mut s0Slot as *mut [u64; 16] as *mut cosmofs_stats;
+    let st1 = borrow mut s1Slot as *mut [u64; 16] as *mut cosmofs_stats;
+    let st2 = borrow mut s2Slot as *mut [u64; 16] as *mut cosmofs_stats;
+    if (!(cfst_basic_floor_stats(mnt, st0) == 0)) {
+        return failed(reason, "check failed: cosmofs_stats(mnt, &st0) == 0 at line 1239\0");
+    }
+    if (!(cfst_write_file(c("/mnt/eng/auto\0"), "auto".ptr as *void, 4))) {
+        return failed(reason, "check failed: write_file(ENG \"/auto\", \"auto\", 4) at line 1242\0");
+    }
+    let deadline = clock_now_ns() + 2000000000;
+    while (true) {
+        thread_sleep_ns(20000000);
+        if (!(cfst_basic_floor_stats(mnt, st1) == 0)) {
+            return failed(reason, "check failed: cosmofs_stats(mnt, &st1) == 0 at line 1248\0");
+        }
+        if (!(sv(st1).generation == sv(st0).generation && clock_now_ns() < deadline)) {
+            break;
+        }
+    }
+    if (!(sv(st1).generation == sv(st0).generation + 1 && sv(st1).wb_commits == sv(st0).wb_commits + 1)) {
+        return failed(reason,
+            "check failed: st1.generation == st0.generation + 1 && st1.wb_c...ts == st0.wb_commits + 1 at line 1256\0");
+    }
+    // Nothing more dirty: no further commits happen on their own.
+    thread_sleep_ns(200000000);
+    if (!(cfst_basic_floor_stats(mnt, st2) == 0 && sv(st2).generation == sv(st1).generation)) {
+        return failed(reason,
+            "check failed: cosmofs_stats(mnt, &st2) == 0 && st2.generation == st1.generation at line 1262\0");
+    }
+    // The data is on disk without anyone calling sync.
+    cosmofs_test_discard_on_unmount(mnt, true);
+    if (!(umount(eng()) == 0)) {
+        return failed(reason, "check failed: vfs_umount(ENG) == 0 at line 1267\0");
+    }
+    if (!(vfs_mount(eng(), c("cosmofs\0"), bd, 0) == 0)) {
+        return failed(reason, "check failed: vfs_mount(ENG, \"cosmofs\", bd, 0) == 0 at line 1270\0");
+    }
+    if (!(cfst_read_matches(c("/mnt/eng/auto\0"), "auto".ptr as *void, 4))) {
+        return failed(reason, "check failed: read_matches(ENG \"/auto\", \"auto\", 4) at line 1273\0");
+    }
+    var buffer = [0u8; 96];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: cosmofs-writeback: the thread committed generation ");
+    line.decimal(sv(st1).generation);
+    line.text(" on its own");
+    KernelLog.send(LogLevel.Info, line);
+    return cfst_engine_unmount(bd, reason);
+}
+
+/// The metadata header declares its checksum algorithm, and an algorithm this build cannot verify is a distinct fault
+/// from a checksum that did not match.
+/// Safety: `reason` writable.
+@cfg("CONFIG_DEBUG")
+@export("selftest_cosmofs_metadata_csum_id")
+unsafe fn selftestMetadataCsumId(reason: *mut *CChar) -> bool {
+    let block = kmalloc(BLOCK, 0) as *mut u8;
+    if (!(!block.isNull())) {
+        return failed(reason, "check failed: block != NULL at line 1292\0");
+    }
+    memset(block as *mut void, 0xa5, BLOCK);
+    let mac = 0 as *cfs_mac;
+    let h = SliceMut.fromRaw(block, BLOCK);
+
+    // A freshly sealed block names CRC32C and verifies.
+    cfs_mhdr_seal_raw(mac, block as *mut void, KIND_INODES, 42, 7);
+    let fSealed = cfs_mhdr_fault_of(mac, block as *void, 42, KIND_INODES);
+    let sealedAlgo = ByteOrder.readU32LE(h, MHDR_CSUM_ALGO);
+
+    // A pre-v11 image left the field zero; it still reads as CRC32C.
+    ByteOrder.writeU32LE(h, MHDR_CSUM_ALGO, CSUM_NONE);
+    ByteOrder.writeU32LE(h, MHDR_CRC, cfst_block_crc(block as *u8));
+    let fLegacy = cfs_mhdr_fault_of(mac, block as *void, 42, KIND_INODES);
+
+    // A block declaring an algorithm this build has no verifier for, with a CRC that is itself valid: the fault is
+    // MHDR_ALGO, decided before the checksum, so a format or algorithm skew is not read as damage.
+    ByteOrder.writeU32LE(h, MHDR_CSUM_ALGO, CSUM_POLY1305);
+    ByteOrder.writeU32LE(h, MHDR_CRC, cfst_block_crc(block as *u8));
+    let fAlgo = cfs_mhdr_fault_of(mac, block as *void, 42, KIND_INODES);
+
+    // One flipped payload bit under CRC32C is MHDR_CRC, distinct from above.
+    cfs_mhdr_seal_raw(mac, block as *mut void, KIND_INODES, 42, 7);
+    h[MHDR_SIZE + 3] = h[MHDR_SIZE + 3] ^ 0x01;
+    let fCorrupt = cfs_mhdr_fault_of(mac, block as *void, 42, KIND_INODES);
+
+    // csum_algo sits after crc but is inside the checksummed region: block_crc zeroes only the 4 crc bytes and covers
+    // the rest of the block. Flip the field between two *supported* values (1 -> 0), so the algorithm check still
+    // passes, without recomputing the CRC: the block no longer verifies, which it could not do unless csum_algo were
+    // covered by crc.
+    cfs_mhdr_seal_raw(mac, block as *mut void, KIND_INODES, 42, 7);
+    ByteOrder.writeU32LE(h, MHDR_CSUM_ALGO, CSUM_NONE);
+    let fCovered = cfs_mhdr_fault_of(mac, block as *void, 42, KIND_INODES);
+
+    kfree(block as *mut void); // free before any check can return
+
+    if (!(fSealed == MHDR_OK)) {
+        return failed(reason, "check failed: f_sealed == MHDR_OK at line 1330\0");
+    }
+    if (!(sealedAlgo == CSUM_CRC32C)) {
+        return failed(reason, "check failed: sealed_algo == CFS_CSUM_CRC32C at line 1333\0");
+    }
+    if (!(fLegacy == MHDR_OK)) {
+        return failed(reason, "check failed: f_legacy == MHDR_OK at line 1336\0");
+    }
+    if (!(fAlgo == MHDR_ALGO)) {
+        return failed(reason, "check failed: f_algo == MHDR_ALGO at line 1339\0");
+    }
+    if (!(fCorrupt == MHDR_CRC_FAULT)) {
+        return failed(reason, "check failed: f_corrupt == MHDR_CRC at line 1342\0");
+    }
+    // csum_algo is covered by the checksum
+    if (!(fCovered == MHDR_CRC_FAULT)) {
+        return failed(reason, "check failed: f_covered == MHDR_CRC at line 1346\0");
+    }
+    var buffer = [0u8; 160];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: cosmofs-metadata-csum-id: the metadata header declares its checksum algorithm; ");
+    line.text("an unsupported one is a distinct fault from a bad checksum");
+    KernelLog.send(LogLevel.Info, line);
+    return true;
+}
