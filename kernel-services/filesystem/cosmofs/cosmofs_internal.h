@@ -741,6 +741,35 @@ int cfs_vnode_get_tagged(struct cfs *fs, uint64_t ino, unsigned tag, const struc
 extern const struct vnode_ops cfs_dir_ops;
 extern const struct vnode_ops cfs_file_ops;
 extern const struct vnode_ops cfs_lnk_ops;
+/* cosmofs.c, for the directory operations: a directory's blocks read,
+ * written and counted; an entry found, added and removed; whether a
+ * directory is empty; the .snapshots directory, whether a vnode is it,
+ * and a vnode's snapshot tag. */
+int cfs_dir_read_block(struct cfs *fs, struct vnode *dir, uint64_t lblk, uint8_t *buf);
+int cfs_dir_write_block(struct cfs *fs, struct vnode *dir, uint64_t lblk, const uint8_t *buf);
+uint64_t cfs_dir_blocks(const struct vnode *dir);
+int cfs_dir_find(struct cfs *fs, struct vnode *dir, const char *name, size_t len, uint8_t *block,
+                 uint64_t *lblk_out, unsigned *slot_out);
+int cfs_dir_add(struct cfs *fs, struct vnode *dir, const char *name, size_t len, uint64_t ino, unsigned type,
+                uint8_t *block);
+int cfs_dir_remove_slot(struct cfs *fs, struct vnode *dir, uint64_t lblk, unsigned slot, uint8_t *block);
+bool cfs_dir_is_empty(struct cfs *fs, struct vnode *dir, uint8_t *block);
+bool cfs_is_snapdir(struct vnode *vn);
+unsigned cfs_snap_tag_of(struct vnode *vn);
+int cfs_snapdir_get(struct cfs *fs, struct vnode **out);
+/* cosmofs_dir.c: a directory's and a link's vnode operations, which the
+ * tables in cosmofs.c name. */
+int cfs_lookup(struct vnode *dir, const char *name, size_t len, struct vnode **out);
+int cfs_create(struct vnode *dir, const char *name, size_t len, uint32_t mode, struct vnode **out);
+int cfs_symlink(struct vnode *dir, const char *name, size_t len, const char *target, struct vnode **out);
+int cfs_readlink(struct vnode *vn, char *buf, size_t len);
+int cfs_mkdir(struct vnode *dir, const char *name, size_t len, uint32_t mode, struct vnode **out);
+int cfs_link(struct vnode *dir, const char *name, size_t len, struct vnode *target);
+int cfs_unlink(struct vnode *dir, const char *name, size_t len, struct vnode *victim);
+int cfs_rmdir(struct vnode *dir, const char *name, size_t len, struct vnode *victim);
+int cfs_rename(struct vnode *odir, const char *oname, size_t olen, struct vnode *victim, struct vnode *ndir,
+               const char *nname, size_t nlen, struct vnode *replaced);
+int cfs_readdir(struct vnode *dir, uint64_t *pos, vfs_dirent_cb cb, void *arg);
 int cfs_vnode_prepare(struct cfs *fs, struct vnode *vn);
 bool cfs_tree_readonly(struct cfs *fs, struct vnode *vn);
 int cfs_lock_tree_w(struct cfs *fs, struct vnode *vn);
