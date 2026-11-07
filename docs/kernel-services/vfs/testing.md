@@ -43,13 +43,14 @@ Every lock, detach, orphaning and result, and each namespace's view and each mou
 digest; the test checks the lock order and that every reference is freed. Every line runs; clang and gcc give the
 same digest, for the C and for the port.
 
-`tests/host/test_blkctl.c` holds `/dev/blkctl` (`blkctl.c`, roadmap 2.0 SA7) to a digest recorded from the C over
+`tests/host/test_blkctl.c` holds `/dev/blkctl` (`blkctl.cee`, roadmap 2.0 SA7) to a digest recorded from the C over
 random sessions: files opened with and without the privilege and while the allocator fails; commands of every op,
 well formed and not -- short, of the wrong version, with data an op does not take, names without their NUL, labels
 of every length and byte, transfers of every size, mirrors and keyed pools -- against devices mounted, partitioned,
 read-only, test disks or gone, whose operations fail now and then; each result read back into buffers of every size.
 Every call, result and byte read back, and the keyed command's copy as it is freed (its key wiped), are in the
-digest; every device reference is given back. Every line runs; clang and gcc give the same digest. It found that a
+digest; every device reference is given back. Every line runs; clang and gcc give the same digest, for the C and
+for the port. It found that a
 command refused before it reached a device (no privilege, short, wrong version, data or label refused) left the
 previous command's result to be read as its own; blkctl.h says a failed command leaves none, and now none does.
 

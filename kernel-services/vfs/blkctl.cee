@@ -1,0 +1,621 @@
+// blkctl.cee - /dev/blkctl: the operator's channel to block devices (uapi/cosmo/blkctl.h;
+// docs/kernel-services/vfs/design.md, "The block-device channel"; roadmap M2), in CeeSafe: roadmap 2.0 SA7.
+// tests/host/test_blkctl.c holds it to the digest of the C it replaced.
+//
+// What the installer needs from the kernel to put a system on a blank disk: the list of devices (with partitions and
+// which one the loader was read from), raw sector reads and writes, a flush, a partition rescan, and an empty
+// filesystem. It lives beside /dev/fsctl rather than in the block layer because two of its answers are about mounts
+// (D8: the block layer knows no filesystem).
+//
+// A write is refused while the device, its disk or one of its partitions is mounted: that is the one mistake the
+// kernel can see and the operator cannot undo. Everything about *what* is written is the caller's.
+//
+// The devices, the files and the commands' structs stay C (blk.h, vfs.h, blkctl.h). A file's state -- its lock and
+// the result of its last command -- is a C struct round a struct mutex, whose size the build's lock debugging decides:
+// blkctl_floor.c defines it and says where its fields are, and keeps the operation table, C data naming the
+// operations by address.
+
+@header("kernel/blk.h", "kernel/bootinfo.h", "kernel/cred.h", "kernel/errno.h", "kernel/kmalloc.h", "kernel/log.h",
+    "kernel/mutex.h", "kernel/part.h", "kernel/string.h", "kernel/vfs.h", "uapi/cosmo/blkctl.h")
+extern "C" {
+    struct blkdev {
+        name: [u8; 16];
+        sector_size: u32;
+        capacity: u64;
+        read_only: bool;
+    }
+    @ctype("blk_part_info_t")
+    struct PartInfo {
+        disk: [u8; 16];
+        index: u32;
+        start: u64;
+        uuid: [u8; 16];
+        @cname("type") kind: [u8; 16];
+    }
+    struct credentials;
+    struct vnode;
+    struct file {
+        priv: *mut void;
+    }
+    struct chrdev_ops;
+    struct cosmo_keyslot;
+    struct cosmo_blkctl {
+        version: u16;
+        op: u16;
+        count: u32;
+        sector: u64;
+        name: [u8; 16];
+        fstype: [u8; 16];
+    }
+    struct cosmo_blkctl_keyed {
+        mirror: [u8; 16];
+        label: [u8; 16];
+        uuid: [u8; 16];
+        master: [u8; 32];
+    }
+    struct cosmo_blkctl_dev {
+        name: [u8; 16];
+        disk: [u8; 16];
+        sectors: u64;
+        sector_size: u32;
+        flags: u32;
+        start: u64;
+        index: u32;
+        reserved: u32;
+        uuid: [u8; 16];
+        @cname("type") kind: [u8; 16];
+    }
+    struct cosmo_blkctl_list {
+        version: u32;
+        count: u32;
+    }
+    struct cosmo_blkctl_rescan {
+        partitions: u32;
+        reserved: u32;
+    }
+    fn cred_current() -> *credentials;
+    fn cred_has(c: *credentials, priv: u32) -> bool;
+    fn memcpy(dst: *mut void, src: *void, n: usize) -> *mut void;
+    fn memset(p: *mut void, c: i32, n: usize) -> *mut void;
+    fn bootinfo_boot_partuuid(out: *mut u8) -> bool;
+    fn blk_count() -> u32;
+    fn blk_nth(i: u32) -> *mut blkdev;
+    fn blk_find(name: *CChar) -> *mut blkdev;
+    fn blkdev_put(bd: *mut blkdev);
+    fn blk_is_test_disk(bd: *blkdev) -> bool;
+    fn blk_part_info(bd: *blkdev, out: *mut PartInfo) -> bool;
+    fn blk_part_any(disk: *blkdev) -> bool;
+    fn blk_part_scan(disk: *mut blkdev, nparts: *mut u32) -> i32;
+    fn blk_read(bd: *mut blkdev, sector: u64, nsectors: u32, buf: *mut void) -> i32;
+    fn blk_write(bd: *mut blkdev, sector: u64, nsectors: u32, buf: *void) -> i32;
+    fn blk_flush(bd: *mut blkdev) -> i32;
+    fn vfs_bdev_mounted(bd: *blkdev) -> bool;
+    fn vfs_format(fsname: *CChar, bd: *mut blkdev, label: *CChar) -> i32;
+    fn vfs_format_mirror(fsname: *CChar, bd: *mut *mut blkdev, n: u32, label: *CChar) -> i32;
+    fn vfs_format_keyed(
+        fsname: *CChar, bd: *mut *mut blkdev, n: u32, label: *CChar, uuid: *u8, master: *u8, slots: *cosmo_keyslot,
+    ) -> i32;
+    fn ramfs_mkchr(path: *CChar, mode: u32, ops: *chrdev_ops, priv: *mut void, out: *mut *mut vnode) -> i32;
+
+    // blkctl_floor.c
+    fn blkctl_floor_ops() -> *chrdev_ops;
+    fn blkctl_floor_open_layout(which: u32) -> usize;
+}
+
+// errno.h, kmalloc.h, cred.h and blkctl.h, which blkctl_floor.c checks.
+const EPERM: i64 = 1;
+const ENOMEM: i64 = 12;
+const EBUSY: i64 = 16;
+const ENODEV: i64 = 19;
+const EINVAL: i64 = 22;
+const ERANGE: i64 = 34;
+const KMEM_ZERO: u32 = 1;
+const PRIV_SYS_ADMIN: u32 = 2;
+const VERSION: u16 = 1;
+const OP_LIST: u16 = 1;
+const OP_READ: u16 = 2;
+const OP_WRITE: u16 = 3;
+const OP_FLUSH: u16 = 4;
+const OP_RESCAN: u16 = 5;
+const OP_FORMAT: u16 = 6;
+const OP_FORMAT_MIRROR: u16 = 7;
+const OP_FORMAT_KEYED: u16 = 8;
+const IO_MAX: u64 = 32768;
+const NAME: usize = 16;
+const LABEL: usize = 16;
+const FLAG_PART: u32 = 1;
+const FLAG_RDONLY: u32 = 2;
+const FLAG_BOOT: u32 = 4;
+const FLAG_MOUNTED: u32 = 8;
+const FLAG_TEST: u32 = 16;
+// The structs' sizes, and where a keyed command's slots begin (after the master key).
+const CMD_SIZE: usize = 48;
+const KEYED_SIZE: usize = 848;
+const KEYED_SLOTS_AT: usize = 80;
+const DEV_SIZE: usize = 96;
+const LIST_SIZE: usize = 8;
+const RESCAN_SIZE: usize = 8;
+// blkctl_floor_open_layout's questions about struct blkctl_open; its lock is at 0.
+const OPEN_SIZE: u32 = 0;
+const OPEN_RESULT: u32 = 1;
+const OPEN_LEN: u32 = 2;
+// rw-------: root's alone, besides the privilege.
+const MODE: u32 = 0x180;
+
+/// The node, once made.
+static mut NODE: *mut vnode = 0 as *mut vnode;
+
+// ---- A file's state: struct blkctl_open, the result of this file's last command, read back until the next one ----
+
+/// Safety: `o` is a file's struct blkctl_open.
+unsafe fn lockOf(o: *mut void) -> *mut mutex => o as *mut mutex;
+
+/// Safety: `o` is a file's struct blkctl_open.
+unsafe fn resultOf(o: *mut void) -> *mut *mut void =>
+    (o as *mut u8).add(blkctl_floor_open_layout(OPEN_RESULT)) as *mut *mut void;
+
+/// Safety: `o` is a file's struct blkctl_open.
+unsafe fn lenOf(o: *mut void) -> *mut usize => (o as *mut u8).add(blkctl_floor_open_layout(OPEN_LEN)) as *mut usize;
+
+/// Replace this file's result. Takes ownership of `buf`.
+/// Safety: `o` is a file's struct blkctl_open; `buf` is null or kmalloc'd, `len` bytes.
+unsafe fn setResult(o: *mut void, buf: *mut void, len: usize) {
+    mutex_lock(lockOf(o));
+    let result = Ptr.toBorrowMut(resultOf(o));
+    let old = *result;
+    *result = buf;
+    let size = Ptr.toBorrowMut(lenOf(o));
+    *size = len;
+    mutex_unlock(lockOf(o));
+    kfree(old);
+}
+
+/// Safety: `vn` is the node; `f` is the file being opened.
+@export("blkctl_open_file")
+unsafe fn openFile(vn: *mut vnode, f: *mut file) -> i32 {
+    let _ = vn;
+    if (!cred_has(cred_current(), PRIV_SYS_ADMIN)) {
+        // The mode is 0600 as well; this is the check that cannot be chmod'ed away.
+        return truncate<i32>(-EPERM);
+    }
+    let o = kmalloc(blkctl_floor_open_layout(OPEN_SIZE), KMEM_ZERO);
+    if (o.isNull()) {
+        return truncate<i32>(-ENOMEM);
+    }
+    mutex_init(lockOf(o), "blkctl-open\0".ptr as *CChar);
+    let opened = Ptr.toBorrowMut(f);
+    opened.priv = o;
+    return 0;
+}
+
+/// Safety: `f` is a file of the node, closed for the last time.
+@export("blkctl_release")
+unsafe fn release(vn: *mut vnode, f: *mut file) {
+    let _ = vn;
+    let o = Ptr.toBorrow(f as *file).priv;
+    if (o.isNull()) {
+        return;
+    }
+    kfree(*Ptr.toBorrow(resultOf(o) as **mut void));
+    kfree(o);
+    let closed = Ptr.toBorrowMut(f);
+    closed.priv = 0 as *mut void;
+}
+
+// ---- Commands ----
+
+/// Whether FORMAT's rules refuse a label's byte: printable, no blank -- blkid quotes it, fstab fields split on blanks.
+fn badLabelByte(c: u8) -> bool => c < 0x21 || c > 0x7e || c == 0x22 || c == 0x5c;
+
+/// A NUL-terminated name into `dst`, as strlcpy into a zeroed field: at most NAME - 1 bytes.
+fn copyName(dst: borrow mut [u8; 16], src: borrow [u8; 16]) {
+    for (i in 0..NAME - 1) {
+        if (src[i] == 0) {
+            break;
+        }
+        dst[i] = src[i];
+    }
+}
+
+/// One record of LIST.
+/// Safety: `d` is a record's bytes; `bd` is a live device.
+unsafe fn fillDev(d: *mut cosmo_blkctl_dev, bd: *mut blkdev, boot: borrow [u8; 16], haveBoot: bool) {
+    let _ = memset(d as *mut void, 0, DEV_SIZE);
+    let dev = Ptr.toBorrow(bd as *blkdev);
+    let rec = Ptr.toBorrowMut(d);
+    copyName(mut rec.name, dev.name);
+    rec.sectors = dev.capacity;
+    rec.sector_size = dev.sector_size;
+    if (dev.read_only) {
+        rec.flags = rec.flags | FLAG_RDONLY;
+    }
+    if (vfs_bdev_mounted(bd as *blkdev)) {
+        rec.flags = rec.flags | FLAG_MOUNTED;
+    }
+    if (blk_is_test_disk(bd as *blkdev)) {
+        rec.flags = rec.flags | FLAG_TEST;
+    }
+    var slot: [u64; 8] = [0; 8]; // a blk_part_info_t
+    let pi = borrow mut slot as *mut [u64; 8] as *mut PartInfo;
+    if (blk_part_info(bd as *blkdev, pi)) {
+        let part = Ptr.toBorrow(pi as *PartInfo);
+        rec.flags = rec.flags | FLAG_PART;
+        copyName(mut rec.disk, part.disk);
+        rec.start = part.start;
+        rec.index = part.index;
+        rec.uuid = part.uuid;
+        rec.kind = part.kind;
+        if (haveBoot) {
+            var same = true;
+            for (i in 0..16) {
+                if (part.uuid[i] != boot[i]) {
+                    same = false;
+                }
+            }
+            if (same) {
+                rec.flags = rec.flags | FLAG_BOOT;
+            }
+        }
+    }
+}
+
+/// LIST.
+/// Safety: `o` is a file's struct blkctl_open.
+unsafe fn list(o: *mut void) -> i64 {
+    var boot: [u8; 16] = [0; 16];
+    let haveBoot = bootinfo_boot_partuuid(borrow mut boot as *mut [u8; 16] as *mut u8);
+    // Sized now, filled by position: a device that registers in between is left out, one that goes away shortens the
+    // list. Never more records than were sized for.
+    let want = blk_count();
+    let buf = kmalloc(LIST_SIZE + want as usize * DEV_SIZE, KMEM_ZERO) as *mut u8;
+    if (buf.isNull()) {
+        return -ENOMEM;
+    }
+    var n: u32 = 0;
+    var i: u32 = 0;
+    while (n < want) {
+        let bd = blk_nth(i);
+        if (bd.isNull()) {
+            break;
+        }
+        fillDev(buf.add(LIST_SIZE + n as usize * DEV_SIZE) as *mut cosmo_blkctl_dev, bd, boot, haveBoot);
+        n = n + 1;
+        blkdev_put(bd);
+        i = i + 1;
+    }
+    let hdr = Ptr.toBorrowMut(buf as *mut cosmo_blkctl_list);
+    hdr.version = VERSION as u32;
+    hdr.count = n;
+    setResult(o, buf as *mut void, LIST_SIZE + n as usize * DEV_SIZE);
+    return 0;
+}
+
+/// A transfer's size in bytes, or a negative errno.
+/// Safety: `bd` is a live device.
+unsafe fn ioBytes(bd: *mut blkdev, count: u32) -> i64 {
+    if (count == 0) {
+        return -EINVAL;
+    }
+    let bytes = count as u64 * Ptr.toBorrow(bd as *blkdev).sector_size as u64;
+    if (bytes > IO_MAX) {
+        return -EINVAL;
+    }
+    return truncate<i64>(bytes);
+}
+
+/// READ: `count` sectors from `sector`, into a buffer of the kernel's (DMA-able, unlike the syscall's bounce).
+/// Safety: `o` is a file's struct blkctl_open; `bd` is a live device.
+unsafe fn readSectors(o: *mut void, bd: *mut blkdev, cmd: *cosmo_blkctl) -> i64 {
+    let c = Ptr.toBorrow(cmd);
+    let bytes = ioBytes(bd, c.count);
+    if (bytes < 0) {
+        return bytes;
+    }
+    let buf = kmalloc(truncate<usize>(bytes), 0);
+    if (buf.isNull()) {
+        return -ENOMEM;
+    }
+    let rc = blk_read(bd, c.sector, c.count, buf);
+    if (rc != 0) {
+        kfree(buf);
+        return rc as i64;
+    }
+    setResult(o, buf, truncate<usize>(bytes));
+    return 0;
+}
+
+/// WRITE: the data is exactly `count` sectors, in the same write, and the device is not mounted.
+/// Safety: `bd` is a live device; `data` holds `len` bytes.
+unsafe fn writeSectors(bd: *mut blkdev, cmd: *cosmo_blkctl, data: *u8, len: usize) -> i64 {
+    let c = Ptr.toBorrow(cmd);
+    let bytes = ioBytes(bd, c.count);
+    if (bytes < 0) {
+        return bytes;
+    }
+    if (len != truncate<usize>(bytes)) {
+        return -EINVAL;
+    }
+    if (vfs_bdev_mounted(bd as *blkdev)) {
+        return -EBUSY;
+    }
+    let buf = kmalloc(len, 0);
+    if (buf.isNull()) {
+        return -ENOMEM;
+    }
+    let _ = memcpy(buf, data as *void, len);
+    let rc = blk_write(bd, c.sector, c.count, buf as *void);
+    kfree(buf);
+    return rc as i64;
+}
+
+/// A NUL at both names' ends: the device's and the filesystem type's.
+/// Safety: `cmd` is the command's copy.
+unsafe fn terminate(cmd: *mut cosmo_blkctl) {
+    let c = Ptr.toBorrowMut(cmd);
+    c.name[NAME - 1] = 0;
+    c.fstype[NAME - 1] = 0;
+}
+
+/// Safety: `cmd` is the command's copy.
+unsafe fn nameOf(cmd: *mut cosmo_blkctl) -> *CChar =>
+    (cmd as *u8).add(offsetOf<cosmo_blkctl>(name)) as *CChar;
+
+/// Safety: `cmd` is the command's copy.
+unsafe fn fstypeOf(cmd: *mut cosmo_blkctl) -> *CChar =>
+    (cmd as *u8).add(offsetOf<cosmo_blkctl>(fstype)) as *CChar;
+
+/// FORMAT_KEYED (roadmap 1.2 B5): an encrypted pool on the device, or a mirror of it and `mirror`, from the master
+/// key and the slots user space sealed. The kernel's copy of the key is wiped here; the filesystem keeps it in its key
+/// table for the installer's mount.
+/// Safety: `o` is a file's struct blkctl_open; `cmd` is the command's copy; `buf` holds `len` bytes.
+unsafe fn formatKeyed(o: *mut void, cmd: *mut cosmo_blkctl, buf: *u8, len: usize) -> i64 {
+    if (len != CMD_SIZE + KEYED_SIZE) {
+        return -EINVAL;
+    }
+    let k = kmalloc(KEYED_SIZE, 0) as *mut cosmo_blkctl_keyed;
+    if (k.isNull()) {
+        return -ENOMEM;
+    }
+    let _ = memcpy(k as *mut void, buf.add(CMD_SIZE) as *void, KEYED_SIZE);
+    let keyed = Ptr.toBorrow(k as *cosmo_blkctl_keyed);
+    var rc: i64 = 0;
+    var label: [u8; 17] = [0; 17];
+    var ended = false;
+    for (i in 0..NAME) {
+        if (keyed.mirror[i] == 0) {
+            ended = true;
+        }
+    }
+    if (!ended) {
+        rc = -EINVAL;
+    }
+    var i: usize = 0;
+    while (i < LABEL && rc == 0 && keyed.label[i] != 0) {
+        if (badLabelByte(keyed.label[i])) {
+            rc = -EINVAL; // FORMAT's rules
+        }
+        label[i] = keyed.label[i];
+        i = i + 1;
+    }
+    terminate(cmd);
+    var two: [*mut blkdev; 2] = [0 as *mut blkdev, 0 as *mut blkdev];
+    let n: u32 = if (keyed.mirror[0] != 0) 2 else 1;
+    if (rc == 0) {
+        two[0] = blk_find(nameOf(cmd));
+        let mirror = (k as *u8).add(offsetOf<cosmo_blkctl_keyed>(mirror)) as *CChar;
+        two[1] = if (n == 2) blk_find(mirror) else 0 as *mut blkdev;
+        if (two[0].isNull() || (n == 2 && two[1].isNull())) {
+            rc = -ENODEV;
+        }
+    }
+    if (rc == 0 && (blk_part_any(two[0] as *blkdev) || (n == 2 && blk_part_any(two[1] as *blkdev)))) {
+        rc = -EBUSY; // as FORMAT: a whole disk with registered partitions
+    }
+    if (rc == 0) {
+        let at = k as *u8;
+        rc = vfs_format_keyed(
+            fstypeOf(cmd), borrow mut two as *mut [*mut blkdev; 2] as *mut *mut blkdev, n, label[..].ptr as *CChar,
+            at.add(offsetOf<cosmo_blkctl_keyed>(uuid)), at.add(offsetOf<cosmo_blkctl_keyed>(master)),
+            at.add(KEYED_SLOTS_AT) as *cosmo_keyslot,
+        ) as i64;
+    }
+    for (j in 0..2) {
+        if (!two[j].isNull()) {
+            blkdev_put(two[j]);
+        }
+    }
+    let _ = memset(k as *mut void, 0, KEYED_SIZE);
+    kfree(k as *mut void);
+    setResult(o, 0 as *mut void, 0);
+    return if (rc != 0) rc else truncate<i64>(len);
+}
+
+/// One command; the caller clears the result when it fails.
+/// Safety: `o` is a file's struct blkctl_open; `buf` holds `len` bytes.
+unsafe fn command(o: *mut void, buf: *u8, len: usize) -> i64 {
+    if (!cred_has(cred_current(), PRIV_SYS_ADMIN)) {
+        return -EPERM; // the fd may have outlived the privilege that opened it
+    }
+    if (len < CMD_SIZE) {
+        return -EINVAL;
+    }
+    var copy: [u64; 6] = [0; 6]; // a struct cosmo_blkctl
+    let cmd = borrow mut copy as *mut [u64; 6] as *mut cosmo_blkctl;
+    let _ = memcpy(cmd as *mut void, buf as *void, CMD_SIZE);
+    let version = Ptr.toBorrow(cmd as *cosmo_blkctl).version;
+    let op = Ptr.toBorrow(cmd as *cosmo_blkctl).op;
+    if (version != VERSION) {
+        return -EINVAL;
+    }
+    let extra = len - CMD_SIZE;
+    if (extra != 0 && op != OP_WRITE && op != OP_FORMAT && op != OP_FORMAT_MIRROR && op != OP_FORMAT_KEYED) {
+        return -EINVAL; // only a WRITE carries data, a FORMAT its label, a FORMAT_MIRROR its second device
+    }
+    if (op == OP_FORMAT_KEYED) {
+        return formatKeyed(o, cmd, buf, len);
+    }
+    var other: [u8; 16] = [0; 16];
+    var labelAt = CMD_SIZE;
+    var labelLen: usize = 0;
+    if (op == OP_FORMAT_MIRROR) {
+        // The second device's name, then (roadmap 1.2 B3) the label, if any.
+        if (extra < NAME || extra > NAME + LABEL) {
+            return -EINVAL;
+        }
+        var ended = false;
+        for (i in 0..NAME) {
+            other[i] = *Ptr.toBorrow(buf.add(CMD_SIZE + i));
+            if (other[i] == 0) {
+                ended = true;
+            }
+        }
+        if (!ended) {
+            return -EINVAL;
+        }
+        labelAt = CMD_SIZE + NAME;
+        labelLen = extra - NAME;
+    }
+    var label: [u8; 17] = [0; 17];
+    if (op == OP_FORMAT) {
+        if (extra > LABEL) {
+            return -EINVAL;
+        }
+        labelLen = extra;
+    }
+    if (op == OP_FORMAT || op == OP_FORMAT_MIRROR) {
+        for (i in 0..labelLen) {
+            let c = *Ptr.toBorrow(buf.add(labelAt + i));
+            if (badLabelByte(c)) {
+                return -EINVAL;
+            }
+            label[i] = c;
+        }
+    }
+    if (op == OP_LIST) {
+        let rc = list(o);
+        return if (rc != 0) rc else truncate<i64>(len);
+    }
+
+    terminate(cmd);
+    let bd = blk_find(nameOf(cmd));
+    if (bd.isNull()) {
+        return -ENODEV;
+    }
+    var rc: i64 = 0;
+    if (op == OP_READ) {
+        rc = readSectors(o, bd, cmd as *cosmo_blkctl);
+    } else if (op == OP_WRITE) {
+        rc = writeSectors(bd, cmd as *cosmo_blkctl, buf.add(CMD_SIZE), extra);
+        if (rc == 0) {
+            setResult(o, 0 as *mut void, 0);
+        }
+    } else if (op == OP_FLUSH) {
+        rc = blk_flush(bd) as i64;
+        if (rc == 0) {
+            setResult(o, 0 as *mut void, 0);
+        }
+    } else if (op == OP_RESCAN) {
+        var nparts: u32 = 0;
+        rc = blk_part_scan(bd, borrow mut nparts as *mut u32) as i64;
+        if (rc == 0) {
+            let r = kmalloc(RESCAN_SIZE, KMEM_ZERO) as *mut cosmo_blkctl_rescan;
+            if (r.isNull()) {
+                rc = -ENOMEM;
+            } else {
+                let rescan = Ptr.toBorrowMut(r);
+                rescan.partitions = nparts;
+                setResult(o, r as *mut void, RESCAN_SIZE);
+            }
+        }
+    } else if (op == OP_FORMAT) {
+        // A whole disk with registered partitions is refused (found in review): the format would overwrite the
+        // primary table and leave those partitions registered over the new filesystem -- and the backup table at the
+        // disk's end would register them again at the next boot. Format a partition, or a disk without a table.
+        if (blk_part_any(bd as *blkdev)) {
+            rc = -EBUSY;
+        } else {
+            rc = vfs_format(fstypeOf(cmd), bd, label[..].ptr as *CChar) as i64;
+            if (rc == 0) {
+                setResult(o, 0 as *mut void, 0);
+            }
+        }
+    } else if (op == OP_FORMAT_MIRROR) {
+        var two: [*mut blkdev; 2] = [bd, blk_find(other[..].ptr as *CChar)];
+        if (two[1].isNull()) {
+            rc = -ENODEV;
+        } else {
+            rc = if (blk_part_any(two[0] as *blkdev) || blk_part_any(two[1] as *blkdev))
+                -EBUSY
+            else
+                vfs_format_mirror(
+                    fstypeOf(cmd), borrow mut two as *mut [*mut blkdev; 2] as *mut *mut blkdev, 2,
+                    label[..].ptr as *CChar,
+                ) as i64;
+            blkdev_put(two[1]);
+            if (rc == 0) {
+                setResult(o, 0 as *mut void, 0);
+            }
+        }
+    } else {
+        rc = -EINVAL;
+    }
+    blkdev_put(bd);
+    return if (rc != 0) rc else truncate<i64>(len);
+}
+
+/// A command that fails leaves no result (blkctl.h): not the one before it, which a reader would take for its own.
+/// Safety: `f` is a file of the node; `buf` holds `len` bytes.
+@export("blkctl_write_file")
+unsafe fn writeFile(vn: *mut vnode, f: *mut file, off: u64, buf: *void, len: usize) -> i64 {
+    let _ = vn;
+    let _ = off;
+    let o = Ptr.toBorrow(f as *file).priv;
+    let rc = if (o.isNull()) -EINVAL else command(o, buf as *u8, len);
+    if (rc < 0 && !o.isNull()) {
+        setResult(o, 0 as *mut void, 0);
+    }
+    return rc;
+}
+
+/// The result of this file's last command, whole or not at all; nothing when it failed or had no result.
+/// Safety: `f` is a file of the node; `buf` holds `len` writable bytes.
+@export("blkctl_read_file")
+unsafe fn readFile(vn: *mut vnode, f: *mut file, off: u64, buf: *mut void, len: usize) -> i64 {
+    let _ = vn;
+    let _ = off;
+    let o = Ptr.toBorrow(f as *file).priv;
+    if (o.isNull()) {
+        return 0;
+    }
+    mutex_lock(lockOf(o));
+    let result = *Ptr.toBorrow(resultOf(o) as **mut void);
+    let size = *Ptr.toBorrow(lenOf(o) as *usize);
+    var n: i64 = 0;
+    if (result.isNull()) {
+        n = 0;
+    } else if (len < size) {
+        n = -ERANGE;
+    } else {
+        let _ = memcpy(buf, result as *void, size);
+        n = truncate<i64>(size);
+    }
+    mutex_unlock(lockOf(o));
+    return n;
+}
+
+/// /dev/blkctl (vfs.h).
+/// Safety: called once the ramfs root exists.
+@export("blkctl_dev_init")
+unsafe fn devInit() {
+    let rc = ramfs_mkchr("/dev/blkctl\0".ptr as *CChar, MODE, blkctl_floor_ops(), 0 as *mut void,
+        borrow mut NODE as *mut *mut vnode);
+    if (rc != 0) {
+        var buffer: [u8; 64] = [0; 64];
+        var line = TextWriter.create(mut buffer[..]);
+        line.text("blkctl: /dev/blkctl: ");
+        line.signed(rc as i64);
+        KernelLog.send(LogLevel.Error, line);
+        return;
+    }
+    KernelLog.write(LogLevel.Info, "blkctl: /dev/blkctl ready (0600): list, read, write, flush, rescan, format");
+}

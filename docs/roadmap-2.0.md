@@ -1585,6 +1585,22 @@ freed (0x20d2c61ff98c5c64, clang and gcc; every line).
 points into itself, and hands over vfs.c's mount table, its lock and
 the root mount, C globals CeeSafe cannot name.
 
+`blkctl.cee`, `/dev/blkctl`: `tests/host/test_blkctl.c` runs random
+sessions -- opens with and without the privilege, commands of every op
+well formed and not, devices mounted, partitioned, read-only or gone,
+their operations failing now and then -- with every result read back
+and the keyed command's copy checked wiped as it is freed
+(0xa8eae3202115e31f, clang and gcc; every line). The C step fixed what
+it found: a command refused before it reached a device (no privilege,
+too short, wrong version, data or a label refused) left the previous
+command's result to be read as its own, though `blkctl.h` says a failed
+command leaves none. `blkctl_floor.c` keeps a file's state, a struct
+round a `struct mutex` whose size the build's lock debugging decides,
+and the operation table. The generated C redeclares
+`bootinfo_boot_partuuid` and `vfs_format_keyed`, whose headers write
+array parameters, with pointers: clang accepts that, and gcc's
+`-Warray-parameter` warns.
+
 Size: about 4.5x.
 
 ### SA8 The Linux personality and the system-call layer

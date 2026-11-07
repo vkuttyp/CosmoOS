@@ -536,7 +536,7 @@ commits only at sync and unmount.
 
 Roadmap M2. What an installer needs from the kernel to put a system on a
 blank disk, and nothing that interprets what is written
-(`kernel-services/vfs/blkctl.c`, `uapi/cosmo/blkctl.h`). Like
+(`kernel-services/vfs/blkctl.cee`, `uapi/cosmo/blkctl.h`). Like
 `/dev/fsctl`: 0600 and `PRIV_SYS_ADMIN` at open and at every write; a
 command is one `struct cosmo_blkctl` written whole (a WRITE is the struct
 and its data in the same write, at most `COSMO_BLKCTL_IO_MAX` = 32 KiB);
