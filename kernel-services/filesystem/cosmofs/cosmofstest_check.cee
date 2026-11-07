@@ -90,8 +90,8 @@ extern "C" {
     fn cosmofs_format(bd: *mut blkdev) -> i32;
     fn cosmofs_format_encrypted(bd: *mut blkdev, key: *void, len: usize) -> i32;
     fn cosmofs_format_pool(bd: *mut *mut blkdev, n: u32) -> i32;
-    /// cosmofstest_check_floor.c: cosmofs_stats, whose name is its struct's too.
-    fn cfst_check_floor_stats(mnt: *mut mount, out: *mut cosmofs_stats) -> i32;
+    /// cosmofstest_lib_floor.c: cosmofs_stats into `out`, a struct cosmofs_stats (a name a struct has too).
+    fn cfst_stats(mnt: *mut mount, out: *mut void) -> i32;
     fn cosmofs_check(mnt: *mut mount, out: *mut cosmofs_check_report, flags: u32) -> i32;
     fn cosmofs_scrub(mnt: *mut mount, out: *mut cosmofs_scrub_stats, flags: u32) -> i32;
     fn cosmofs_rekey(mnt: *mut mount, key: *void, len: usize) -> i32;
@@ -834,7 +834,7 @@ unsafe fn selftestCheckClean(reason: *mut *CChar) -> bool {
     // The arithmetic is the assertion: a walk that saw nothing would report clean and fail here.
     var stSlot = [0u64; 24];
     let st = borrow mut stSlot as *mut [u64; 24] as *mut cosmofs_stats;
-    if (!(cfst_check_floor_stats(mnt(), st) == 0)) {
+    if (!(cfst_stats(mnt(), st as *mut void) == 0)) {
         return failed(reason, "check failed: cosmofs_stats(cfst_mount_of(ENG), &st) == 0 at line 838\0");
     }
     let s = Ptr.toBorrow(st as *cosmofs_stats);

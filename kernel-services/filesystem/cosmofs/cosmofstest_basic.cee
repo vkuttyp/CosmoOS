@@ -71,8 +71,8 @@ extern "C" {
     fn file_sync(f: *mut file) -> i32;
     fn file_stat(f: *mut file, st: *mut cosmo_stat) -> i32;
     fn cosmofs_format(bd: *mut blkdev) -> i32;
-    /// cosmofstest_basic_floor.c: cosmofs_stats, whose name is its record's too.
-    fn cfst_basic_floor_stats(mnt: *mut mount, out: *mut cosmofs_stats) -> i32;
+    /// cosmofstest_lib_floor.c: cosmofs_stats into `out`, a struct cosmofs_stats (a name a struct has too).
+    fn cfst_stats(mnt: *mut mount, out: *mut void) -> i32;
     fn cosmofs_test_set_writeback(mnt: *mut mount, on: bool);
     fn cosmofs_test_set_writeback_interval(mnt: *mut mount, ms: u32);
     fn cosmofs_test_discard_on_unmount(mnt: *mut mount, discard: bool);
@@ -230,7 +230,7 @@ unsafe fn selftestFormat(reason: *mut *CChar) -> bool {
     }
     var stSlot = [0u64; 16];
     let st = borrow mut stSlot as *mut [u64; 16] as *mut cosmofs_stats;
-    if (!(cfst_basic_floor_stats(cfst_mount_of(mnt), st) == 0)) {
+    if (!(cfst_stats(cfst_mount_of(mnt), st as *mut void) == 0)) {
         return failed(reason, "check failed: cosmofs_stats(mount_of(\"/mnt\"), &st) == 0 at line 234\0");
     }
     let total = Ptr.toBorrow(bd as *blkdev).capacity / 8;
@@ -258,7 +258,7 @@ unsafe fn selftestFormat(reason: *mut *CChar) -> bool {
     if (!(vfs_mount(mnt, fs, bd, 0) == 0)) {
         return failed(reason, "check failed: vfs_mount(\"/mnt\", \"cosmofs\", bd, 0) == 0 at line 259\0");
     }
-    if (!(cfst_basic_floor_stats(cfst_mount_of(mnt), st) == 0 && sv(st).generation == 1)) {
+    if (!(cfst_stats(cfst_mount_of(mnt), st as *mut void) == 0 && sv(st).generation == 1)) {
         return failed(reason,
             "check failed: cosmofs_stats(mount_of(\"/mnt\"), &st) == 0 && st.generation == 1 at line 263\0");
     }
@@ -290,7 +290,7 @@ unsafe fn selftestOps(reason: *mut *CChar) -> bool {
     var s1Slot = [0u64; 16];
     let st0 = borrow mut s0Slot as *mut [u64; 16] as *mut cosmofs_stats;
     let st = borrow mut s1Slot as *mut [u64; 16] as *mut cosmofs_stats;
-    if (!(cfst_basic_floor_stats(cfst_mount_of(mnt), st0) == 0)) {
+    if (!(cfst_stats(cfst_mount_of(mnt), st0 as *mut void) == 0)) {
         return failed(reason, "check failed: cosmofs_stats(mount_of(\"/mnt\"), &st0) == 0 at line 294\0");
     }
 
@@ -350,7 +350,7 @@ unsafe fn selftestOps(reason: *mut *CChar) -> bool {
     if (!(cfst_read_matches(c("/mnt/big.bin\0"), buf as *void, big))) {
         return failed(reason, "check failed: read_matches(\"/mnt/big.bin\", buf, big) at line 351\0");
     }
-    if (!(cfst_basic_floor_stats(cfst_mount_of(mnt), st) == 0 && sv(st).generation == sv(st0).generation + 1)) {
+    if (!(cfst_stats(cfst_mount_of(mnt), st as *mut void) == 0 && sv(st).generation == sv(st0).generation + 1)) {
         return failed(reason,
             "check failed: cosmofs_stats(mount_of(\"/mnt\"), &st) == 0 && st...on == st0.generation + 1 at line 355\0");
     }
@@ -400,7 +400,7 @@ unsafe fn selftestOps(reason: *mut *CChar) -> bool {
     if (!(vfs_sync() == 0)) {
         return failed(reason, "check failed: vfs_sync() == 0 at line 401\0");
     }
-    if (!(cfst_basic_floor_stats(cfst_mount_of(mnt), st) == 0 && sv(st).generation == sv(st0).generation + 1)) {
+    if (!(cfst_stats(cfst_mount_of(mnt), st as *mut void) == 0 && sv(st).generation == sv(st0).generation + 1)) {
         return failed(reason,
             "check failed: cosmofs_stats(mount_of(\"/mnt\"), &st) == 0 && st...on == st0.generation + 1 at line 405\0");
     }
@@ -428,7 +428,7 @@ unsafe fn selftestOps(reason: *mut *CChar) -> bool {
     }
 
     // Deleting the big file returns its blocks after the next commit.
-    if (!(cfst_basic_floor_stats(cfst_mount_of(mnt), st0) == 0)) {
+    if (!(cfst_stats(cfst_mount_of(mnt), st0 as *mut void) == 0)) {
         return failed(reason, "check failed: cosmofs_stats(mount_of(\"/mnt\"), &st0) == 0 at line 432\0");
     }
     if (!(vfs_unlink(none, c("/mnt/big.bin\0")) == 0)) {
@@ -437,7 +437,7 @@ unsafe fn selftestOps(reason: *mut *CChar) -> bool {
     if (!(vfs_sync() == 0)) {
         return failed(reason, "check failed: vfs_sync() == 0 at line 438\0");
     }
-    if (!(cfst_basic_floor_stats(cfst_mount_of(mnt), st) == 0)) {
+    if (!(cfst_stats(cfst_mount_of(mnt), st as *mut void) == 0)) {
         return failed(reason, "check failed: cosmofs_stats(mount_of(\"/mnt\"), &st) == 0 at line 441\0");
     }
     // Fewer than the 45 blocks it covers: its contents repeat, so it is stored as compressed records (cosmofs-compress
@@ -508,7 +508,7 @@ unsafe fn selftestCrash(reason: *mut *CChar) -> bool {
     var aSlot = [0u64; 16];
     let before = borrow mut bSlot as *mut [u64; 16] as *mut cosmofs_stats;
     let after = borrow mut aSlot as *mut [u64; 16] as *mut cosmofs_stats;
-    if (!(cfst_basic_floor_stats(cfst_mount_of(mnt), before) == 0)) {
+    if (!(cfst_stats(cfst_mount_of(mnt), before as *mut void) == 0)) {
         return failed(reason, "check failed: cosmofs_stats(mount_of(\"/mnt\"), &before) == 0 at line 512\0");
     }
     if (!(cfst_write_file(c("/mnt/lost.txt\0"), "this never lands".ptr as *void, 16))) {
@@ -536,7 +536,7 @@ unsafe fn selftestCrash(reason: *mut *CChar) -> bool {
     if (!(vfs_mount(mnt, fs, bd, 0) == 0)) {
         return failed(reason, "check failed: vfs_mount(\"/mnt\", \"cosmofs\", bd, 0) == 0 at line 537\0");
     }
-    if (!(cfst_basic_floor_stats(cfst_mount_of(mnt), after) == 0)) {
+    if (!(cfst_stats(cfst_mount_of(mnt), after as *mut void) == 0)) {
         return failed(reason, "check failed: cosmofs_stats(mount_of(\"/mnt\"), &after) == 0 at line 540\0");
     }
     if (!(sv(after).generation == sv(before).generation && sv(after).free_blocks == sv(before).free_blocks)) {
@@ -593,7 +593,7 @@ unsafe fn selftestCrash(reason: *mut *CChar) -> bool {
     if (!(vfs_mount(mnt, fs, bd, 0) == 0)) {
         return failed(reason, "check failed: vfs_mount(\"/mnt\", \"cosmofs\", bd, 0) == 0 at line 594\0");
     }
-    if (!(cfst_basic_floor_stats(cfst_mount_of(mnt), after) == 0)) {
+    if (!(cfst_stats(cfst_mount_of(mnt), after as *mut void) == 0)) {
         return failed(reason, "check failed: cosmofs_stats(mount_of(\"/mnt\"), &after) == 0 at line 597\0");
     }
     if (!(sv(after).generation == sv(before).generation - 1 || sv(after).generation == sv(before).generation)) {
@@ -655,7 +655,7 @@ unsafe fn selftestHoles(reason: *mut *CChar) -> bool {
     var s1Slot = [0u64; 16];
     let st0 = borrow mut s0Slot as *mut [u64; 16] as *mut cosmofs_stats;
     let st1 = borrow mut s1Slot as *mut [u64; 16] as *mut cosmofs_stats;
-    if (!(cfst_basic_floor_stats(cfst_mount_of(eng()), st0) == 0)) {
+    if (!(cfst_stats(cfst_mount_of(eng()), st0 as *mut void) == 0)) {
         return failed(reason, "check failed: cosmofs_stats(mount_of(ENG), &st0) == 0 at line 659\0");
     }
     var f = 0 as *mut file;
@@ -670,7 +670,7 @@ unsafe fn selftestHoles(reason: *mut *CChar) -> bool {
     if (!(file_sync(f) == 0)) {
         return failed(reason, "check failed: file_sync(f) == 0 at line 671\0");
     }
-    if (!(cfst_basic_floor_stats(cfst_mount_of(eng()), st1) == 0)) {
+    if (!(cfst_stats(cfst_mount_of(eng()), st1 as *mut void) == 0)) {
         return failed(reason, "check failed: cosmofs_stats(mount_of(ENG), &st1) == 0 at line 674\0");
     }
     // one data block and a few metadata blocks, no zero fill
@@ -753,7 +753,7 @@ unsafe fn selftestHoles(reason: *mut *CChar) -> bool {
     if (!(vfs_sync() == 0)) {
         return failed(reason, "check failed: vfs_sync() == 0 at line 754\0");
     }
-    if (!(cfst_basic_floor_stats(cfst_mount_of(eng()), st1) == 0)) {
+    if (!(cfst_stats(cfst_mount_of(eng()), st1 as *mut void) == 0)) {
         return failed(reason, "check failed: cosmofs_stats(mount_of(ENG), &st1) == 0 at line 757\0");
     }
     // Back to within a few blocks of where it started. The slack covers what an empty file still costs -- its
@@ -856,7 +856,7 @@ unsafe fn selftestCsum(reason: *mut *CChar) -> bool {
     }
     var stSlot = [0u64; 16];
     let st = borrow mut stSlot as *mut [u64; 16] as *mut cosmofs_stats;
-    if (!(cfst_basic_floor_stats(cfst_mount_of(eng()), st) == 0 && sv(st).csum_failures >= 1)) {
+    if (!(cfst_stats(cfst_mount_of(eng()), st as *mut void) == 0 && sv(st).csum_failures >= 1)) {
         return failed(reason,
             "check failed: cosmofs_stats(mount_of(ENG), &st) == 0 && st.csum_failures >= 1 at line 861\0");
     }
@@ -917,7 +917,7 @@ unsafe fn selftestCsum(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: vfs_stat(NULL, ENG \"/other\", &cs) == 0 at line 917\0");
     }
     // this mount's count
-    if (!(cfst_basic_floor_stats(cfst_mount_of(eng()), st) == 0 && sv(st).csum_failures >= 1)) {
+    if (!(cfst_stats(cfst_mount_of(eng()), st as *mut void) == 0 && sv(st).csum_failures >= 1)) {
         return failed(reason,
             "check failed: cosmofs_stats(mount_of(ENG), &st) == 0 && st.csum_failures >= 1 at line 922\0");
     }
@@ -945,7 +945,7 @@ unsafe fn selftestFsync(reason: *mut *CChar) -> bool {
     var s1Slot = [0u64; 16];
     let st0 = borrow mut s0Slot as *mut [u64; 16] as *mut cosmofs_stats;
     let st1 = borrow mut s1Slot as *mut [u64; 16] as *mut cosmofs_stats;
-    if (!(cfst_basic_floor_stats(cfst_mount_of(eng()), st0) == 0)) {
+    if (!(cfst_stats(cfst_mount_of(eng()), st0 as *mut void) == 0)) {
         return failed(reason, "check failed: cosmofs_stats(mount_of(ENG), &st0) == 0 at line 949\0");
     }
     var f = 0 as *mut file;
@@ -960,7 +960,7 @@ unsafe fn selftestFsync(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: file_sync(f) == 0 at line 960\0");
     }
     filePut(f);
-    if (!(cfst_basic_floor_stats(cfst_mount_of(eng()), st1) == 0)) {
+    if (!(cfst_stats(cfst_mount_of(eng()), st1 as *mut void) == 0)) {
         return failed(reason, "check failed: cosmofs_stats(mount_of(ENG), &st1) == 0 at line 964\0");
     }
     if (!(sv(st1).generation == sv(st0).generation + 1 && sv(st1).commits == sv(st0).commits + 1)) {
@@ -1003,7 +1003,7 @@ unsafe fn selftestReserve(reason: *mut *CChar) -> bool {
     let none = 0 as *mut vnode;
     var stSlot = [0u64; 16];
     let st = borrow mut stSlot as *mut [u64; 16] as *mut cosmofs_stats;
-    if (!(cfst_basic_floor_stats(cfst_mount_of(eng()), st) == 0)) {
+    if (!(cfst_stats(cfst_mount_of(eng()), st as *mut void) == 0)) {
         return failed(reason, "check failed: cosmofs_stats(mount_of(ENG), &st) == 0 at line 1007\0");
     }
     if (!(sv(st).reserve_blocks == 32)) {
@@ -1062,7 +1062,7 @@ unsafe fn selftestReserve(reason: *mut *CChar) -> bool {
     if (!(enospc)) {
         return failed(reason, "check failed: enospc at line 1063\0");
     }
-    if (!(cfst_basic_floor_stats(cfst_mount_of(eng()), st) == 0)) {
+    if (!(cfst_stats(cfst_mount_of(eng()), st as *mut void) == 0)) {
         return failed(reason, "check failed: cosmofs_stats(mount_of(ENG), &st) == 0 at line 1066\0");
     }
     // Stopped at the reserve, less the allowance a dirty page is charged on top of its block (CF34: CFS_DIRTY_META, 4
@@ -1082,7 +1082,7 @@ unsafe fn selftestReserve(reason: *mut *CChar) -> bool {
     if (!(vfs_sync() == 0)) {
         return failed(reason, "check failed: vfs_sync() == 0 at line 1083\0");
     }
-    if (!(cfst_basic_floor_stats(cfst_mount_of(eng()), st) == 0)) {
+    if (!(cfst_stats(cfst_mount_of(eng()), st as *mut void) == 0)) {
         return failed(reason, "check failed: cosmofs_stats(mount_of(ENG), &st) == 0 at line 1086\0");
     }
     if (!(sv(st).free_blocks > fullFree + 20)) {
@@ -1132,7 +1132,7 @@ unsafe fn selftestFallback(reason: *mut *CChar) -> bool {
     }
     var stSlot = [0u64; 16];
     let st = borrow mut stSlot as *mut [u64; 16] as *mut cosmofs_stats;
-    if (!(cfst_basic_floor_stats(cfst_mount_of(eng()), st) == 0 && sv(st).generation == 3)) {
+    if (!(cfst_stats(cfst_mount_of(eng()), st as *mut void) == 0 && sv(st).generation == 3)) {
         return failed(reason,
             "check failed: cosmofs_stats(mount_of(ENG), &st) == 0 && st.generation == 3 at line 1137\0");
     }
@@ -1176,7 +1176,7 @@ unsafe fn selftestFallback(reason: *mut *CChar) -> bool {
     if (!(vfs_mount(eng(), c("cosmofs\0"), bd, 0) == 0)) {
         return failed(reason, "check failed: vfs_mount(ENG, \"cosmofs\", bd, 0) == 0 at line 1177\0");
     }
-    if (!(cfst_basic_floor_stats(cfst_mount_of(eng()), st) == 0 && sv(st).generation == 2)) {
+    if (!(cfst_stats(cfst_mount_of(eng()), st as *mut void) == 0 && sv(st).generation == 2)) {
         return failed(reason,
             "check failed: cosmofs_stats(mount_of(ENG), &st) == 0 && st.generation == 2 at line 1181\0");
     }
@@ -1203,7 +1203,7 @@ unsafe fn selftestFallback(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: vfs_mount(ENG, \"cosmofs\", bd, 0) == 0 at line 1203\0");
     }
     // 3, plus the unmount's bitmap commit
-    if (!(cfst_basic_floor_stats(cfst_mount_of(eng()), st) == 0 && sv(st).generation >= 3)) {
+    if (!(cfst_stats(cfst_mount_of(eng()), st as *mut void) == 0 && sv(st).generation >= 3)) {
         return failed(reason,
             "check failed: cosmofs_stats(mount_of(ENG), &st) == 0 && st.generation >= 3 at line 1208\0");
     }
@@ -1235,7 +1235,7 @@ unsafe fn selftestWriteback(reason: *mut *CChar) -> bool {
     let st0 = borrow mut s0Slot as *mut [u64; 16] as *mut cosmofs_stats;
     let st1 = borrow mut s1Slot as *mut [u64; 16] as *mut cosmofs_stats;
     let st2 = borrow mut s2Slot as *mut [u64; 16] as *mut cosmofs_stats;
-    if (!(cfst_basic_floor_stats(mnt, st0) == 0)) {
+    if (!(cfst_stats(mnt, st0 as *mut void) == 0)) {
         return failed(reason, "check failed: cosmofs_stats(mnt, &st0) == 0 at line 1239\0");
     }
     if (!(cfst_write_file(c("/mnt/eng/auto\0"), "auto".ptr as *void, 4))) {
@@ -1244,7 +1244,7 @@ unsafe fn selftestWriteback(reason: *mut *CChar) -> bool {
     let deadline = clock_now_ns() + 2000000000;
     while (true) {
         thread_sleep_ns(20000000);
-        if (!(cfst_basic_floor_stats(mnt, st1) == 0)) {
+        if (!(cfst_stats(mnt, st1 as *mut void) == 0)) {
             return failed(reason, "check failed: cosmofs_stats(mnt, &st1) == 0 at line 1248\0");
         }
         if (!(sv(st1).generation == sv(st0).generation && clock_now_ns() < deadline)) {
@@ -1257,7 +1257,7 @@ unsafe fn selftestWriteback(reason: *mut *CChar) -> bool {
     }
     // Nothing more dirty: no further commits happen on their own.
     thread_sleep_ns(200000000);
-    if (!(cfst_basic_floor_stats(mnt, st2) == 0 && sv(st2).generation == sv(st1).generation)) {
+    if (!(cfst_stats(mnt, st2 as *mut void) == 0 && sv(st2).generation == sv(st1).generation)) {
         return failed(reason,
             "check failed: cosmofs_stats(mnt, &st2) == 0 && st2.generation == st1.generation at line 1262\0");
     }

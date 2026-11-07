@@ -56,12 +56,3 @@ bool selftest_cosmofs_snapshot(const char **reason)
     return true;
 }
 #endif
-
-int cfst_media_floor_stats(struct mount *mnt, void *out);
-
-/* cosmofs_stats for the CeeSafe tests: its name is its struct's too, so
- * they cannot declare both. `out` is a struct cosmofs_stats. */
-int cfst_media_floor_stats(struct mount *mnt, void *out)
-{
-    return cosmofs_stats(mnt, out);
-}

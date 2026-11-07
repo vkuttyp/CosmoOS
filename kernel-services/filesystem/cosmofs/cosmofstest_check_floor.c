@@ -1,10 +1,8 @@
 /*
  * cosmofstest_check_floor.c - The C under cosmofstest_check.cee (roadmap
- * 2.0 SA7): cosmofs_stats for the CeeSafe self-tests, whose extern block
- * cannot declare a function and a struct of one name, and the layout
- * cosmofstest_check.cee and cosmofstest_orphan.cee write as their own
- * constants, asserted here, since a self-test has no host test to
- * assert it.
+ * 2.0 SA7): the layout cosmofstest_check.cee and cosmofstest_orphan.cee
+ * write as their own constants, asserted here, since a self-test has no
+ * host test to assert it.
  */
 
 #include <kernel/cosmofs.h>
@@ -40,10 +38,3 @@ _Static_assert(COSMOFS_SCRUB_REPAIR == 1 && COSMOFS_CHECK_REPAIR == 1 && CFS_CHE
 _Static_assert(sizeof(struct cosmofs_check_report) <= 256 * 8 && sizeof(struct cosmofs_stats) <= 24 * 8 &&
                    sizeof(struct cosmo_stat) <= 8 * 8 && sizeof(struct cosmofs_scrub_stats) <= 8 * 8,
                "cosmofstest_check.cee's and cosmofstest_orphan.cee's slot sizes");
-
-int cfst_check_floor_stats(struct mount *mnt, struct cosmofs_stats *out);
-
-int cfst_check_floor_stats(struct mount *mnt, struct cosmofs_stats *out)
-{
-    return cosmofs_stats(mnt, out);
-}

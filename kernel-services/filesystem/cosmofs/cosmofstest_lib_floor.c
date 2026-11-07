@@ -3,9 +3,11 @@
  * SA7): the engine mount's operation-boundary fault seams and their
  * self-test, cosmofs-fixture-cleanup -- both exist only in a build with
  * CONFIG_SELFTEST and CONFIG_FAULTINJECT, a choice CeeSafe's @cfg cannot
- * make for a function that is not exported -- and the layout the
- * CeeSafe half writes as its own constants, asserted here, since a
- * self-test has no host test to assert it.
+ * make for a function that is not exported -- the self-tests' one call to
+ * cosmofs_stats, a name its struct has too, so an extern block cannot
+ * declare both, and the layout the CeeSafe half writes as its own
+ * constants, asserted here, since a self-test has no host test to assert
+ * it.
  */
 
 #include <kernel/blk.h>
@@ -32,6 +34,12 @@ _Static_assert(sizeof(struct cosmofs_snap_info) == 104 && sizeof(struct cosmofs_
                "cosmofstest_lib.cee's cosmofs.h and syscall.h sizes");
 
 #define ENG "/mnt/eng"
+
+/* cosmofs_stats for the CeeSafe self-tests; `out` is a struct cosmofs_stats. */
+int cfst_stats(struct mount *mnt, void *out)
+{
+    return cosmofs_stats(mnt, out);
+}
 
 /* Only the serial self-test runner arms these operation-boundary seams. */
 #if CONFIG_SELFTEST && CONFIG_FAULTINJECT

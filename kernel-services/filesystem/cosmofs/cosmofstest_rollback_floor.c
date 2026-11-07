@@ -71,11 +71,3 @@ bool selftest_cosmofs_clone(const char **reason)
     return true;
 }
 #endif
-
-int cfst_rollback_floor_stats(struct mount *mnt, void *out);
-
-/* cosmofs_stats, whose name CeeSafe gives its struct too. */
-int cfst_rollback_floor_stats(struct mount *mnt, void *out)
-{
-    return cosmofs_stats(mnt, out);
-}

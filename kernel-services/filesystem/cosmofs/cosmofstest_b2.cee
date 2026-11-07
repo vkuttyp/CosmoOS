@@ -80,8 +80,8 @@ extern "C" {
     fn cosmofs_format(bd: *mut blkdev) -> i32;
     fn cosmofs_format_mirror(bd: *mut *mut blkdev, n: u32, copies: u32) -> i32;
     fn cosmofs_test_format_version(bd: *mut blkdev, version: u32) -> i32;
-    /// cosmofstest_b2_floor.c: cosmofs_stats into `out`, a struct cosmofs_stats (a name a struct has too).
-    fn cfst_b2_floor_stats(mnt: *mut mount, out: *mut void) -> i32;
+    /// cosmofstest_lib_floor.c: cosmofs_stats into `out`, a struct cosmofs_stats (a name a struct has too).
+    fn cfst_stats(mnt: *mut mount, out: *mut void) -> i32;
     fn cosmofs_check(mnt: *mut mount, out: *mut cosmofs_check_report, flags: u32) -> i32;
     fn cosmofs_check_dev(bd: *mut blkdev, flags: u32, rep: *mut cosmofs_check_report, dev: *mut cosmofs_dev_report)
         -> i32;
@@ -207,7 +207,7 @@ unsafe fn clean(r: *mut cosmofs_check_report) -> bool => Ptr.toBorrow(r as *cosm
 /// Safety: none beyond the filesystem's own.
 unsafe fn statU64(off: usize, bad: u64) -> u64 {
     var slot = [0u64; 32];
-    if (cfst_b2_floor_stats(mnt(), borrow mut slot as *mut [u64; 32] as *mut void) != 0) {
+    if (cfst_stats(mnt(), borrow mut slot as *mut [u64; 32] as *mut void) != 0) {
         return bad;
     }
     return slot[off / 8];
@@ -217,7 +217,7 @@ unsafe fn statU64(off: usize, bad: u64) -> u64 {
 /// Safety: none beyond the filesystem's own.
 unsafe fn statU32(off: usize, bad: u32) -> u32 {
     var slot = [0u64; 32];
-    if (cfst_b2_floor_stats(mnt(), borrow mut slot as *mut [u64; 32] as *mut void) != 0) {
+    if (cfst_stats(mnt(), borrow mut slot as *mut [u64; 32] as *mut void) != 0) {
         return bad;
     }
     return ByteOrder.readU32LE(SliceMut.fromRaw(borrow mut slot as *mut [u64; 32] as *mut u8, 256), off);
@@ -313,7 +313,7 @@ unsafe fn selftestRoReplay(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: vfs_sync() == 0 at line 313\0");
     }
     var slot = [0u64; 32];
-    if (cfst_b2_floor_stats(mnt(), borrow mut slot as *mut [u64; 32] as *mut void) != 0) {
+    if (cfst_stats(mnt(), borrow mut slot as *mut [u64; 32] as *mut void) != 0) {
         return failed(reason, "check failed: cosmofs_stats(cfst_mount_of(ENG), &st) == 0 at line 317\0");
     }
     if (!(slot[STATS_ORPHAN_ROOT / 8] != 0 && slot[STATS_FREE_ROOT / 8] != 0)) { // both replays have work

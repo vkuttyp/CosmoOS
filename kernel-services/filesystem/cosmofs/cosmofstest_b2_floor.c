@@ -52,17 +52,10 @@ _Static_assert(CFS_BLOCK == 4096 && CFS_MHDR_SIZE == 32 && offsetof(struct cfs_m
                    sizeof(CFS_MAGIC) == 9,
                "cosmofstest_b2.cee's cosmofs_format.h values and offsets");
 
-int cfst_b2_floor_stats(struct mount *mnt, void *out);
 unsigned cfst_b2_floor_scrub_rate(void);
 void cfst_b2_floor_set_scrub_rate(unsigned rate);
 void cfst_b2_floor_fail_set(unsigned which);
 uint64_t cfst_b2_floor_fail_end(unsigned which);
-
-/* cosmofs_stats, whose name CeeSafe gives its struct too. */
-int cfst_b2_floor_stats(struct mount *mnt, void *out)
-{
-    return cosmofs_stats(mnt, out);
-}
 
 /* The scrub's bound (sysctl fs.scrub_rate). */
 unsigned cfst_b2_floor_scrub_rate(void)

@@ -47,8 +47,8 @@ extern "C" {
     fn vfs_truncate(start: *mut vnode, path: *CChar, size: u64) -> i32;
     fn pagecache_get_stats(out: *mut pagecache_stats);
     fn random_ready() -> bool;
-    /// cosmofstest_media_floor.c: cosmofs_stats, whose name is its struct's too, into a struct cosmofs_stats.
-    fn cfst_media_floor_stats(mnt: *mut mount, out: *mut void) -> i32;
+    /// cosmofstest_lib_floor.c: cosmofs_stats into `out`, a struct cosmofs_stats (a name a struct has too).
+    fn cfst_stats(mnt: *mut mount, out: *mut void) -> i32;
     fn cosmofs_scrub(mnt: *mut mount, out: *mut cosmofs_scrub_stats, flags: u32) -> i32;
     fn cosmofs_check(mnt: *mut mount, out: *mut cosmofs_check_report, flags: u32) -> i32;
     fn cosmofs_format_encrypted(bd: *mut blkdev, key: *void, len: usize) -> i32;
@@ -121,7 +121,7 @@ unsafe fn failed(reason: *mut *CChar, why: StringView) -> bool {
 unsafe fn filePut(f: *mut file) { kobject_put(f as *mut kobject); }
 
 /// Safety: none beyond the filesystem's own.
-unsafe fn engStats(st: *mut [u64; 16]) -> bool => cfst_media_floor_stats(cfst_mount_of(eng()), st as *mut void) == 0;
+unsafe fn engStats(st: *mut [u64; 16]) -> bool => cfst_stats(cfst_mount_of(eng()), st as *mut void) == 0;
 
 /// A 64-bit field of a struct cosmofs_stats, cosmofs_scrub_stats or pagecache_stats.
 /// Safety: `st` filled by one of them.

@@ -56,8 +56,8 @@ extern "C" {
     fn vfs_mount(path: *CChar, fsname: *CChar, bd: *mut blkdev, flags: u32) -> i32;
     fn vfs_umount2(path: *CChar, flags: u32) -> i32;
     fn vfs_sync() -> i32;
-    /// cosmofstest_rollback_floor.c: cosmofs_stats into `out`, a struct cosmofs_stats (a name a struct has too).
-    fn cfst_rollback_floor_stats(mnt: *mut mount, out: *mut void) -> i32;
+    /// cosmofstest_lib_floor.c: cosmofs_stats into `out`, a struct cosmofs_stats (a name a struct has too).
+    fn cfst_stats(mnt: *mut mount, out: *mut void) -> i32;
     fn cosmofs_check(mnt: *mut mount, out: *mut cosmofs_check_report, flags: u32) -> i32;
     fn cosmofs_snapctl(mnt: *mut mount, req: *mut cosmofs_snap_req) -> i32;
     fn cosmofs_test_corrupt(mnt: *mut mount, kind: u32, ino: u64, what: *mut u64) -> i32;
@@ -283,7 +283,7 @@ unsafe fn absent(p: *CChar) -> bool {
 /// Safety: `out` writable.
 unsafe fn freeBlocks(out: *mut u64) -> bool {
     var slot = [0u64; 32];
-    if (cfst_rollback_floor_stats(mnt(), borrow mut slot as *mut [u64; 32] as *mut void) != 0) {
+    if (cfst_stats(mnt(), borrow mut slot as *mut [u64; 32] as *mut void) != 0) {
         return false;
     }
     out.write(slot[STATS_FREE_BLOCKS]);

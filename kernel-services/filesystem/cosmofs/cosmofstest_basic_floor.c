@@ -1,8 +1,7 @@
 /*
  * cosmofstest_basic_floor.c - The C under cosmofstest_basic.cee (roadmap
- * 2.0 SA7): the call to cosmofs_stats, whose name is its record's too, so
- * CeeSafe cannot declare both; the engine tests' stand-ins in a build
- * without CONFIG_DEBUG; and the layout the CeeSafe half writes as its own
+ * 2.0 SA7): the engine tests' stand-ins in a build without
+ * CONFIG_DEBUG, and the layout the CeeSafe half writes as its own
  * constants, asserted here, since a self-test has no host test to assert
  * it. The tests are CeeSafe (cosmofstest_basic.cee, generated into
  * cosmofstest_basic.c).
@@ -36,13 +35,6 @@ _Static_assert(sizeof(CFS_MAGIC) - 1 == 8 && offsetof(struct cfs_super, magic) =
                    sizeof(struct cfs_dirent) == 64 && offsetof(struct cfs_dirent, ino) == 0 &&
                    offsetof(struct cfs_dirent, namelen) == 9 && offsetof(struct cfs_dirent, name) == 16,
                "cosmofstest_basic.cee's superblock and directory entry offsets");
-
-int cfst_basic_floor_stats(struct mount *mnt, struct cosmofs_stats *out);
-
-int cfst_basic_floor_stats(struct mount *mnt, struct cosmofs_stats *out)
-{
-    return cosmofs_stats(mnt, out);
-}
 
 #if !CONFIG_DEBUG
 bool selftest_cosmofs_holes(const char **reason) { (void)reason; return true; }
