@@ -128,6 +128,8 @@ PORTS = [
     ("kernel-services/filesystem/cosmofs/cosmofs_member.cee", "kernel-services/filesystem/cosmofs/cosmofs_member.c",
      "cosmofs's members: labels, assembly, copy state, the member table, read repair (cosmofs_internal.h)", None,
      True),
+    ("kernel-services/filesystem/cosmofs/cosmofs_dir.cee", "kernel-services/filesystem/cosmofs/cosmofs_dir.c",
+     "cosmofs's directory operations (cosmofs_internal.h)", None, True),
     ("kernel-services/filesystem/cosmofs/cosmofs.cee", "kernel-services/filesystem/cosmofs/cosmofs.c",
      "cosmofs's directory blocks, the .snapshots directory and the tree locks (cosmofs_internal.h)", None, True),
     ("kernel-services/filesystem/cosmofs/cosmofs_vnode.cee", "kernel-services/filesystem/cosmofs/cosmofs_vnode.c",

@@ -1,5 +1,5 @@
 /*
- * test_cfsdir.c - cosmofs's directory operations (kernel-services/filesystem/cosmofs/cosmofs_dir.c) on the host:
+ * test_cfsdir.c - cosmofs's directory operations (kernel-services/filesystem/cosmofs/cosmofs_dir.cee) on the host:
  * roadmap 2.0 SA7. A digest recorded from the C, with the real directory helpers (cosmofs.cee) and entry decoders
  * (cfsparse), over a tree the test keeps -- the root, a directory, files, links, entries with short and long names --
  * in the live tree, inside a clone (one that exists and one gone) and inside snapshots, and through .snapshots:
@@ -27,6 +27,25 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* The values the CeeSafe port writes as its own constants. */
+_Static_assert(EPERM == 1 && ENOENT == 2 && EIO == 5 && ENOMEM == 12 && EBUSY == 16 && EEXIST == 17 && EXDEV == 18 &&
+                   EROFS == 30 && ENAMETOOLONG == 36 && ENOTEMPTY == 39 && EOPNOTSUPP == 95,
+               "cosmofs_dir's errno.h values");
+_Static_assert(MOUNT_RDONLY == 1 && VNODE_REG == 1 && VNODE_DIR == 2 && VNODE_LNK == 6 &&
+                   offsetof(struct vnode, type) == 56 && sizeof(((struct vnode *)0)->type) == 4,
+               "cosmofs_dir's vfs.h values");
+_Static_assert(CFS_BLOCK == 4096 && CFS_ROOT_INO == 1 && CFS_TYPE_REG == 1 && CFS_TYPE_DIR == 2 && CFS_TYPE_LNK == 3 &&
+                   CFS_CSUM_CRC32C == 1 && CFS_CSUM_POLY1305 == 2 && CFS_COMPRESS_NONE == 0 &&
+                   CFS_COMPRESS_LZ4 == 1 && CFS_ALLOC_META == 0 && CFS_NAME_MAX_LONG == 255 &&
+                   CFS_SNAP_NAME_MAX == 31 && CFS_SNAP_F_CLONE == 1 && CFS_SNAP_INO_SHIFT == 48 &&
+                   CFS_DIRENTS_PER_BLOCK == 64 && sizeof(struct cfs_dirent) == 64 && CFS_DIRENT_CONT == ~0ull &&
+                   offsetof(struct cfs_dirent, type) == 8 && CFS_EXT_COMPRESSED == 0x80000000u &&
+                   CFS_EXT_COUNT_MASK == 0xFFFF,
+               "cosmofs_dir's cosmofs_format.h values");
+/* cosmofs_dir.cee keeps an inode in a stack slot of 32 words and a snapshot entry in one of 16. */
+_Static_assert(sizeof(struct cfs_inode) <= 32 * 8 && sizeof(struct cfs_snapshot) <= 16 * 8,
+               "cosmofs_dir.cee's stack slots");
 
 /* The digest of the C (cosmofs_dir.c, 2026-11-07), which the CeeSafe port gives. */
 #define DIR_DIGEST 0x00fc036656d8ef7bull
@@ -677,7 +696,8 @@ static void op(void)
         rc = cfs_create(dir, name, len, 0644, &out);
         break;
     case 3:
-        rc = cfs_mkdir(dir, name, len, 0755, pick(4) || !cfs_is_snapdir(dir) ? &out : NULL);   /* NULL: a snapshot by mkdir */
+        /* NULL out: a snapshot by mkdir, which is the only mkdir that may say nothing back */
+        rc = cfs_mkdir(dir, name, len, 0755, pick(4) || !cfs_is_snapdir(dir) ? &out : NULL);
         break;
     case 4: {
         char target[64];

@@ -1494,6 +1494,16 @@ the tree locks, after the operations themselves moved to
 entry decoders (0x79a7a841980074bb, clang and gcc; every line and branch
 that can be reached). `cosmofs_floor.c` keeps the vnode operation
 tables.
+`cosmofs_dir.cee`, the fourteenth and the last of `cosmofs.c`, a
+directory's operations: lookups through `.snapshots`, clones and
+snapshots, creation given back halfway, symlinks, hard links, unlink,
+rmdir (a snapshot's too), rename and its rollback, readdir.
+`tests/host/test_cfsdir.c` runs them with the real directory helpers and
+entry decoders (0x00fc036656d8ef7b, clang and gcc; every line but a
+link's rollback failing twice over). `cosmofs_dir_floor.c` keeps
+`cfs_readdir`'s entry point and the call through its callback, whose
+type takes an enum. With it no C of cosmofs's VFS side is left but the
+floors.
 
 Size: about 4.5x.
 
