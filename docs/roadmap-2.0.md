@@ -1567,6 +1567,13 @@ threads' `container_of`, `sched_loadavg`'s unsigned longs, and
 `procnet_names`, a C array. `kernel-services/filesystem/` has no C left
 but floors.
 
+`memdev.cee`, `/dev/null` and `/dev/zero`, the first of
+`kernel-services/vfs/`: `tests/host/test_memdev.c` runs `memdev_init`
+while `ramfs_mkchr` fails now and then, and reads and writes both
+devices at random, every byte of the buffer and its guards in the
+digest (0xb166a187062d2cf0, clang and gcc). `memdev_floor.c` keeps the
+two operation tables and the warning's format.
+
 Size: about 4.5x.
 
 ### SA8 The Linux personality and the system-call layer

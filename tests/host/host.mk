@@ -84,8 +84,8 @@ HOST_TAP_SRCS := $(HOST_COMMON_SRCS) kernel-services/network/tap.c kernel-servic
 # /proc/net's renderer alone: the listings and the allocator are the test's.
 HOST_PROCNET_SRCS := $(HOST_COMMON_SRCS) kernel-services/network/procnet.c kernel-services/network/procnet_floor.c kernel/core/printf.c kernel/ceesafe/ceesafe_rt_core.c \
 	tests/host/ceesafe_panic.c tests/host/test_procnet.c
-HOST_MEMDEV_SRCS := $(HOST_COMMON_SRCS) kernel-services/vfs/memdev.c kernel/ceesafe/ceesafe_rt_core.c \
-	tests/host/ceesafe_panic.c tests/host/test_memdev.c
+HOST_MEMDEV_SRCS := $(HOST_COMMON_SRCS) kernel-services/vfs/memdev.c kernel-services/vfs/memdev_floor.c \
+	kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_memdev.c
 # /proc: the process table, terminals, handles, scheduler, clocks, memory figures, mounts, the network stack's
 # tables and the vnode cache are the test's.
 HOST_PROCFS_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/procfs/procfs.c \

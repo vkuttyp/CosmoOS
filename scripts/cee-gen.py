@@ -169,6 +169,8 @@ PORTS = [
      "cosmofs's self-test of an encrypted root's pool, format 14 (cosmofs.h, cosmofs_internal.h)", None, True),
     ("kernel-services/filesystem/cosmofs/cosmofs_dir.cee", "kernel-services/filesystem/cosmofs/cosmofs_dir.c",
      "cosmofs's directory operations (cosmofs_internal.h)", None, True),
+    ("kernel-services/vfs/memdev.cee", "kernel-services/vfs/memdev.c",
+     "/dev/null and /dev/zero (vfs.h)", None, True),
     ("kernel-services/filesystem/procfs/procfs.cee", "kernel-services/filesystem/procfs/procfs.c",
      "/proc: processes, their files, links and handles, the system files and /proc/net's paths (vfs.h)", None, True),
     ("kernel-services/filesystem/cosmofs/cosmofs.cee", "kernel-services/filesystem/cosmofs/cosmofs.c",

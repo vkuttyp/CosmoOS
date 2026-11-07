@@ -30,10 +30,10 @@ inode; `cfs_map_block` over three runs including the hole beyond them.
 `tests/host/test_crypto.c` gained `crc32c`: the `123456789` vector,
 the empty string, 32 zero bytes, and incremental equals one-shot.
 
-`tests/host/test_memdev.c` holds `/dev/null` and `/dev/zero` (`memdev.c`, roadmap 2.0 SA7) to a digest recorded from
-the C: `memdev_init` with its `ramfs_mkchr` calls failing now and then and its warnings, each device's operations,
-and random reads and writes of both, with every byte of the buffer and of the guards around it. clang and gcc give
-the same digest.
+`tests/host/test_memdev.c` holds `/dev/null` and `/dev/zero` (`memdev.cee`, roadmap 2.0 SA7) to a digest
+recorded from the C it replaced: `memdev_init` with its `ramfs_mkchr` calls failing now and then and its warnings,
+each device's operations, and random reads and writes of both, with every byte of the buffer and of the guards
+around it. clang and gcc give the same digest, for the C and for the port.
 
 ## Self-tests (`kernel-services/vfs/vfstest.c`, `kernel-services/filesystem/cosmofs/cosmofstest_*.cee`)
 

@@ -844,8 +844,8 @@ VFS stamps are on different bases.
 mutation of a dot name stays `-EINVAL`): BusyBox tar makes `./` for an
 archive that names it.
 
-**`/dev/null` and `/dev/zero`** (`kernel-services/vfs/memdev.c`, roadmap
-M3) are character devices on the ramfs `/dev`, made at boot after the
+**`/dev/null` and `/dev/zero`** (`kernel-services/vfs/memdev.cee`, roadmap
+M3; CeeSafe since SA7) are character devices on the ramfs `/dev`, made at boot after the
 terminal's: null reads end-of-file and swallows writes, zero reads zeros
 and swallows writes.
 

@@ -1,0 +1,72 @@
+// memdev.cee - /dev/null and /dev/zero (roadmap M3: a shell redirects to /dev/null, and BusyBox ash gives a background
+// job's stdin /dev/null), in CeeSafe: roadmap 2.0 SA7. tests/host/test_memdev.c holds it to the digest of the C it
+// replaced. Character devices on the ramfs /dev, like /dev/console: null reads end-of-file and swallows writes, zero
+// reads zeros and swallows writes. memdev_floor.c keeps the operation tables, C data naming the operations by address,
+// and the warning's format.
+
+@header("kernel/log.h", "kernel/string.h", "kernel/vfs.h")
+extern "C" {
+    struct vnode;
+    struct chrdev_ops;
+    fn memset(p: *mut void, c: i32, n: usize) -> *mut void;
+    fn ramfs_mkchr(path: *CChar, mode: u32, ops: *chrdev_ops, priv: *mut void, out: *mut *mut vnode) -> i32;
+
+    // memdev_floor.c
+    fn memdev_floor_ops(which: u32) -> *chrdev_ops;
+    fn memdev_floor_warn(path: *CChar, rc: i32);
+}
+
+// memdev_floor_ops's tables.
+const OPS_NULL: u32 = 0;
+const OPS_ZERO: u32 = 1;
+
+// rw-rw-rw-: anyone may read and write either device.
+const MODE: u32 = 0x1B6;
+
+/// /dev/null's read: end-of-file, the buffer untouched.
+/// Safety: none; nothing is read or written through the pointers.
+@export("memdev_null_read")
+unsafe fn nullRead(vn: *mut vnode, off: u64, buf: *mut void, len: usize) -> i64 {
+    let _ = vn;
+    let _ = off;
+    let _ = buf;
+    let _ = len;
+    return 0;
+}
+
+/// Both devices' write: all of it taken, none of it kept.
+/// Safety: none; nothing is read or written through the pointers.
+@export("memdev_sink_write")
+unsafe fn sinkWrite(vn: *mut vnode, off: u64, buf: *void, len: usize) -> i64 {
+    let _ = vn;
+    let _ = off;
+    let _ = buf;
+    return truncate<i64>(len);
+}
+
+/// /dev/zero's read: `len` zeros.
+/// Safety: `buf` holds `len` writable bytes.
+@export("memdev_zero_read")
+unsafe fn zeroRead(vn: *mut vnode, off: u64, buf: *mut void, len: usize) -> i64 {
+    let _ = vn;
+    let _ = off;
+    let _ = memset(buf, 0, len);
+    return truncate<i64>(len);
+}
+
+/// One device in /dev, or a warning that it could not be made.
+/// Safety: `path` is a NUL-terminated string; the ramfs root exists.
+unsafe fn make(path: *CChar, which: u32) {
+    let rc = ramfs_mkchr(path, MODE, memdev_floor_ops(which), 0 as *mut void, 0 as *mut *mut vnode);
+    if (rc != 0) {
+        memdev_floor_warn(path, rc);
+    }
+}
+
+/// /dev/null and /dev/zero (vfs.h).
+/// Safety: called once the ramfs root exists.
+@export("memdev_init")
+unsafe fn init() {
+    make("/dev/null\0".ptr as *CChar, OPS_NULL);
+    make("/dev/zero\0".ptr as *CChar, OPS_ZERO);
+}
