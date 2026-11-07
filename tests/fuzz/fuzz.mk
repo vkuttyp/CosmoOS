@@ -52,6 +52,7 @@ FUZZ_COSMOFS_SRCS := tests/fuzz/fuzz_cosmofs.c tests/fuzz/shim_fs.c \
 	kernel-services/filesystem/cosmofs/cosmofs.c kernel-services/filesystem/cosmofs/cosmofs_snapctl.c \
 	kernel-services/filesystem/cosmofs/cosmofs_csum.c kernel-services/filesystem/cosmofs/cosmofs_csum_floor.c \
 	kernel-services/filesystem/cosmofs/cosmofs_data.c kernel-services/filesystem/cosmofs/cosmofs_data_floor.c \
+	kernel-services/filesystem/cosmofs/cosmofs_file.c \
 	kernel-services/filesystem/cosmofs/cosmofs_buf.c kernel-services/filesystem/cosmofs/cosmofs_buf_floor.c \
 	kernel-services/filesystem/cosmofs/cosmofs_alloc.c kernel-services/filesystem/cosmofs/cosmofs_commit.c \
 	kernel-services/filesystem/cosmofs/cosmofs_commit_floor.c \

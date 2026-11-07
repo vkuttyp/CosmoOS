@@ -727,6 +727,25 @@ int cfs_data_write_block(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, co
                          enum cfs_alloc_class cls);
 int cfs_record_write(struct cfs *fs, struct cfs_inode *in, uint64_t lblk0, const uint8_t *data, unsigned n,
                      bool compress);
+/* cosmofs.c, for the files: a vnode's inode written through to its block,
+ * and its map path set aside before a change; whether a vnode's tree is
+ * read-only (a snapshot's), and the tree's write lock (a clone's entered
+ * with it). */
+int cfs_vnode_inode_sync(struct cfs *fs, struct vnode *vn);
+int cfs_vnode_prepare(struct cfs *fs, struct vnode *vn);
+bool cfs_tree_readonly(struct cfs *fs, struct vnode *vn);
+int cfs_lock_tree_w(struct cfs *fs, struct vnode *vn);
+void cfs_unlock_tree(struct cfs *fs);
+/* cosmofs_file.c: a regular file's vnode operations, which cosmofs.c's
+ * tables name. */
+int cfs_readpage(struct vnode *vn, uint64_t index, void *buf);
+int cfs_dirty_check(struct vnode *vn, uint64_t index, unsigned dirty);
+int cfs_writepage(struct vnode *vn, uint64_t index, const void *buf);
+int cfs_writepages(struct vnode *vn, uint64_t index, void *const *pages, unsigned n, unsigned *done);
+int cfs_truncate(struct vnode *vn, uint64_t size);
+int cfs_vnode_setattr(struct vnode *vn);
+int cfs_vnode_sync(struct vnode *vn);
+void cfs_evict(struct vnode *vn);
 bool cfs_snap_in_use(struct mount *mnt, unsigned tag, const struct vnode *victim);
 int cfs_map(struct cfs *fs, const struct cfs_inode *in, uint64_t lblk, uint64_t *pblk);
 /* The run covering `lblk`, whether it is a plain run or a compressed
