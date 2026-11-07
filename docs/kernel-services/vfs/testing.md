@@ -54,6 +54,16 @@ for the port. It found that a
 command refused before it reached a device (no privilege, short, wrong version, data or label refused) left the
 previous command's result to be read as its own; blkctl.h says a failed command leaves none, and now none does.
 
+`tests/host/test_pagecache.c` holds the page cache (`pagecache.c`, roadmap 2.0 SA7) to a digest recorded from the C
+over random sessions on files of three mounts, one whose cache is its store under a page budget: reads, writes
+across pages and past the offsets' end, syncs whose writepage and writepages fail or report nonsense, dirty checks
+that refuse, truncations, drops, whole-page gets and puts, faults through mappings that execute, are text and hold
+the frames, reclaim under a changing limit with references that cannot be had and locks that are busy, the dirty
+bound's throttle with a write-back thread that runs while the writer sleeps, and a frame allocator smaller than the
+files. Every call, result and byte read back, and the statistics after each step, are in the digest; every frame,
+entry and reference is given back. Every line runs (the branches left are other threads' races); clang and gcc give
+the same digest.
+
 ## Self-tests (`kernel-services/vfs/vfstest.c`, `kernel-services/filesystem/cosmofs/cosmofstest_*.cee`)
 
 **`crc32c`**: the standard vector and incremental update.
