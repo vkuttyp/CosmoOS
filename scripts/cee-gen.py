@@ -172,6 +172,8 @@ PORTS = [
     ("kernel-services/vfs/vfstest_base.cee", "kernel-services/vfs/vfstest_base.c",
      "the VFS's self-tests of crc32c, the page cache, symlinks, ramfs, fsync, namespaces and concurrency (vfs.h)",
      None, True),
+    ("kernel-services/vfs/vfstest_dev.cee", "kernel-services/vfs/vfstest_dev.c",
+     "the VFS's self-tests of /dev/fsctl, character devices and the syscall bounce (vfs.h, fsctl.h)", None, True),
     ("kernel-services/vfs/vfstest_mount.cee", "kernel-services/vfs/vfstest_mount.c",
      "the VFS's self-tests of page budgets, cache limits, the last put and mounts' names and pins (vfs.h)", None,
      True),
