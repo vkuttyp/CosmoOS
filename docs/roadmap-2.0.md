@@ -1481,6 +1481,12 @@ not, failed or not (0xde01af8468dcf4cc, clang and gcc; every line and
 branch that can be reached). `cosmofs_file_floor.c` keeps the debug
 build's stuck-page check, the run bound a self-test lowers and the
 self-test hook that counts runs.
+`cosmofs_vnode.cee`, the twelfth, vnodes made for the live tree, a
+clone's or a snapshot's and their inodes written through:
+`tests/host/test_cfsvnode.c` (0x9c4898b008ad2569, clang and gcc; every
+line and branch that can be reached). The vnode operation tables are
+named in `cosmofs_internal.h` now; `cosmofs_vnode_floor.c` hands out
+their addresses and keeps the inode's fault seam.
 
 Size: about 4.5x.
 

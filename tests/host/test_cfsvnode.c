@@ -1,5 +1,5 @@
 /*
- * test_cfsvnode.c - cosmofs's vnodes (kernel-services/filesystem/cosmofs/cosmofs_vnode.c) on the host: roadmap 2.0
+ * test_cfsvnode.c - cosmofs's vnodes (kernel-services/filesystem/cosmofs/cosmofs_vnode.cee) on the host: roadmap 2.0
  * SA7. A digest recorded from the C over vnodes asked for in the live tree, inside a clone and in snapshots, cached or
  * made, of directories, links and files with every mode bit, owner and time, inode numbers bare and tagged -- and
  * written back through their inodes after the vnode changed -- while the cache, the allocator, the inode reads and
@@ -20,6 +20,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* The values the CeeSafe port writes as its own constants. */
+_Static_assert(ENOMEM == 12 && VNODE_REG == 1 && VNODE_DIR == 2 && VNODE_LNK == 6 &&
+                   offsetof(struct vnode, type) == 56 && sizeof(((struct vnode *)0)->type) == 4,
+               "cosmofs_vnode's errno.h and vfs.h values");
+_Static_assert(CFS_TYPE_REG == 1 && CFS_TYPE_DIR == 2 && CFS_TYPE_LNK == 3 && CFS_SNAP_INO_SHIFT == 48 &&
+                   CFS_MODE(CFS_TYPE_LNK, 0777) == ((3u << 12) | 511),
+               "cosmofs_vnode's cosmofs_format.h values");
 
 /* The digest of the C (cosmofs_vnode.c, 2026-11-07), which the CeeSafe port gives. */
 #define VNODE_DIGEST 0x9c4898b008ad2569ull

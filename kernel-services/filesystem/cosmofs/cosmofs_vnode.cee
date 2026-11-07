@@ -1,0 +1,225 @@
+// cosmofs_vnode.cee - cosmofs's vnodes, in CeeSafe: roadmap 2.0 SA7. tests/host/test_cfsvnode.c holds it to the digest
+// of the C it replaced.
+//
+// A vnode made for an inode of the live tree, a clone's or a snapshot's, filled from it; and the inode written through
+// from the vnode. Every mutation writes the inode through to its (copy-on-write) inode block immediately, so the
+// buffer cache always holds the complete pre-commit state and vnode eviction has nothing to flush but pages.
+//
+// struct cfs, the vnode and its state stay C (cosmofs_internal.h, kernel/vfs.h). A vnode's type, a field whose name
+// CeeSafe reserves, is read and written at its offset, which the test checks. cosmofs_vnode_floor.c keeps the
+// addresses of the operation tables, and the inode's fault seam.
+
+@header("kernel/vfs.h", "kernel/kmalloc.h", "cosmofs_internal.h")
+extern "C" {
+    struct mount;
+    struct vnode_ops;
+    struct vnode {
+        ino: u64;
+        mode: u32;
+        uid: u32;
+        gid: u32;
+        nlink: u32;
+        size: u64;
+        mtime_ns: u64;
+        ctime_ns: u64;
+        ops: *vnode_ops;
+        fs_priv: *mut void;
+    }
+    struct cfs_inode {
+        mode: u32;
+        nlink: u32;
+        uid: u32;
+        gid: u32;
+        size: u64;
+        mtime_ns: u64;
+        ctime_ns: u64;
+    }
+    struct cfs_vnode {
+        inode: cfs_inode;
+        snap_tag: u32;
+        snap_imap_root: u64;
+        snap_next_ino: u64;
+    }
+    struct cfs_clone {
+        id: u64;
+    }
+    struct cfs_snapshot {
+        imap_root: u64;
+        next_ino: u64;
+    }
+    struct cfs {
+        mnt: *mut mount;
+        cur_clone: *mut cfs_clone;
+    }
+
+    fn kzalloc(size: usize) -> *mut void;
+    fn vnode_lookup_cached(mnt: *mut mount, ino: u64) -> *mut vnode;
+    fn vnode_alloc(mnt: *mut mount, ino: u64) -> *mut vnode;
+    fn vnode_hash_insert(vn: *mut vnode);
+    fn cfs_inode_read(fs: *mut cfs, ino: u64, out: *mut cfs_inode) -> i32;
+    fn cfs_inode_read_at(fs: *mut cfs, imapRoot: u64, nextIno: u64, ino: u64, out: *mut cfs_inode) -> i32;
+    fn cfs_inode_write(fs: *mut cfs, ino: u64, inode: *cfs_inode) -> i32;
+    fn cfs_inode_prepare(fs: *mut cfs, ino: u64) -> i32;
+    fn cfs_fail(fs: *mut cfs, rc: i32);
+    /// cosmofs_vnode_floor.c: the operations of a vnode of `type`, and the inode's fault seam.
+    fn cfs_vnode_floor_ops(kind: u32) -> *vnode_ops;
+    fn cfs_vnode_floor_inode_nomem() -> bool;
+}
+
+// ---- errno.h, vfs.h and cosmofs_format.h values (asserted in tests/host/test_cfsvnode.c) ----
+
+const ENOMEM: i32 = 12;
+const VNODE_REG: u32 = 1;
+const VNODE_DIR: u32 = 2;
+const VNODE_LNK: u32 = 6;
+/// Where a struct vnode's `type` is.
+const VN_TYPE: usize = 56;
+const CFS_TYPE_REG: u32 = 1;
+const CFS_TYPE_DIR: u32 = 2;
+const CFS_TYPE_LNK: u32 = 3;
+const CFS_SNAP_INO_SHIFT: u32 = 48;
+const PERM_MASK: u32 = 4095; // 07777
+const PERM_LNK: u32 = 511; // 0777
+
+/// cosmofs_format.h's CFS_SNAP_INO: an inode number with a tree's tag.
+fn snapIno(tag: u32, ino: u64) -> u64 => ((tag as u64) << CFS_SNAP_INO_SHIFT) | ino;
+
+/// Safety: `vn` is a vnode.
+unsafe fn typeOf(vn: *mut vnode) -> *mut u32 => (vn as *mut u8).add(VN_TYPE) as *mut u32;
+
+/// A vnode's fields and operations from its inode.
+/// Safety: `vn` is a vnode being made; `inp` an inode.
+@export("cfs_fill_vnode")
+unsafe fn fillVnode(vn: *mut vnode, inp: *cfs_inode) {
+    let i = Ptr.toBorrow(inp);
+    let kind = i.mode >> 12;
+    let t = if (kind == CFS_TYPE_DIR) VNODE_DIR else if (kind == CFS_TYPE_LNK) VNODE_LNK else VNODE_REG;
+    typeOf(vn).write(t);
+    let v = Ptr.toBorrowMut(vn);
+    v.mode = i.mode & PERM_MASK;
+    v.uid = i.uid;
+    v.gid = i.gid;
+    v.nlink = i.nlink;
+    v.size = i.size;
+    v.mtime_ns = i.mtime_ns;
+    v.ctime_ns = i.ctime_ns;
+    v.ops = cfs_vnode_floor_ops(t);
+}
+
+/// A vnode made with state `cv` (its inode read) under key `key`, filled and put in the cache; `cv` freed if not.
+/// Safety: `fs` is a mounted filesystem's state, its lock held; `cv` kzalloc'd; `out` writable.
+unsafe fn made(fs: *mut cfs, key: u64, cv: *mut cfs_vnode, out: *mut *mut vnode) -> i32 {
+    let vn = vnode_alloc(Ptr.toBorrow(fs as *cfs).mnt, key);
+    if (vn.isNull()) {
+        kfree(cv as *mut void);
+        return -ENOMEM;
+    }
+    let v = Ptr.toBorrowMut(vn);
+    v.fs_priv = cv as *mut void;
+    fillVnode(vn, borrow Ptr.toBorrow(cv as *cfs_vnode).inode as *cfs_inode);
+    vnode_hash_insert(vn);
+    out.write(vn);
+    return 0;
+}
+
+/// Referenced vnode for `ino` in a snapshot's tree (tag != 0) or the live one. fs->lock held.
+/// Safety: `fs` is a mounted filesystem's state, its lock held; `snap` a snapshot entry when `tag`; `out` writable.
+@export("cfs_vnode_get_tagged")
+unsafe fn vnodeGetTagged(fs: *mut cfs, ino: u64, tag: u32, snap: *cfs_snapshot, out: *mut *mut vnode) -> i32 {
+    let key = snapIno(tag, ino);
+    let vn = vnode_lookup_cached(Ptr.toBorrow(fs as *cfs).mnt, key);
+    if (!vn.isNull()) {
+        out.write(vn);
+        return 0;
+    }
+    let cv = kzalloc(layoutOf<cfs_vnode>().size) as *mut cfs_vnode;
+    if (cv.isNull()) {
+        return -ENOMEM;
+    }
+    let c = Ptr.toBorrowMut(cv);
+    let inp = borrow mut c.inode as *mut cfs_inode;
+    let rc = if (tag != 0) cfs_inode_read_at(fs, Ptr.toBorrow(snap).imap_root, Ptr.toBorrow(snap).next_ino, ino, inp)
+        else cfs_inode_read(fs, ino, inp);
+    if (rc != 0) {
+        kfree(cv as *mut void);
+        return rc;
+    }
+    if (tag != 0) {
+        c.snap_tag = tag;
+        c.snap_imap_root = Ptr.toBorrow(snap).imap_root;
+        c.snap_next_ino = Ptr.toBorrow(snap).next_ino;
+    }
+    return made(fs, key, cv, out);
+}
+
+/// Referenced vnode for `ino` in the live tree -- or, inside a clone, the clone's: its inode numbers carry the clone's
+/// tag, as a snapshot's do (design.md, "Clones").
+/// Safety: `fs` is a mounted filesystem's state, its lock held; `out` writable.
+@export("cfs_vnode_get")
+unsafe fn vnodeGet(fs: *mut cfs, inoTagged: u64, out: *mut *mut vnode) -> i32 {
+    let ino = inoTagged & ((1u64 << CFS_SNAP_INO_SHIFT) - 1);
+    let clone = Ptr.toBorrow(fs as *cfs).cur_clone;
+    let ctag = if (clone.isNull()) 0 else truncate<u32>(Ptr.toBorrow(clone as *cfs_clone).id);
+    let key = if (ctag != 0) snapIno(ctag, ino) else ino;
+    let vn = vnode_lookup_cached(Ptr.toBorrow(fs as *cfs).mnt, key);
+    if (!vn.isNull()) {
+        out.write(vn);
+        return 0;
+    }
+    let cv = kzalloc(layoutOf<cfs_vnode>().size) as *mut cfs_vnode;
+    if (cv.isNull()) {
+        return -ENOMEM;
+    }
+    let c = Ptr.toBorrowMut(cv);
+    let rc = cfs_inode_read(fs, ino, borrow mut c.inode as *mut cfs_inode);
+    if (rc != 0) {
+        kfree(cv as *mut void);
+        return rc;
+    }
+    if (ctag != 0) {
+        c.snap_tag = ctag;
+    }
+    return made(fs, key, cv, out);
+}
+
+/// Push the vnode's public fields into its inode and write it through. Every caller has already changed what the
+/// inode describes -- a block mapped and its predecessor queued free, an entry added or removed, a link count -- which
+/// is why each prepared the inode first (CFS-6).
+/// Safety: `fs` is a mounted filesystem's state, its lock held; `vn` a vnode of it.
+@export("cfs_vnode_inode_sync")
+unsafe fn vnodeInodeSync(fs: *mut cfs, vn: *mut vnode) -> i32 {
+    let v = Ptr.toBorrow(vn as *vnode);
+    let cv = Ptr.toBorrowMut(v.fs_priv as *mut cfs_vnode);
+    let i = Ptr.toBorrowMut(borrow mut cv.inode as *mut cfs_inode);
+    let t = typeOf(vn).read();
+    i.nlink = v.nlink;
+    i.size = v.size;
+    i.mtime_ns = v.mtime_ns;
+    i.ctime_ns = v.ctime_ns;
+    let kind = if (t == VNODE_DIR) CFS_TYPE_DIR else if (t == VNODE_LNK) CFS_TYPE_LNK else CFS_TYPE_REG;
+    let perm = if (t == VNODE_LNK) PERM_LNK else v.mode;
+    i.mode = (kind << 12) | (perm & PERM_MASK);
+    i.uid = v.uid;
+    i.gid = v.gid;
+    // Not expected to fail: every caller made the inode's map path writable before its first change
+    // (cfs_vnode_prepare), so this writes into dirty buffers. Anything else is a defect, and the transaction goes
+    // rather than publish what the caller half did.
+    let rc = cfs_inode_write(fs, v.ino, borrow cv.inode as *cfs_inode);
+    if (rc != 0) {
+        cfs_fail(fs, rc);
+    }
+    return rc;
+}
+
+/// Before an operation's first change, the inode the operation ends by storing (cfs_inode_prepare, CFS-6): an
+/// allocation that fails here is an ordinary error the caller can retry, where in cfs_vnode_inode_sync it abandoned
+/// the transaction.
+/// Safety: as vnodeInodeSync.
+@export("cfs_vnode_prepare")
+unsafe fn vnodePrepare(fs: *mut cfs, vn: *mut vnode) -> i32 {
+    // The test seam (cosmofs-nomem): the inode's map path cannot be had.
+    if (cfs_vnode_floor_inode_nomem()) {
+        return -ENOMEM;
+    }
+    return cfs_inode_prepare(fs, Ptr.toBorrow(vn as *vnode).ino);
+}
