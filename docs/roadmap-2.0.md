@@ -1574,6 +1574,17 @@ devices at random, every byte of the buffer and its guards in the
 digest (0xb166a187062d2cf0, clang and gcc). `memdev_floor.c` keeps the
 two operation tables and the warning's format.
 
+`mountns.cee`, mount namespaces: `tests/host/test_mountns.c` runs
+random histories -- mounts seen by some namespaces, namespaces copied
+from one another while the allocator fails part-way through the copy,
+references dropped until a namespace dies and takes the mounts only it
+could see with it, newest first -- with every lock, detach, orphaning
+and list in the digest, the lock order checked and every reference
+freed (0x20d2c61ff98c5c64, clang and gcc; every line).
+`mountns_floor.c` keeps the initial namespace, a static whose list head
+points into itself, and hands over vfs.c's mount table, its lock and
+the root mount, C globals CeeSafe cannot name.
+
 Size: about 4.5x.
 
 ### SA8 The Linux personality and the system-call layer

@@ -104,7 +104,7 @@ A mountpoint carries the mounts covering it on a list, `vnode.covers`:
 a directory can be a mountpoint in one mount namespace and an ordinary
 directory in another, and one pointer cannot say that.
 
-Mount namespaces (`kernel-services/vfs/mountns.c`,
+Mount namespaces (`kernel-services/vfs/mountns.cee`, CeeSafe since SA7,
 `docs/kernel/security/design.md` §1d). A `struct mount_ns` is a set of
 mounts a process can see; `process->mntns` names it, children inherit
 it, and `COSMO_SPAWN_NEWMOUNTNS` starts a new one that begins as a copy

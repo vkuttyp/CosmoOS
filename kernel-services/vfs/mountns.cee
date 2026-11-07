@@ -1,0 +1,304 @@
+// mountns.cee - Mount namespaces (docs/kernel/security/design.md §1d, invariant V28), in CeeSafe: roadmap 2.0 SA7.
+// tests/host/test_mountns.c holds it to the digest of the C it replaced.
+//
+// A namespace is a set of mounts a process can see. Starting one copies the parent's *view* -- a ref per (mount,
+// namespace) pair -- and never a filesystem: one mount is one vnode cache, one open transaction and one device, and
+// a second instance of those over the same disk is not isolation but corruption.
+//
+// Two lists hold the same refs from both ends, because both directions are walked: a walker asks a mount who can see
+// it, and a dying namespace asks itself what it can see.
+//
+// The mounts, the namespaces and their refs stay C (vfs.h, mountns.h). mountns_floor.c keeps what C names as data:
+// the initial namespace, a static whose list head points into itself, and vfs.c's mount table, its lock and the
+// root mount (vfs_internal.h), which it hands over by address.
+
+@header("kernel/errno.h", "kernel/kmalloc.h", "kernel/log.h", "kernel/mountns.h", "kernel/panic.h",
+    "kernel/string.h", "kernel/process.h", "kernel/vfs.h")
+extern "C" {
+    struct vnode {
+        lock: mutex;
+    }
+    struct mount {
+        mountpoint: *mut vnode;
+        link: list_node;
+        ns_refs: list_node;
+    }
+    struct mount_ns {
+        id: u64;
+        refs: u32;
+        mounts: list_node;
+    }
+    struct mount_ns_ref {
+        mnt: *mut mount;
+        ns: *mut mount_ns;
+        path: [u8; 1024];
+        mnt_link: list_node;
+        ns_link: list_node;
+    }
+    struct process {
+        mntns: *mut mount_ns;
+    }
+    fn process_current() -> *mut process;
+    fn strlcpy(dst: *mut CChar, src: *CChar, size: usize) -> usize;
+    fn list_move_all(from: *mut list_node, to: *mut list_node);
+    fn vfs_mount_detach(mnt: *mut mount);
+    fn vfs_mount_orphaned(mnt: *mut mount);
+
+    // mountns_floor.c
+    fn mountns_floor_init_ns() -> *mut mount_ns;
+    fn mountns_floor_mounts() -> *mut list_node;
+    fn mountns_floor_mounts_lock() -> *mut mutex;
+    fn mountns_floor_root() -> *mut mount;
+}
+
+// errno.h, kmalloc.h and vfs.h, which mountns_floor.c checks.
+const ENOMEM: i32 = 12;
+const KMEM_ZERO: u32 = 1;
+const VFS_PATH_MAX: usize = 1024;
+
+/// Identifiers for the log, from 1: 0 is the initial namespace and belongs to nobody else. Under g_mounts_lock.
+static mut NEXT_NS_ID: u64 = 1;
+
+/// The panic of a broken invariant (the C's KASSERT).
+fn check(ok: bool, what: StringView) {
+    if (!ok) {
+        var buffer: [u8; 128] = [0; 128];
+        var line = TextWriter.create(mut buffer[..]);
+        line.text("mountns: assertion failed: ");
+        line.text(what);
+        KernelLog.panic(line);
+    }
+}
+
+/// The lock of the directory `mnt` covers: where it is attached, and who can see it.
+/// Safety: `mnt` is a live mount.
+unsafe fn lockOf(mnt: *mut mount) -> *mut mutex =>
+    borrow mut Ptr.toBorrowMut(Ptr.toBorrow(mnt as *mount).mountpoint).lock as *mut mutex;
+
+/// Safety: `mnt` is a live mount.
+unsafe fn refsOf(mnt: *mut mount) -> *mut list_node => borrow mut Ptr.toBorrowMut(mnt).ns_refs as *mut list_node;
+
+/// Safety: `ns` is a live namespace.
+unsafe fn mountsOf(ns: *mut mount_ns) -> *mut list_node => borrow mut Ptr.toBorrowMut(ns).mounts as *mut list_node;
+
+/// Safety: `node` is a ref's `mnt_link`.
+unsafe fn refOfMntLink(node: *mut list_node) -> *mut mount_ns_ref =>
+    containerOf(node, offsetOf<mount_ns_ref>(mnt_link)) as *mut mount_ns_ref;
+
+/// Safety: `node` is a ref's `ns_link`.
+unsafe fn refOfNsLink(node: *mut list_node) -> *mut mount_ns_ref =>
+    containerOf(node, offsetOf<mount_ns_ref>(ns_link)) as *mut mount_ns_ref;
+
+/// Where a ref's namespace holds its mount: the `path` field, VFS_PATH_MAX bytes.
+/// Safety: `r` is a live ref.
+unsafe fn pathOf(r: *mut mount_ns_ref) -> *mut CChar =>
+    (r as *mut u8).add(offsetOf<mount_ns_ref>(path)) as *mut CChar;
+
+/// The namespace the system boots in. Never freed.
+/// Safety: none; the namespace is the floor's static.
+@export("mountns_initial")
+unsafe fn initial() -> *mut mount_ns => mountns_floor_init_ns();
+
+/// The caller's namespace: its process's, or the initial one for a kernel thread and for everything before init.
+/// Safety: called from a thread, which its process outlives.
+@export("mountns_current")
+unsafe fn current() -> *mut mount_ns {
+    let p = process_current();
+    if (p.isNull() || Ptr.toBorrow(p as *process).mntns.isNull()) {
+        return initial();
+    }
+    return Ptr.toBorrow(p as *process).mntns;
+}
+
+/// Whether `ns` can see `mnt`. The root mount answers true without being on any list. Every namespace has a root and
+/// none may unmount it, so a set that always has the same one member is a fact better stated than stored -- and
+/// stating it here keeps the root out of the copy loop, where a failure part-way would otherwise be able to produce a
+/// namespace with no root.
+/// Safety: `mnt` is a live mount; the caller holds its mountpoint's lock unless it is the root.
+@export("mountns_sees")
+unsafe fn sees(ns: *mount_ns, mnt: *mount) -> bool {
+    if (mnt == mountns_floor_root() as *mount) {
+        return true;
+    }
+    let head = refsOf(mnt as *mut mount);
+    var node = List.first(head as *list_node);
+    while (!node.isNull()) {
+        if (Ptr.toBorrow(refOfMntLink(node) as *mount_ns_ref).ns as *mount_ns == ns) {
+            return true;
+        }
+        node = List.next(head as *list_node, node);
+    }
+    return false;
+}
+
+/// Add `ns` to what can see `mnt`, held at `path` (null: none). Takes the mountpoint's lock, the same lock that
+/// guards where the mount is attached.
+/// Safety: g_mounts_lock held; `ns` and `mnt` are live; `path` is null or a NUL-terminated string.
+unsafe fn nsAdd(ns: *mut mount_ns, mnt: *mut mount, path: *CChar) -> i32 {
+    let r = kmalloc(layoutOf<mount_ns_ref>().size, KMEM_ZERO) as *mut mount_ns_ref;
+    if (r.isNull()) {
+        return -ENOMEM;
+    }
+    let fields = Ptr.toBorrowMut(r);
+    fields.mnt = mnt;
+    fields.ns = ns;
+    if (!path.isNull()) {
+        let _ = strlcpy(pathOf(r), path, VFS_PATH_MAX);
+    }
+    mutex_lock(lockOf(mnt));
+    List.pushBack(refsOf(mnt), borrow mut Ptr.toBorrowMut(r).mnt_link as *mut list_node);
+    mutex_unlock(lockOf(mnt));
+    List.pushBack(mountsOf(ns), borrow mut Ptr.toBorrowMut(r).ns_link as *mut list_node);
+    return 0;
+}
+
+/// Take a ref -- already off its namespace's list -- off the mount's too, free it, and say whether that leaves a
+/// mount no namespace can see.
+/// Safety: g_mounts_lock held; `r` is a live ref, on its mount's list and no longer reachable from its namespace.
+unsafe fn nsDrop(r: *mut mount_ns_ref) -> bool {
+    let mnt = Ptr.toBorrow(r as *mount_ns_ref).mnt;
+    mutex_lock(lockOf(mnt));
+    List.remove(borrow mut Ptr.toBorrowMut(r).mnt_link as *mut list_node);
+    let orphaned = List.isEmpty(refsOf(mnt) as *list_node);
+    mutex_unlock(lockOf(mnt));
+    kfree(r as *mut void);
+    return orphaned;
+}
+
+/// A new namespace holding exactly what `parent` can see, built completely or not at all.
+/// Safety: `parent` is a live namespace; `out` is writable.
+@export("mountns_create")
+unsafe fn create(parent: *mut mount_ns, out: *mut *mut mount_ns) -> i32 {
+    let ns = kmalloc(layoutOf<mount_ns>().size, KMEM_ZERO) as *mut mount_ns;
+    if (ns.isNull()) {
+        return -ENOMEM;
+    }
+    let fresh = Ptr.toBorrowMut(ns);
+    fresh.refs = 1;
+    List.init(mountsOf(ns));
+
+    let tableLock = mountns_floor_mounts_lock();
+    mutex_lock(tableLock);
+    let id = NEXT_NS_ID;
+    NEXT_NS_ID = id + 1;
+    let named = Ptr.toBorrowMut(ns);
+    named.id = id;
+    var rc = 0;
+    let table = mountns_floor_mounts();
+    var node = List.first(table as *list_node);
+    while (!node.isNull()) {
+        let mnt = containerOf(node, offsetOf<mount>(link)) as *mut mount;
+        // Not the root (it is seen by every namespace without a ref) and not a mount this namespace's parent cannot
+        // see. A mount that is *being unmounted* is copied like any other: an unmount can still fail and be restored,
+        // and a child that skipped it would then be permanently short a mount its parent has, which is the one thing
+        // a copied view may not be. vfs_umount2 re-counts the references after its drain for exactly this reason
+        // (docs/audit/next-subsystem-fsctl.md).
+        if (mnt != mountns_floor_root() && sees(parent as *mount_ns, mnt as *mount)) {
+            // The child holds it where the parent did: a copied view is the same mounts at the same places, and the
+            // path travels with the reference because nothing can work it out later.
+            var at = 0 as *CChar;
+            let refs = refsOf(mnt);
+            var pr = List.first(refs as *list_node);
+            while (!pr.isNull()) {
+                let r = refOfMntLink(pr);
+                if (Ptr.toBorrow(r as *mount_ns_ref).ns == parent) {
+                    at = pathOf(r) as *CChar;
+                    break;
+                }
+                pr = List.next(refs as *list_node, pr);
+            }
+            rc = nsAdd(ns, mnt, at);
+            if (rc != 0) {
+                break;
+            }
+        }
+        node = List.next(table as *list_node, node);
+    }
+    if (rc != 0) {
+        // A half-copied view is a view of a filesystem set nobody chose, so it is undone rather than handed out.
+        // Nothing here can be orphaned: every one of these mounts is still seen by the namespace it was copied from.
+        let head = mountsOf(ns);
+        var dead = List.first(head as *list_node);
+        while (!dead.isNull()) {
+            let after = List.next(head as *list_node, dead);
+            let _ = nsDrop(refOfNsLink(dead));
+            dead = after;
+        }
+        List.init(head);
+    }
+    mutex_unlock(tableLock);
+
+    if (rc != 0) {
+        kfree(ns as *mut void);
+        return rc;
+    }
+    let slot = Ptr.toBorrowMut(out);
+    * slot = ns;
+    return 0;
+}
+
+/// The atomic view of a namespace's reference count.
+/// Safety: `ns` is a live namespace.
+unsafe fn refsCount(ns: *mut mount_ns) -> borrow(static) AtomicU32 =>
+    Ptr.toBorrow(borrow mut Ptr.toBorrowMut(ns).refs as *mut u32 as *AtomicU32);
+
+/// Lock-free on purpose: a child takes its parent's namespace while the parent's spinlock is held, where a mutex may
+/// not be taken.
+/// Safety: `ns` is null or a namespace the caller holds a reference on.
+@export("mountns_get")
+unsafe fn get(ns: *mut mount_ns) -> *mut mount_ns {
+    if (ns.isNull()) {
+        return ns;
+    }
+    let old = refsCount(ns).fetchAddWith(1, Ordering.AcquireRelease);
+    check(old > 0, "old > 0");
+    return ns;
+}
+
+/// Drop a reference. The last one takes the namespace's mounts with it, newest first, and unmounts each that no other
+/// namespace can see. May block: it commits filesystems.
+/// Safety: `ns` is null or a namespace the caller holds a reference on, which it gives up; no lock held.
+@export("mountns_put")
+unsafe fn put(ns: *mut mount_ns) {
+    if (ns.isNull() || ns == initial()) {
+        return;
+    }
+    let old = refsCount(ns).fetchSubWith(1, Ordering.AcquireRelease);
+    check(old > 0, "old > 0");
+    if (old > 1) {
+        return;
+    }
+
+    // Nothing can name this namespace any more, so nothing can mount into it while this runs -- which is what lets the
+    // whole list come off in one go and be worked through with the table lock dropped. That matters because
+    // unmounting commits, and a commit must not run under the lock every other mount needs.
+    var todo: [u64; 2] = [0; 2]; // a struct list_node: next, prev
+    let head = borrow mut todo as *mut [u64; 2] as *mut list_node;
+    List.init(head);
+    let tableLock = mountns_floor_mounts_lock();
+    mutex_lock(tableLock);
+    list_move_all(mountsOf(ns), head);
+    mutex_unlock(tableLock);
+    kfree(ns as *mut void);
+
+    // Newest first: a mount nested inside another holds a vnode of the one below it, so the outer one is only
+    // releasable once the inner one is gone.
+    var node = Ptr.toBorrow(head as *list_node).prev;
+    while (node != head) {
+        let before = Ptr.toBorrow(node as *list_node).prev;
+        let r = refOfNsLink(node);
+        let mnt = Ptr.toBorrow(r as *mount_ns_ref).mnt;
+        mutex_lock(tableLock);
+        let orphaned = nsDrop(r);
+        if (orphaned) {
+            // Unreachable from here on: off the mount table and off the directory it covered, before the lock is
+            // dropped.
+            vfs_mount_detach(mnt);
+        }
+        mutex_unlock(tableLock);
+        if (orphaned) {
+            vfs_mount_orphaned(mnt);
+        }
+        node = before;
+    }
+}

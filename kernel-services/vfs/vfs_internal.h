@@ -1,5 +1,5 @@
 /*
- * vfs_internal.h - What mountns.c may touch inside vfs.c.
+ * vfs_internal.h - What mountns.cee may touch inside vfs.c.
  *
  * The mount table is private to vfs.c and stays that way; this is the
  * narrow surface the namespace code needs, and it exists so that code
