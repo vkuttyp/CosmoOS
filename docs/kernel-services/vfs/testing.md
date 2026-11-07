@@ -35,6 +35,14 @@ recorded from the C it replaced: `memdev_init` with its `ramfs_mkchr` calls fail
 each device's operations, and random reads and writes of both, with every byte of the buffer and of the guards
 around it. clang and gcc give the same digest, for the C and for the port.
 
+`tests/host/test_mountns.c` holds mount namespaces (`mountns.c`, roadmap 2.0 SA7) to a digest recorded from the C,
+over random histories: mounts made and seen by some namespaces, namespaces copied from one another while the
+allocator fails part-way through the copy, references taken and dropped until a namespace dies and takes the mounts
+only it could see with it, visibility asked of every pair, and the current namespace with and without a process.
+Every lock, detach, orphaning and result, and each namespace's view and each mount's viewers in order, are in the
+digest; the test checks the lock order and that every reference is freed. Every line runs; clang and gcc give the
+same digest.
+
 ## Self-tests (`kernel-services/vfs/vfstest.c`, `kernel-services/filesystem/cosmofs/cosmofstest_*.cee`)
 
 **`crc32c`**: the standard vector and incremental update.
