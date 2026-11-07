@@ -707,6 +707,12 @@ int cfs_data_write(struct cfs *fs, uint64_t blk, const void *buf);
 
 /* vnodes and extents (cosmofs.c) */
 int cfs_vnode_get(struct cfs *fs, uint64_t ino, struct vnode **out);
+/* cosmofs.c: the snapshot named `name` (`len` bytes, not terminated) and
+ * its vnode tag; and whether anything of the snapshot tagged `tag` is in
+ * use beyond the one reference `victim` (or NULL) holds -- the
+ * .snapshots directory's rmdir and fsctl's delete (cosmofs_snapctl.c). */
+int cfs_snap_by_name(struct cfs *fs, const char *name, size_t len, struct cfs_snapshot *out, unsigned *tag);
+bool cfs_snap_in_use(struct mount *mnt, unsigned tag, const struct vnode *victim);
 int cfs_map(struct cfs *fs, const struct cfs_inode *in, uint64_t lblk, uint64_t *pblk);
 /* The run covering `lblk`, whether it is a plain run or a compressed
  * record: 1 with the extent, 0 for a hole, or an error. */
