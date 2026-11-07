@@ -350,7 +350,7 @@ promise.
 
 ## The operator channel: `/dev/fsctl`
 
-Kernel side `kernel-services/vfs/fsctl.c`; ABI
+Kernel side `kernel-services/vfs/fsctl.cee`; ABI
 `kernel/include/uapi/cosmo/fsctl.h`; user tool `userland/system/fsctl.c`
 (`/sbin/fsctl`). The design is in `docs/audit/next-subsystem-fsctl.md`.
 The node is created by `fsctl_dev_init` with mode 0600 and logs

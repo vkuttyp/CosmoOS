@@ -1636,6 +1636,20 @@ operations, readdir's entry point and the call through its callback,
 whose type takes an enum, and `bootarchive_entry`, a function CeeSafe
 cannot name beside its struct.
 
+`fsctl.cee`, `/dev/fsctl` and /proc/mounts: `tests/host/test_fsctl.c`
+runs random sessions -- opens with and without the privilege, commands
+of every op well formed and not, against filesystems with every pass
+and with none, mounts that cannot be acquired, devices mounted or not,
+passes that fail or overrun their room -- with every result read back,
+the key command's copy checked wiped, and /proc/mounts rendered into
+buffers of every size (0x9be41a29127374e0, clang and gcc; every line).
+The pass reports and requests the C kept on its stack stay there, in
+slots of u64s whose sizes the floor asserts; the op tables become
+subtractions whose order the floor asserts. `fsctl_floor.c` keeps a
+file's state round a `struct mutex`, the operation table and the
+spinlock /proc/mounts is rendered under; the mount table's lock and the
+root mount come from `mountns_floor.c`.
+
 Size: about 4.5x.
 
 ### SA8 The Linux personality and the system-call layer

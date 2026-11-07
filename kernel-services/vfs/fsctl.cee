@@ -1,0 +1,1300 @@
+// fsctl.cee - /dev/fsctl: the operator's channel to a filesystem's maintenance passes
+// (docs/audit/next-subsystem-fsctl.md), in CeeSafe: roadmap 2.0 SA7. tests/host/test_fsctl.c holds it to the digest
+// of the C it replaced.
+//
+// cosmofs has two passes over a mounted filesystem, and until this existed every caller of either was a self-test.
+// The problem was never the passes: it was that a mount had no name an operator could use, and nothing kept one alive
+// while a pass walked it.
+//
+// A caller writes one fixed-layout command whole and reads the result back from the same open file. The result
+// belongs to that file, so two operators do not share a "last answer" to race over.
+//
+// This file knows what a pass *is* only through struct fs_type: a filesystem that has one fills in the entry, one
+// that has none leaves it null and a command against it is refused before anything is locked. That is what keeps the
+// VFS from depending on one of its filesystems.
+//
+// The mounts, the commands and the records stay C (vfs.h, cosmofs.h, fsctl.h). fsctl_floor.c keeps a file's state, a
+// struct round a struct mutex whose size the build's lock debugging decides, the operation table, and the spinlock
+// /proc/mounts is rendered under; vfs.c's mount table lock and root mount come from mountns_floor.c.
+
+@header("kernel/blk.h", "kernel/cosmofs.h", "kernel/cred.h", "kernel/errno.h", "kernel/kmalloc.h", "kernel/log.h",
+    "kernel/mountns.h", "kernel/mutex.h", "kernel/spinlock.h", "kernel/string.h", "kernel/vfs.h",
+    "uapi/cosmo/fsctl.h")
+extern "C" {
+    struct credentials {
+        euid: u32;
+        privs: u32;
+    }
+    struct file {
+        priv: *mut void;
+    }
+    struct blkdev {
+        obj: kobject;
+        name: [u8; 16];
+    }
+    struct cosmofs_check_class {
+        count: u64;
+        repaired: u64;
+        name: [u64; 8];
+        named: u32;
+    }
+    struct cosmofs_check_report {
+        alloc_not_seen: cosmofs_check_class;
+        seen_not_alloc: cosmofs_check_class;
+        dup: cosmofs_check_class;
+        nlink_wrong: cosmofs_check_class;
+        orphan: cosmofs_check_class;
+        dangling_entry: cosmofs_check_class;
+        dir_bad: cosmofs_check_class;
+        extent_order: cosmofs_check_class;
+        extent_overlap: cosmofs_check_class;
+        dir_dup_name: cosmofs_check_class;
+        counter_wrong: cosmofs_check_class;
+        chain_cycle: cosmofs_check_class;
+        unreadable: cosmofs_check_class;
+        snap_identity: cosmofs_check_class;
+        rollback_record: cosmofs_check_class;
+        hold: cosmofs_check_class;
+        blocks_seen: u64;
+        inodes_seen: u64;
+        dirs_seen: u64;
+        snapshots_seen: u64;
+        counted_free: u64;
+        counted_inodes: u64;
+        bytes_allocated: u64;
+        partial: bool;
+        clean: bool;
+        repair_refused: bool;
+        elapsed_ns: u64;
+    }
+    struct cosmofs_scrub_stats {
+        blocks_read: u64;
+        inodes: u64;
+        repaired: u64;
+        unrecoverable: u64;
+        bad_copies: u64;
+        skipped: u64;
+        elapsed_ns: u64;
+        rate: u64;
+    }
+    struct cosmofs_dev_report {
+        flags: u32;
+        mount_error: i32;
+        mount_stage: u32;
+        rollback_error: i32;
+        format: u32;
+        replayed_orphans: u32;
+        generation: u64;
+        slot_generation: [u64; 2];
+        replayed_frees: u64;
+        rollback_target: [u8; 32];
+    }
+    struct cosmofs_snap_info {
+        id: u64;
+        generation: u64;
+        created_ns: u64;
+        origin_id: u64;
+        referenced: u64;
+        unique: u64;
+        uuid: [u8; 16];
+        flags: u32;
+        format: u32;
+        name: [u8; 32];
+    }
+    struct cosmofs_snap_req {
+        op: u32;
+        name: *CChar;
+        name2: *CChar;
+        out: *mut cosmofs_snap_info;
+        max: u32;
+        no_sizes: bool;
+        after: u64;
+        count: u32;
+        total: u32;
+        format: u32;
+        pool_flags: u32;
+        free_bytes: u64;
+        total_bytes: u64;
+        rollback_error: i32;
+    }
+    struct cosmofs_copy_info {
+        member: u32;
+        copy: u32;
+        state: u32;
+        flags: u32;
+        since: u64;
+        cursor: u64;
+        blocks: u64;
+        to_do: u64;
+        read_errors: u32;
+        write_errors: u32;
+        csum_errors: u32;
+        dev: [u8; 16];
+    }
+    struct cosmofs_pool_req {
+        op: u32;
+        name: *CChar;
+        name2: *CChar;
+        out: *mut cosmofs_copy_info;
+        max: u32;
+        count: u32;
+        total: u32;
+        generation: u64;
+        members: u32;
+        format: u32;
+        rate: u32;
+        degraded: bool;
+        resilvering: bool;
+        label: [u8; 16];
+    }
+    struct cosmo_keyslot {
+        kind: u32;
+    }
+    struct cosmo_fsctl_keyinfo {
+        flags: u32;
+    }
+    struct cosmofs_key_req {
+        op: u32;
+        slot: u32;
+        key: *u8;
+        rec: *cosmo_keyslot;
+        info: *mut cosmo_fsctl_keyinfo;
+    }
+    struct fs_type {
+        name: *CChar;
+        check: extern "C" fn(*mut mount, *mut cosmofs_check_report, u32) -> i32;
+        scrub: extern "C" fn(*mut mount, *mut cosmofs_scrub_stats, u32) -> i32;
+        check_dev: extern "C" fn(*mut blkdev, u32, *mut cosmofs_check_report, *mut cosmofs_dev_report) -> i32;
+        snapctl: extern "C" fn(*mut mount, *mut cosmofs_snap_req) -> i32;
+        poolctl: extern "C" fn(*mut mount, *mut cosmofs_pool_req) -> i32;
+        keyctl: extern "C" fn(*mut blkdev, *mut mount, *mut cosmofs_key_req) -> i32;
+    }
+    struct mount {
+        id: u64;
+        fs: *mut fs_type;
+        bdev: *mut blkdev;
+        flags: u32;
+        state: AtomicU32;
+    }
+    struct mount_ns {
+        id: u64;
+        mounts: list_node;
+    }
+    struct mount_ns_ref {
+        mnt: *mut mount;
+        path: [u8; 1024];
+        ns_link: list_node;
+    }
+    struct cosmo_fsctl {
+        version: u16;
+        op: u16;
+        flags: u32;
+        mount_id: u64;
+        name: [u8; 32];
+        name2: [u8; 32];
+        cursor: u64;
+    }
+    struct cosmo_fsctl_key {
+        cmd: cosmo_fsctl;
+        slot: u32;
+        key: [u8; 32];
+        rec: cosmo_keyslot;
+    }
+    struct cosmo_fsctl_result {
+        version: u16;
+        kind: u16;
+        count: u32;
+        total: u32;
+        bytes: u32;
+    }
+    struct cosmo_fsctl_mount {
+        id: u64;
+        ns_id: u64;
+        flags: u32;
+        caps: u32;
+        fstype: [u8; 16];
+        path: [u8; 1024];
+    }
+    struct cosmo_fsctl_class {
+        count: u64;
+        repaired: u64;
+        name: [u64; 8];
+        named: u32;
+    }
+    struct cosmo_fsctl_check {
+        nclasses: u32;
+        flags: u32;
+        blocks_seen: u64;
+        inodes_seen: u64;
+        dirs_seen: u64;
+        snapshots_seen: u64;
+        counted_free: u64;
+        counted_inodes: u64;
+        bytes_allocated: u64;
+        elapsed_ns: u64;
+        @cname("class") classes: [cosmo_fsctl_class; 16];
+    }
+    struct cosmo_fsctl_scrub {
+        blocks_read: u64;
+        inodes: u64;
+        repaired: u64;
+        unrecoverable: u64;
+    }
+    struct cosmo_fsctl_scrub_ex {
+        blocks_read: u64;
+        inodes: u64;
+        bad_copies: u64;
+        repaired: u64;
+        unrecoverable: u64;
+        skipped: u64;
+        elapsed_ns: u64;
+        rate: u64;
+    }
+    struct cosmo_fsctl_dev {
+        flags: u32;
+        mount_error: i32;
+        mount_stage: u32;
+        rollback_error: i32;
+        format: u32;
+        replayed_orphans: u32;
+        generation: u64;
+        slot_generation: [u64; 2];
+        replayed_frees: u64;
+        rollback_target: [u8; 32];
+    }
+    struct cosmo_fsctl_devcheck {
+        dev: cosmo_fsctl_dev;
+        check: cosmo_fsctl_check;
+    }
+    struct cosmo_fsctl_snap_pool {
+        format: u32;
+        flags: u32;
+        free_bytes: u64;
+        total_bytes: u64;
+        rollback_error: i32;
+    }
+    struct cosmo_fsctl_snap {
+        id: u64;
+        generation: u64;
+        created_ns: u64;
+        origin_id: u64;
+        referenced: u64;
+        unique: u64;
+        uuid: [u8; 16];
+        flags: u32;
+        format: u32;
+        name: [u8; 32];
+    }
+    struct cosmo_fsctl_pool {
+        generation: u64;
+        members: u32;
+        flags: u32;
+        format: u32;
+        resilver_rate: u32;
+        label: [u8; 16];
+    }
+    struct cosmo_fsctl_copy {
+        member: u32;
+        copy: u32;
+        state: u32;
+        flags: u32;
+        since: u64;
+        cursor: u64;
+        blocks: u64;
+        to_do: u64;
+        read_errors: u32;
+        write_errors: u32;
+        csum_errors: u32;
+        dev: [u8; 16];
+    }
+    struct vnode;
+    struct chrdev_ops;
+
+    fn kzalloc(size: usize) -> *mut void;
+    fn memcpy(dst: *mut void, src: *void, n: usize) -> *mut void;
+    fn memset(p: *mut void, c: i32, n: usize) -> *mut void;
+    fn memchr(p: *void, c: i32, n: usize) -> *mut void;
+    fn strlen(s: *CChar) -> usize;
+    fn strlcpy(dst: *mut CChar, src: *CChar, size: usize) -> usize;
+    fn cred_current() -> *credentials;
+    fn mountns_current() -> *mut mount_ns;
+    fn vfs_mount_count() -> u32;
+    fn vfs_mount_acquire(id: u64, out: *mut *mut mount) -> i32;
+    fn vfs_mount_release(mnt: *mut mount);
+    fn vfs_find_fs(name: *CChar) -> *mut fs_type;
+    fn vfs_bdev_mounted(bd: *blkdev) -> bool;
+    fn blk_find(name: *CChar) -> *mut blkdev;
+    fn ramfs_mkchr(path: *CChar, mode: u32, ops: *chrdev_ops, priv: *mut void, out: *mut *mut vnode) -> i32;
+
+    // mountns_floor.c: vfs.c's mount table lock and root mount (vfs_internal.h).
+    fn mountns_floor_mounts_lock() -> *mut mutex;
+    fn mountns_floor_root() -> *mut mount;
+
+    // fsctl_floor.c
+    fn fsctl_floor_ops() -> *chrdev_ops;
+    fn fsctl_floor_open_layout(which: u32) -> usize;
+    fn fsctl_floor_list_lock() -> *mut spinlock_t;
+}
+
+// errno.h, kmalloc.h, cred.h, vfs.h, cosmofs.h and fsctl.h, which fsctl_floor.c checks.
+const EPERM: i32 = 1;
+const ENOENT: i32 = 2;
+const ENOMEM: i32 = 12;
+const EBUSY: i32 = 16;
+const ENODEV: i32 = 19;
+const EINVAL: i32 = 22;
+const ERANGE: i32 = 34;
+const EOPNOTSUPP: i32 = 95;
+const KMEM_ZERO: u32 = 1;
+const PRIV_SYS_ADMIN: u32 = 2;
+const CRED_ROOT_UID: u32 = 0;
+const MOUNT_RDONLY: u32 = 1;
+const MOUNT_STATE_DEGRADED: u32 = 1;
+const COSMOFS_CHECK_REPAIR: u32 = 1;
+const COSMOFS_CHECK_BOOT: u32 = 4;
+const COSMOFS_SCRUB_REPAIR: u32 = 1;
+const COSMOFS_SNAP_I_CLONE: u32 = 1;
+const COSMOFS_SNAP_I_TARGET: u32 = 2;
+const COSMOFS_SNAP_I_SAFETY: u32 = 4;
+const COSMOFS_SNAP_I_HELD: u32 = 8;
+const COSMOFS_SNAP_I_LIVE: u32 = 16;
+const COSMOFS_POOL_PENDING: u32 = 1;
+const COSMOFS_POOL_HELD: u32 = 2;
+const COSMOFS_COPY_I_WHOLE: u32 = 1;
+const COSMOFS_COPY_I_DETACH: u32 = 2;
+const VERSION: u16 = 3;
+const LIST: u16 = 1;
+const CHECK: u16 = 2;
+const SCRUB: u16 = 3;
+const SNAP_CREATE: u16 = 4;
+const SNAP_LIST: u16 = 5;
+const SNAP_ROLLBACK: u16 = 7;
+const SNAP_CLONE: u16 = 9;
+const BOOT_OK: u16 = 10;
+const CHECK_DEV: u16 = 11;
+const SCRUB_EX: u16 = 12;
+const POOL_STATUS: u16 = 13;
+const POOL_SPARE_REMOVE: u16 = 20;
+const KEY_INFO: u16 = 21;
+const KEY_SLOT: u16 = 24;
+const F_REPAIR: u32 = 1;
+const F_SAFETY_NAME: u32 = 2;
+const F_NO_SIZES: u32 = 4;
+const F_BOOT: u32 = 8;
+const CAP_CHECK: u32 = 1;
+const CAP_SCRUB: u32 = 2;
+const CAP_SNAP: u32 = 4;
+const CAP_POOL: u32 = 8;
+const R_PARTIAL: u32 = 1;
+const R_CLEAN: u32 = 2;
+const R_REPAIR_REFUSED: u32 = 4;
+const DEV_F_CHECKED: u32 = 1;
+const POOL_F_PENDING: u32 = 1;
+const POOL_F_HELD: u32 = 2;
+const SNAP_F_CLONE: u32 = 1;
+const SNAP_F_TARGET: u32 = 2;
+const SNAP_F_SAFETY: u32 = 4;
+const SNAP_F_HELD: u32 = 8;
+const SNAP_F_LIVE: u32 = 16;
+const POOL_DEGRADED: u32 = 1;
+const POOL_RESILVER: u32 = 2;
+const COPY_F_WHOLE: u32 = 1;
+const COPY_F_DETACH: u32 = 2;
+const CLASSES: usize = 16;
+const NAMES: usize = 8;
+const SNAP_PAGE: u32 = 1024;
+const NAME_FIELD: usize = 32;
+const MODE: u32 = 0x180; // 0600
+
+/// Copy and spare records a status has room for: every copy of the most members the format allows, and the spares
+/// (Codex on #440: 64 cut a big pool's listing short). `total` says how many there were regardless.
+const POOL_MAX: u32 = 255 * 4 + 4;
+
+// ---- a file's result: fsctl_floor.c's struct fsctl_open, its lock at offset 0 ----
+
+/// Safety: `o` is a file's state.
+unsafe fn lockOf(o: *mut u8) -> *mut mutex => o as *mut mutex;
+
+/// Safety: `o` is a file's state.
+unsafe fn resultOf(o: *mut u8) -> *mut *mut u8 => o.add(fsctl_floor_open_layout(1)) as *mut *mut u8;
+
+/// Safety: `o` is a file's state.
+unsafe fn lenOf(o: *mut u8) -> *mut usize => o.add(fsctl_floor_open_layout(2)) as *mut usize;
+
+/// Safety: as cred.h's cred_has.
+unsafe fn admin() -> bool {
+    let c = Ptr.toBorrow(cred_current());
+    return (c.privs & PRIV_SYS_ADMIN) == PRIV_SYS_ADMIN && c.euid == CRED_ROOT_UID;
+}
+
+/// Privileged, and not only by the node's mode. 0600 is discretionary: an operator can change it, and the check that
+/// cannot be changed is the one that matters. Both, on purpose.
+/// Safety: `f` is the file being opened.
+@export("fsctl_open_file")
+unsafe fn openFile(vn: *mut vnode, f: *mut file) -> i32 {
+    if (!admin()) {
+        return -EPERM;
+    }
+    let o = kmalloc(fsctl_floor_open_layout(0), KMEM_ZERO) as *mut u8;
+    if (o.isNull()) {
+        return -ENOMEM;
+    }
+    mutex_init(lockOf(o), "fsctl-open\0".ptr as *CChar);
+    let file = Ptr.toBorrowMut(f);
+    file.priv = o as *mut void;
+    return 0;
+}
+
+/// Safety: `f` is a file of /dev/fsctl at its last close.
+@export("fsctl_release")
+unsafe fn release(vn: *mut vnode, f: *mut file) {
+    let o = Ptr.toBorrow(f as *file).priv as *mut u8;
+    if (o.isNull()) {
+        return;
+    }
+    kfree(*Ptr.toBorrow(resultOf(o) as **mut u8) as *mut void);
+    kfree(o as *mut void);
+    let file = Ptr.toBorrowMut(f);
+    file.priv = 0 as *mut void;
+}
+
+/// Replace this file's result. Takes ownership of `buf`.
+/// Safety: `o` is a file's state; `buf` is null or a kmalloc block of `len` bytes.
+unsafe fn setResult(o: *mut u8, buf: *mut u8, len: usize) {
+    mutex_lock(lockOf(o));
+    let slot = Ptr.toBorrowMut(resultOf(o));
+    let old = *slot;
+    *slot = buf;
+    let size = Ptr.toBorrowMut(lenOf(o));
+    *size = len;
+    mutex_unlock(lockOf(o));
+    kfree(old as *mut void);
+}
+
+/// The result's header, at the start of the buffer, written whole.
+/// Safety: `buf` holds a header.
+unsafe fn header(buf: *mut u8, kind: u16, count: u32, total: u32, bytes: u32) {
+    let hdr = Ptr.toBorrowMut(buf as *mut cosmo_fsctl_result);
+    hdr.version = VERSION;
+    hdr.kind = kind;
+    hdr.count = count;
+    hdr.total = total;
+    hdr.bytes = bytes;
+}
+
+fn headerSize() -> usize => layoutOf<cosmo_fsctl_result>().size;
+
+/// What passes a filesystem offers.
+/// Safety: `mnt` is a live mount.
+unsafe fn caps(mnt: *mount) -> u32 {
+    let fs = Ptr.toBorrow(Ptr.toBorrow(mnt).fs as *fs_type);
+    var c: u32 = 0;
+    if (!fs.check.isNull()) {
+        c = c | CAP_CHECK;
+    }
+    if (!fs.scrub.isNull()) {
+        c = c | CAP_SCRUB;
+    }
+    if (!fs.snapctl.isNull()) {
+        c = c | CAP_SNAP;
+    }
+    if (!fs.poolctl.isNull()) {
+        c = c | CAP_POOL;
+    }
+    return c;
+}
+
+/// Safety: `m` is a record to fill; `mnt` a live mount; `path` NUL-terminated.
+unsafe fn fillMount(m: *mut cosmo_fsctl_mount, mnt: *mount, nsId: u64, path: *CChar) {
+    let _ = memset(m as *mut void, 0, layoutOf<cosmo_fsctl_mount>().size);
+    let rec = Ptr.toBorrowMut(m);
+    let src = Ptr.toBorrow(mnt);
+    rec.id = src.id;
+    rec.ns_id = nsId;
+    rec.flags = src.flags;
+    rec.caps = caps(mnt);
+    let _ = strlcpy((m as *mut u8).add(offsetOf<cosmo_fsctl_mount>(fstype)) as *mut CChar,
+        Ptr.toBorrow(src.fs as *fs_type).name, 16);
+    let _ = strlcpy((m as *mut u8).add(offsetOf<cosmo_fsctl_mount>(path)) as *mut CChar, path, 1024);
+}
+
+/// Safety: `node` is a ref's `ns_link`.
+unsafe fn refOf(node: *mut list_node) -> *mut mount_ns_ref =>
+    containerOf(node, offsetOf<mount_ns_ref>(ns_link)) as *mut mount_ns_ref;
+
+/// Safety: `r` is a live ref.
+unsafe fn pathOf(r: *mut mount_ns_ref) -> *CChar => (r as *mut u8).add(offsetOf<mount_ns_ref>(path)) as *CChar;
+
+/// The mounts the calling process's namespace holds.
+///
+/// The root mount is emitted first and separately: it is visible in every namespace and deliberately carries no
+/// mount_ns_ref (mountns.cee, "the root mount answers true without being on any list"), so a listing built from the
+/// namespace's list alone would omit the filesystem most worth checking.
+///
+/// Sized under the lock, filled under the lock, but allocated with it dropped -- a path is a kilobyte and this is not
+/// an allocation to make while holding the mount table. If the namespace gained a mount in between, `count` is short of
+/// `total` and the header says so.
+/// Safety: `o` is a file's state.
+unsafe fn list(o: *mut u8) -> i64 {
+    let want = vfs_mount_count() + 1; // + the root, which is not in a namespace list
+    let recSize = layoutOf<cosmo_fsctl_mount>().size;
+    let buf = kmalloc(headerSize() + want as usize * recSize, KMEM_ZERO) as *mut u8;
+    if (buf.isNull()) {
+        return -ENOMEM as i64;
+    }
+    let rec = buf.add(headerSize());
+    var n: u32 = 0;
+    var total: u32 = 0;
+    let table = mountns_floor_mounts_lock();
+    mutex_lock(table);
+    let ns = mountns_current();
+    let nsId = Ptr.toBorrow(ns as *mount_ns).id;
+    let root = mountns_floor_root();
+    if (!root.isNull()) {
+        total += 1;
+        if (n < want) {
+            let slot = rec.add(n as usize * recSize) as *mut cosmo_fsctl_mount;
+            fillMount(slot, root as *mount, nsId, "/\0".ptr as *CChar);
+            n += 1;
+        }
+    }
+    let head = borrow mut Ptr.toBorrowMut(ns).mounts as *mut list_node;
+    var node = List.first(head as *list_node);
+    while (!node.isNull()) {
+        let r = refOf(node);
+        let mnt = Ptr.toBorrow(r as *mount_ns_ref).mnt;
+        if (mnt != root) { // the root was emitted already, and it holds no ref anyway
+            total += 1;
+            if (n < want) {
+                fillMount(rec.add(n as usize * recSize) as *mut cosmo_fsctl_mount, mnt as *mount, nsId, pathOf(r));
+                n += 1;
+            }
+        }
+        node = List.next(head as *list_node, node);
+    }
+    mutex_unlock(table);
+    header(buf, LIST, n, total, truncate<u32>(recSize));
+    setResult(o, buf, headerSize() + n as usize * recSize);
+    return 0;
+}
+
+// ---- /proc/mounts ----
+
+/// Text appended to /proc/mounts' buffer: `len` grows while it fits; past the end `over` is set and nothing more is
+/// written.
+struct MountsOut {
+    buf: *mut u8;
+    n: usize;
+    len: usize;
+    over: bool;
+}
+
+/// Safety: `s` holds `k` bytes; `o.buf` holds `o.n`.
+unsafe fn moPut(o: borrow mut MountsOut, s: *u8, k: usize) {
+    if (o.over || o.len + k >= o.n) { // one byte stays for the NUL
+        o.over = true;
+        return;
+    }
+    let _ = memcpy(o.buf.add(o.len) as *mut void, s as *void, k);
+    o.len += k;
+}
+
+/// Safety: `s` is NUL-terminated; as moPut.
+unsafe fn moStr(o: borrow mut MountsOut, s: *CChar) {
+    moPut(o, s as *u8, strlen(s));
+}
+
+/// A path, escaped as Linux escapes /proc/mounts: a space, tab, newline or backslash as \ooo, so a reader splitting on
+/// blanks gets it back whole. Written straight into the output, so no intermediate buffer can cut a path whose escapes
+/// make it longer than VFS_PATH_MAX.
+/// Safety: `s` is NUL-terminated; as moPut.
+unsafe fn moPath(o: borrow mut MountsOut, s: *CChar) {
+    var p = s as *u8;
+    while (*Ptr.toBorrow(p) != 0) {
+        let c = *Ptr.toBorrow(p);
+        if (c == 0x20 || c == 0x09 || c == 0x0A || c == 0x5C) {
+            var e: [u8; 4] = [0x5C, 0x30 + (c >> 6), 0x30 + ((c >> 3) & 7), 0x30 + (c & 7)];
+            moPut(o, borrow e as *[u8; 4] as *u8, 4);
+        } else {
+            moPut(o, p, 1);
+        }
+        p = p.add(1);
+    }
+}
+
+/// One line, whole or not at all: a line that does not fit is taken back, and `over` stays set so no later line is
+/// written either.
+/// Safety: `mnt` is a live mount; `path` NUL-terminated; as moPut.
+unsafe fn mountsLine(o: borrow mut MountsOut, mnt: *mount, path: *CChar) {
+    let start = o.len;
+    let m = Ptr.toBorrow(mnt);
+    let fsName = Ptr.toBorrow(m.fs as *fs_type).name;
+    if (!m.bdev.isNull()) {
+        moStr(o, "/dev/\0".ptr as *CChar);
+        moStr(o, (m.bdev as *u8).add(offsetOf<blkdev>(name)) as *CChar);
+    } else {
+        moStr(o, fsName);
+    }
+    moStr(o, " \0".ptr as *CChar);
+    moPath(o, path);
+    moStr(o, " \0".ptr as *CChar);
+    moStr(o, fsName);
+    moStr(o, (if ((m.flags & MOUNT_RDONLY) != 0) " ro\0" else " rw\0").ptr as *CChar);
+    if ((m.state.loadWith(LoadOrdering.Relaxed) & MOUNT_STATE_DEGRADED) != 0) {
+        moStr(o, ",degraded\0".ptr as *CChar);
+    }
+    moStr(o, " 0 0\n\0".ptr as *CChar);
+    if (o.over) {
+        o.len = start;
+    }
+}
+
+/// The walk the listing makes, printed as /proc/mounts (vfs.h). A line that does not fit is left out whole, and so is
+/// every line after it. Under g_mount_list_lock alone: procfs calls this from its lookup, holding the directory's
+/// vnode lock, and g_mounts_lock is taken before vnode locks (vfs_internal.h).
+/// Safety: `out` holds `n` bytes.
+@export("vfs_mounts_render")
+unsafe fn mountsRender(out: *mut CChar, n: usize) -> i32 {
+    var o = MountsOut { buf: out as *mut u8, n: n, len: 0, over: n == 0 };
+    let lock = fsctl_floor_list_lock();
+    spin_lock(lock);
+    let ns = mountns_current();
+    let root = mountns_floor_root();
+    if (!root.isNull()) {
+        mountsLine(mut o, root as *mount, "/\0".ptr as *CChar);
+    }
+    let head = borrow mut Ptr.toBorrowMut(ns).mounts as *mut list_node;
+    var node = List.first(head as *list_node);
+    while (!node.isNull()) {
+        if (o.over) {
+            break;
+        }
+        let r = refOf(node);
+        let mnt = Ptr.toBorrow(r as *mount_ns_ref).mnt;
+        if (mnt != root) {
+            mountsLine(mut o, mnt as *mount, pathOf(r));
+        }
+        node = List.next(head as *list_node, node);
+    }
+    spin_unlock(lock);
+    if (n > 0) {
+        let end = Ptr.toBorrowMut(o.buf.add(o.len));
+        *end = 0;
+    }
+    return truncate<i32>(o.len);
+}
+
+// ---- the passes ----
+
+/// The record a pass fills, copied field by field (run's rule).
+/// Safety: `c` is a record to fill; `rep` a filled report.
+unsafe fn checkRecord(c: *mut cosmo_fsctl_check, rep: *cosmofs_check_report) {
+    let r = Ptr.toBorrow(rep);
+    let rec = Ptr.toBorrowMut(c);
+    rec.nclasses = truncate<u32>(CLASSES);
+    rec.flags = (if (r.partial) R_PARTIAL else 0) | (if (r.clean) R_CLEAN else 0) |
+        (if (r.repair_refused) R_REPAIR_REFUSED else 0);
+    rec.blocks_seen = r.blocks_seen;
+    rec.inodes_seen = r.inodes_seen;
+    rec.dirs_seen = r.dirs_seen;
+    rec.snapshots_seen = r.snapshots_seen;
+    rec.counted_free = r.counted_free;
+    rec.counted_inodes = r.counted_inodes;
+    rec.bytes_allocated = r.bytes_allocated;
+    rec.elapsed_ns = r.elapsed_ns;
+    for (i in 0..CLASSES) {
+        let src = classOf(rep, i);
+        let dst = borrow mut rec.classes[i];
+        dst.count = src.count;
+        dst.repaired = src.repaired;
+        dst.named = src.named;
+        for (k in 0..NAMES) {
+            dst.name[k] = src.name[k];
+        }
+    }
+}
+
+/// The report's classes in the record's order.
+/// Safety: `rep` is a filled report.
+unsafe fn classOf(rep: *cosmofs_check_report, i: usize) -> borrow(static) cosmofs_check_class {
+    let r = Ptr.toBorrow(rep);
+    return match (i) {
+        0 => borrow r.alloc_not_seen,
+        1 => borrow r.seen_not_alloc,
+        2 => borrow r.dup,
+        3 => borrow r.nlink_wrong,
+        4 => borrow r.orphan,
+        5 => borrow r.dangling_entry,
+        6 => borrow r.dir_bad,
+        7 => borrow r.counter_wrong,
+        8 => borrow r.chain_cycle,
+        9 => borrow r.unreadable,
+        10 => borrow r.extent_order,
+        11 => borrow r.extent_overlap,
+        12 => borrow r.dir_dup_name,
+        13 => borrow r.snap_identity,
+        14 => borrow r.rollback_record,
+        _ => borrow r.hold,
+    };
+}
+
+/// Run one pass against one named mount.
+///
+/// The mount is acquired by id, which takes a reference and counts a pass, so it cannot be freed and an unmount waits
+/// rather than tearing the filesystem down mid-walk. Everything fallible happens before the acquisition or after the
+/// release; there is exactly one path out that holds a mount, and it releases.
+///
+/// The result is copied field by field into the published record. A kernel struct is not an ABI: cosmofs may reorder
+/// or extend cosmofs_check_report freely, and the only thing that must not move is what userland parses.
+/// Safety: `o` is a file's state; `cmd` a validated command.
+unsafe fn run(o: *mut u8, cmd: borrow cosmo_fsctl) -> i64 {
+    var mnt = 0 as *mut mount;
+    let rc = vfs_mount_acquire(cmd.mount_id, borrow mut mnt as *mut *mut mount);
+    if (rc != 0) {
+        return rc as i64;
+    }
+    let wantCheck = cmd.op == CHECK;
+    let fs = Ptr.toBorrow(Ptr.toBorrow(mnt as *mount).fs as *fs_type);
+    if ((wantCheck && fs.check.isNull()) || (!wantCheck && fs.scrub.isNull())) {
+        vfs_mount_release(mnt);
+        return -EOPNOTSUPP as i64; // this filesystem has no such pass
+    }
+    let body = if (wantCheck) layoutOf<cosmo_fsctl_check>().size else layoutOf<cosmo_fsctl_scrub>().size;
+    let bytes = headerSize() + body;
+    let buf = kmalloc(bytes, KMEM_ZERO) as *mut u8;
+    if (buf.isNull()) {
+        vfs_mount_release(mnt);
+        return -ENOMEM as i64;
+    }
+    let rec = buf.add(headerSize());
+    var prc = 0;
+    if (wantCheck) {
+        var report: [u64; 186] = [0; 186]; // a struct cosmofs_check_report, on the stack as the C kept it
+        let rep = borrow mut report as *mut [u64; 186] as *mut cosmofs_check_report;
+        let flags = if ((cmd.flags & F_REPAIR) != 0) COSMOFS_CHECK_REPAIR else 0;
+        prc = fs.check(mnt, rep, flags);
+        if (prc == 0) {
+            checkRecord(rec as *mut cosmo_fsctl_check, rep as *cosmofs_check_report);
+        }
+    } else {
+        var stats: [u64; 8] = [0; 8]; // a struct cosmofs_scrub_stats
+        let st = borrow mut stats as *mut [u64; 8] as *mut cosmofs_scrub_stats;
+        // Version 1's SCRUB repairs as it always did; SCRUB_EX asks.
+        prc = fs.scrub(mnt, st, COSMOFS_SCRUB_REPAIR);
+        if (prc == 0) {
+            let from = Ptr.toBorrow(st as *cosmofs_scrub_stats);
+            let sc = Ptr.toBorrowMut(rec as *mut cosmo_fsctl_scrub);
+            sc.blocks_read = from.blocks_read;
+            sc.inodes = from.inodes;
+            sc.repaired = from.repaired;
+            sc.unrecoverable = from.unrecoverable;
+        }
+    }
+    vfs_mount_release(mnt);
+
+    if (prc != 0) {
+        kfree(buf as *mut void);
+        return prc as i64;
+    }
+    header(buf, cmd.op, 1, 1, truncate<u32>(body));
+    setResult(o, buf, bytes);
+    return 0;
+}
+
+/// Safety: `field` is a NUL-terminated name in its command field.
+unsafe fn named(field: *u8) -> bool => *Ptr.toBorrow(field) != 0;
+
+/// The filesystem a device command names in `name2`, "" meaning cosmofs.
+/// Safety: `cmd` is a validated command.
+unsafe fn fsNamed(cmd: borrow cosmo_fsctl) -> *mut fs_type {
+    let name2 = borrow cmd.name2 as *[u8; 32] as *u8;
+    return vfs_find_fs(if (named(name2)) name2 as *CChar else "cosmofs\0".ptr as *CChar);
+}
+
+/// CHECK_DEV (roadmap 1.2 B2): the check on a device nothing has mounted, named by its block-device name. The
+/// filesystem mounts it where no namespace sees it and runs the same check the mounted case runs (cosmofs_check_dev),
+/// so fsck.cosmofs is the kernel's checker and not a copy of it. A mounted device is -EBUSY: its own mount's CHECK is
+/// the way in.
+/// Safety: `o` is a file's state; `cmd` a validated command.
+unsafe fn checkDev(o: *mut u8, cmd: borrow cosmo_fsctl) -> i64 {
+    let fst = fsNamed(cmd);
+    if (fst.isNull()) {
+        return -ENODEV as i64;
+    }
+    let fs = Ptr.toBorrow(fst as *fs_type);
+    if (fs.check_dev.isNull()) {
+        return -EOPNOTSUPP as i64;
+    }
+    let bd = blk_find(borrow cmd.name as *[u8; 32] as *CChar);
+    if (bd.isNull()) {
+        return -ENOENT as i64;
+    }
+    var rc: i64 = 0;
+    let rep = kzalloc(layoutOf<cosmofs_check_report>().size) as *mut cosmofs_check_report;
+    let dev = kzalloc(layoutOf<cosmofs_dev_report>().size) as *mut cosmofs_dev_report;
+    let bytes = headerSize() + layoutOf<cosmo_fsctl_devcheck>().size;
+    var buf = kzalloc(bytes) as *mut u8;
+    if (rep.isNull() || dev.isNull() || buf.isNull()) {
+        rc = -ENOMEM as i64;
+    } else if (vfs_bdev_mounted(bd as *blkdev)) {
+        rc = -EBUSY as i64;
+    }
+    if (rc == 0) {
+        var flags: u32 = 0;
+        if ((cmd.flags & F_REPAIR) != 0) {
+            flags = flags | COSMOFS_CHECK_REPAIR;
+        }
+        if ((cmd.flags & F_BOOT) != 0) {
+            flags = flags | COSMOFS_CHECK_BOOT;
+        }
+        rc = fs.check_dev(bd, flags, rep, dev) as i64;
+    }
+    kobject_put(borrow mut Ptr.toBorrowMut(bd).obj as *mut kobject); // blkdev_put
+    if (rc == 0) {
+        let r = Ptr.toBorrowMut(buf.add(headerSize()) as *mut cosmo_fsctl_devcheck);
+        let d = Ptr.toBorrow(dev as *cosmofs_dev_report);
+        r.dev.flags = d.flags;
+        r.dev.mount_error = d.mount_error;
+        r.dev.mount_stage = d.mount_stage;
+        r.dev.rollback_error = d.rollback_error;
+        r.dev.format = d.format;
+        r.dev.replayed_orphans = d.replayed_orphans;
+        r.dev.generation = d.generation;
+        r.dev.slot_generation[0] = d.slot_generation[0];
+        r.dev.slot_generation[1] = d.slot_generation[1];
+        r.dev.replayed_frees = d.replayed_frees;
+        let _ = strlcpy(borrow mut r.dev.rollback_target as *mut [u8; 32] as *mut CChar,
+            borrow d.rollback_target as *[u8; 32] as *CChar, NAME_FIELD);
+        if ((d.flags & DEV_F_CHECKED) != 0) {
+            checkRecord(borrow mut r.check as *mut cosmo_fsctl_check, rep as *cosmofs_check_report);
+        }
+        header(buf, cmd.op, 1, 1, truncate<u32>(layoutOf<cosmo_fsctl_devcheck>().size));
+        setResult(o, buf, bytes);
+        buf = 0 as *mut u8;
+    }
+    kfree(buf as *mut void);
+    kfree(rep as *mut void);
+    kfree(dev as *mut void);
+    return rc;
+}
+
+/// SCRUB_EX (roadmap 1.2 B2): the scrub, repairing only when asked.
+/// Safety: `o` is a file's state; `cmd` a validated command.
+unsafe fn scrubEx(o: *mut u8, cmd: borrow cosmo_fsctl) -> i64 {
+    var mnt = 0 as *mut mount;
+    var rc = vfs_mount_acquire(cmd.mount_id, borrow mut mnt as *mut *mut mount);
+    if (rc != 0) {
+        return rc as i64;
+    }
+    let fs = Ptr.toBorrow(Ptr.toBorrow(mnt as *mount).fs as *fs_type);
+    if (fs.scrub.isNull()) {
+        vfs_mount_release(mnt);
+        return -EOPNOTSUPP as i64;
+    }
+    // The record first: a repairing scrub that then had nowhere to say what it repaired would have changed the pool
+    // and told nobody (Codex on #434).
+    let bytes = headerSize() + layoutOf<cosmo_fsctl_scrub_ex>().size;
+    let buf = kzalloc(bytes) as *mut u8;
+    if (buf.isNull()) {
+        vfs_mount_release(mnt);
+        return -ENOMEM as i64;
+    }
+    var stats: [u64; 8] = [0; 8]; // a struct cosmofs_scrub_stats
+    let st = borrow mut stats as *mut [u64; 8] as *mut cosmofs_scrub_stats;
+    rc = fs.scrub(mnt, st, if ((cmd.flags & F_REPAIR) != 0) COSMOFS_SCRUB_REPAIR else 0);
+    vfs_mount_release(mnt);
+    if (rc != 0) {
+        kfree(buf as *mut void);
+        return rc as i64;
+    }
+    let from = Ptr.toBorrow(st as *cosmofs_scrub_stats);
+    let x = Ptr.toBorrowMut(buf.add(headerSize()) as *mut cosmo_fsctl_scrub_ex);
+    x.blocks_read = from.blocks_read;
+    x.inodes = from.inodes;
+    x.bad_copies = from.bad_copies;
+    x.repaired = from.repaired;
+    x.unrecoverable = from.unrecoverable;
+    x.skipped = from.skipped;
+    x.elapsed_ns = from.elapsed_ns;
+    x.rate = from.rate;
+    header(buf, cmd.op, 1, 1, truncate<u32>(layoutOf<cosmo_fsctl_scrub_ex>().size));
+    setResult(o, buf, bytes);
+    return 0;
+}
+
+/// fsctl.h's snapshot ops to cosmofs.h's (COSMOFS_SNAP_CREATE is 1, BOOT_OK 7, in fsctl.h's order from SNAP_CREATE).
+fn snapOp(op: u16) -> u32 => (op - SNAP_CREATE) as u32 + 1;
+
+/// Safety: `field` is a NUL-terminated name in its command field.
+unsafe fn nameOrNull(field: *u8) -> *CChar => if (named(field)) field as *CChar else 0 as *CChar;
+
+/// A snapshot operation against one named mount (version 3). The mount is held across the call exactly as a pass
+/// holds it, and the records are copied field by field: struct cosmofs_snap_info is cosmofs's and may change, struct
+/// cosmo_fsctl_snap is the ABI.
+/// Safety: `o` is a file's state; `cmd` a validated command.
+unsafe fn snap(o: *mut u8, cmd: borrow cosmo_fsctl) -> i64 {
+    var mnt = 0 as *mut mount;
+    var rc = vfs_mount_acquire(cmd.mount_id, borrow mut mnt as *mut *mut mount);
+    if (rc != 0) {
+        return rc as i64;
+    }
+    let fs = Ptr.toBorrow(Ptr.toBorrow(mnt as *mount).fs as *fs_type);
+    if (fs.snapctl.isNull()) {
+        vfs_mount_release(mnt);
+        return -EOPNOTSUPP as i64;
+    }
+    // Room for every snapshot a list can hold (CFS_SNAP_ID_MAX is the id space; a list this long is not one anyone
+    // has).
+    let listing = cmd.op == SNAP_LIST;
+    let max: u32 = if (listing) SNAP_PAGE else 1;
+    let infoSize = layoutOf<cosmofs_snap_info>().size;
+    let info = kzalloc(max as usize * infoSize) as *mut u8;
+    if (info.isNull()) {
+        vfs_mount_release(mnt);
+        return -ENOMEM as i64;
+    }
+    let safetyNamed = (cmd.flags & F_SAFETY_NAME) != 0;
+    let name2 = borrow cmd.name2 as *[u8; 32] as *u8;
+    var request: [u64; 11] = [0; 11]; // a struct cosmofs_snap_req, on the stack as the C kept it
+    let rp = borrow mut request as *mut [u64; 11] as *mut cosmofs_snap_req;
+    let req = Ptr.toBorrowMut(rp);
+    req.op = snapOp(cmd.op);
+    req.name = nameOrNull(borrow cmd.name as *[u8; 32] as *u8);
+    req.name2 = if ((cmd.op == SNAP_CLONE || safetyNamed) && named(name2)) name2 as *CChar else 0 as *CChar;
+    req.out = info as *mut cosmofs_snap_info;
+    req.max = max;
+    req.no_sizes = (cmd.flags & F_NO_SIZES) != 0;
+    req.after = if (listing) cmd.cursor else 0;
+    rc = fs.snapctl(mnt, rp);
+    vfs_mount_release(mnt);
+    if (rc != 0) {
+        kfree(info as *mut void);
+        return rc as i64;
+    }
+    let pool = if (listing) layoutOf<cosmo_fsctl_snap_pool>().size else 0;
+    let recSize = layoutOf<cosmo_fsctl_snap>().size;
+    let bytes = headerSize() + pool + req.count as usize * recSize;
+    let buf = kzalloc(bytes) as *mut u8;
+    if (buf.isNull()) {
+        kfree(info as *mut void);
+        return -ENOMEM as i64;
+    }
+    if (listing) {
+        let p = Ptr.toBorrowMut(buf.add(headerSize()) as *mut cosmo_fsctl_snap_pool);
+        p.format = req.format;
+        p.flags = (if ((req.pool_flags & COSMOFS_POOL_PENDING) != 0) POOL_F_PENDING else 0) |
+            (if ((req.pool_flags & COSMOFS_POOL_HELD) != 0) POOL_F_HELD else 0);
+        p.free_bytes = req.free_bytes;
+        p.total_bytes = req.total_bytes;
+        p.rollback_error = req.rollback_error;
+    }
+    let recs = buf.add(headerSize() + pool);
+    for (i in 0..req.count) {
+        let from = Ptr.toBorrow(info.add(i as usize * infoSize) as *cosmofs_snap_info);
+        let r = Ptr.toBorrowMut(recs.add(i as usize * recSize) as *mut cosmo_fsctl_snap);
+        r.id = from.id;
+        r.generation = from.generation;
+        r.created_ns = from.created_ns;
+        r.origin_id = from.origin_id;
+        r.referenced = from.referenced;
+        r.unique = from.unique;
+        r.uuid = from.uuid;
+        let f = from.flags;
+        r.flags = (if ((f & COSMOFS_SNAP_I_CLONE) != 0) SNAP_F_CLONE else 0) |
+            (if ((f & COSMOFS_SNAP_I_TARGET) != 0) SNAP_F_TARGET else 0) |
+            (if ((f & COSMOFS_SNAP_I_SAFETY) != 0) SNAP_F_SAFETY else 0) |
+            (if ((f & COSMOFS_SNAP_I_HELD) != 0) SNAP_F_HELD else 0) |
+            (if ((f & COSMOFS_SNAP_I_LIVE) != 0) SNAP_F_LIVE else 0);
+        r.format = from.format;
+        let _ = strlcpy(borrow mut r.name as *mut [u8; 32] as *mut CChar, borrow from.name as *[u8; 32] as *CChar,
+            NAME_FIELD);
+    }
+    kfree(info as *mut void);
+    // BOOT_OK's total is 1 when it released a hold, 0 when there was none.
+    let total = if (listing || cmd.op == BOOT_OK) req.total else req.count;
+    header(buf, cmd.op, req.count, total, truncate<u32>(recSize));
+    setResult(o, buf, bytes);
+    return 0;
+}
+
+/// A pool operation against one named mount (roadmap 1.2 B3). STATUS's records are copied field by field, as the
+/// snapshots' are: struct cosmofs_copy_info is cosmofs's, struct cosmo_fsctl_copy the ABI. fsctl.h's pool ops are
+/// cosmofs.h's in the same order, from POOL_STATUS's 0.
+/// Safety: `o` is a file's state; `cmd` a validated command.
+unsafe fn pool(o: *mut u8, cmd: borrow cosmo_fsctl) -> i64 {
+    var mnt = 0 as *mut mount;
+    var rc = vfs_mount_acquire(cmd.mount_id, borrow mut mnt as *mut *mut mount);
+    if (rc != 0) {
+        return rc as i64;
+    }
+    let fs = Ptr.toBorrow(Ptr.toBorrow(mnt as *mount).fs as *fs_type);
+    if (fs.poolctl.isNull()) {
+        vfs_mount_release(mnt);
+        return -EOPNOTSUPP as i64;
+    }
+    let status = cmd.op == POOL_STATUS;
+    let max: u32 = if (status) POOL_MAX else 0;
+    let infoSize = layoutOf<cosmofs_copy_info>().size;
+    let info = if (max != 0) kzalloc(max as usize * infoSize) as *mut u8 else 0 as *mut u8;
+    if (max != 0 && info.isNull()) {
+        vfs_mount_release(mnt);
+        return -ENOMEM as i64;
+    }
+    var request: [u64; 11] = [0; 11]; // a struct cosmofs_pool_req, on the stack as the C kept it
+    let rp = borrow mut request as *mut [u64; 11] as *mut cosmofs_pool_req;
+    let req = Ptr.toBorrowMut(rp);
+    req.op = (cmd.op - POOL_STATUS) as u32;
+    req.name = borrow cmd.name as *[u8; 32] as *CChar;
+    req.name2 = borrow cmd.name2 as *[u8; 32] as *CChar;
+    req.out = info as *mut cosmofs_copy_info;
+    req.max = max;
+    rc = fs.poolctl(mnt, rp);
+    vfs_mount_release(mnt);
+    if (rc != 0) {
+        kfree(info as *mut void);
+        return rc as i64;
+    }
+    if (info.isNull() || req.count > max) {
+        req.count = 0; // only STATUS has records, and never more than it was given room for
+    }
+    let poolSize = if (status) layoutOf<cosmo_fsctl_pool>().size else 0;
+    let recSize = layoutOf<cosmo_fsctl_copy>().size;
+    let bytes = headerSize() + poolSize + req.count as usize * recSize;
+    let buf = kzalloc(bytes) as *mut u8;
+    if (buf.isNull()) {
+        kfree(info as *mut void);
+        return -ENOMEM as i64;
+    }
+    if (status) {
+        let p = Ptr.toBorrowMut(buf.add(headerSize()) as *mut cosmo_fsctl_pool);
+        p.generation = req.generation;
+        p.members = req.members;
+        p.flags = (if (req.degraded) POOL_DEGRADED else 0) | (if (req.resilvering) POOL_RESILVER else 0);
+        p.format = req.format;
+        p.resilver_rate = req.rate;
+        p.label = req.label;
+    }
+    let recs = buf.add(headerSize() + poolSize);
+    for (i in 0..req.count) {
+        let from = Ptr.toBorrow(info.add(i as usize * infoSize) as *cosmofs_copy_info);
+        let r = Ptr.toBorrowMut(recs.add(i as usize * recSize) as *mut cosmo_fsctl_copy);
+        r.member = from.member;
+        r.copy = from.copy;
+        r.state = from.state;
+        r.flags = (if ((from.flags & COSMOFS_COPY_I_WHOLE) != 0) COPY_F_WHOLE else 0) |
+            (if ((from.flags & COSMOFS_COPY_I_DETACH) != 0) COPY_F_DETACH else 0);
+        r.since = from.since;
+        r.cursor = from.cursor;
+        r.blocks = from.blocks;
+        r.to_do = from.to_do;
+        r.read_errors = from.read_errors;
+        r.write_errors = from.write_errors;
+        r.csum_errors = from.csum_errors;
+        let _ = strlcpy(borrow mut r.dev as *mut [u8; 16] as *mut CChar, borrow from.dev as *[u8; 16] as *CChar, 16);
+    }
+    kfree(info as *mut void);
+    let total = if (req.total > req.count) req.total else req.count;
+    header(buf, cmd.op, req.count, total, truncate<u32>(recSize));
+    setResult(o, buf, bytes);
+    return 0;
+}
+
+/// The key operations (roadmap 1.2 B5): a pool named by its device, or by a mount when `name` is empty. The command
+/// carries the master key for LOAD and SLOT; it is wiped by the caller once the filesystem has it. fsctl.h's key ops
+/// are cosmofs.h's in the same order, from KEY_INFO's 0.
+/// Safety: `o` is a file's state; `k` a validated key command.
+unsafe fn key(o: *mut u8, k: *mut cosmo_fsctl_key) -> i64 {
+    let command = Ptr.toBorrow(k as *cosmo_fsctl_key);
+    let cmd = borrow command.cmd;
+    let info = cmd.op == KEY_INFO;
+    let infoSize = layoutOf<cosmo_fsctl_keyinfo>().size;
+    let bytes = headerSize() + (if (info) infoSize else 0);
+    let buf = kzalloc(bytes) as *mut u8;
+    if (buf.isNull()) {
+        return -ENOMEM as i64;
+    }
+    var request: [u64; 4] = [0; 4]; // a struct cosmofs_key_req, on the stack as the C kept it
+    let rp = borrow mut request as *mut [u64; 4] as *mut cosmofs_key_req;
+    let req = Ptr.toBorrowMut(rp);
+    req.op = (cmd.op - KEY_INFO) as u32;
+    req.slot = command.slot;
+    req.key = borrow command.key as *[u8; 32] as *u8;
+    req.rec = borrow command.rec as *cosmo_keyslot;
+    req.info = if (info) buf.add(headerSize()) as *mut cosmo_fsctl_keyinfo else 0 as *mut cosmo_fsctl_keyinfo;
+    var rc: i64 = 0;
+    if (named(borrow cmd.name as *[u8; 32] as *u8)) {
+        let fst = fsNamed(cmd);
+        let canKey = !fst.isNull() && !Ptr.toBorrow(fst as *fs_type).keyctl.isNull();
+        let bd = if (canKey) blk_find(borrow cmd.name as *[u8; 32] as *CChar) else 0 as *mut blkdev;
+        if (fst.isNull()) {
+            rc = -ENODEV as i64;
+        } else if (!canKey) {
+            rc = -EOPNOTSUPP as i64;
+        } else if (bd.isNull()) {
+            rc = -ENOENT as i64;
+        } else {
+            rc = Ptr.toBorrow(fst as *fs_type).keyctl(bd, 0 as *mut mount, rp) as i64;
+        }
+        if (!bd.isNull()) {
+            kobject_put(borrow mut Ptr.toBorrowMut(bd).obj as *mut kobject); // blkdev_put
+        }
+    } else {
+        var mnt = 0 as *mut mount;
+        rc = vfs_mount_acquire(cmd.mount_id, borrow mut mnt as *mut *mut mount) as i64;
+        if (rc == 0) {
+            let fs = Ptr.toBorrow(Ptr.toBorrow(mnt as *mount).fs as *fs_type);
+            rc = if (fs.keyctl.isNull()) -EOPNOTSUPP as i64 else fs.keyctl(0 as *mut blkdev, mnt, rp) as i64;
+            vfs_mount_release(mnt);
+        }
+    }
+    if (rc != 0) {
+        kfree(buf as *mut void);
+        return rc;
+    }
+    let count: u32 = if (info) 1 else 0;
+    header(buf, cmd.op, count, count, if (info) truncate<u32>(infoSize) else 0);
+    setResult(o, buf, bytes);
+    return 0;
+}
+
+fn keyOp(op: u16) -> bool => op >= KEY_INFO && op <= KEY_SLOT;
+
+/// Every bit of `flags` must mean something to this op. Accepting a bit nobody defined makes a caller's mistake
+/// silent now and makes it ambiguous later, when a version gives that bit a meaning and an old writer turns out to
+/// have been setting it.
+fn allowed(op: u16) -> u32 {
+    if (op == CHECK || op == SCRUB_EX) {
+        return F_REPAIR;
+    }
+    if (op == CHECK_DEV) {
+        return F_REPAIR | F_BOOT;
+    }
+    if (op == SNAP_ROLLBACK) {
+        return F_SAFETY_NAME;
+    }
+    return if (op == SNAP_LIST) F_NO_SIZES else 0;
+}
+
+/// A command: validated whole, then run.
+/// Safety: `f` is an open file of /dev/fsctl; `buf` holds `len` bytes.
+@export("fsctl_write_file")
+unsafe fn writeFile(vn: *mut vnode, f: *mut file, off: u64, buf: *void, len: usize) -> i64 {
+    let o = Ptr.toBorrow(f as *file).priv as *mut u8;
+    if (o.isNull()) {
+        return -EINVAL as i64;
+    }
+    if (!admin()) {
+        return -EPERM as i64; // the fd may have outlived the privilege that opened it
+    }
+    // A command is exactly one struct, applied whole: the key operations' is the longer one, and only theirs.
+    let cmdSize = layoutOf<cosmo_fsctl>().size;
+    let keySize = layoutOf<cosmo_fsctl_key>().size;
+    if (len != cmdSize && len != keySize) {
+        return -EINVAL as i64;
+    }
+    var slot: [u64; 11] = [0; 11]; // a struct cosmo_fsctl
+    let cp = borrow mut slot as *mut [u64; 11] as *mut cosmo_fsctl;
+    let _ = memcpy(cp as *mut void, buf, cmdSize);
+    let cmd = Ptr.toBorrow(cp as *cosmo_fsctl);
+    if (cmd.version != VERSION) {
+        return -EINVAL as i64;
+    }
+    if (keyOp(cmd.op) != (len == keySize)) {
+        return -EINVAL as i64;
+    }
+    if ((cmd.flags & (allowed(cmd.op) ^ 0xFFFFFFFF)) != 0) {
+        return -EINVAL as i64;
+    }
+    if (cmd.op == CHECK_DEV && (cmd.flags & F_BOOT) != 0 && (cmd.flags & F_REPAIR) == 0) {
+        return -EINVAL as i64; // BOOT narrows a repair; alone it means nothing
+    }
+    // A name is a NUL-terminated string inside its field, or empty.
+    if (memchr(borrow cmd.name as *[u8; 32] as *void, 0, NAME_FIELD).isNull() ||
+        memchr(borrow cmd.name2 as *[u8; 32] as *void, 0, NAME_FIELD).isNull()) {
+        return -EINVAL as i64;
+    }
+
+    var rc: i64 = 0;
+    let op = cmd.op;
+    if (op == LIST) {
+        rc = list(o);
+    } else if (op == CHECK || op == SCRUB) {
+        rc = run(o, cmd);
+    } else if (op == CHECK_DEV) {
+        rc = checkDev(o, cmd);
+    } else if (op == SCRUB_EX) {
+        rc = scrubEx(o, cmd);
+    } else if (op >= SNAP_CREATE && op <= BOOT_OK) {
+        rc = snap(o, cmd);
+    } else if (op >= POOL_STATUS && op <= POOL_SPARE_REMOVE) {
+        rc = pool(o, cmd);
+    } else if (keyOp(op)) {
+        let k = kmalloc(keySize, 0) as *mut cosmo_fsctl_key;
+        if (k.isNull()) {
+            rc = -ENOMEM as i64;
+        } else {
+            let _ = memcpy(k as *mut void, buf, keySize);
+            rc = key(o, k);
+            let _ = memset(k as *mut void, 0, keySize); // the master key, if it carried one
+            kfree(k as *mut void);
+        }
+    } else {
+        rc = -EINVAL as i64;
+    }
+    // A command that failed leaves no result: a reader must not see the previous one and take it for this one's
+    // answer. A pass that *found faults* did not fail -- the report says what they are and the write succeeds, because
+    // "the filesystem has three leaked blocks" is a successful check.
+    if (rc != 0) {
+        setResult(o, 0 as *mut u8, 0);
+        return rc;
+    }
+    return truncate<i64>(len);
+}
+
+/// The result of this file's last command. A file that has issued none, or whose last command failed, reads zero
+/// bytes -- which is why LIST is a written command and not "a read with no prior command": the empty state needs one
+/// meaning.
+/// Safety: `f` is an open file of /dev/fsctl; `buf` holds `len` bytes.
+@export("fsctl_read_file")
+unsafe fn readFile(vn: *mut vnode, f: *mut file, off: u64, buf: *mut void, len: usize) -> i64 {
+    let o = Ptr.toBorrow(f as *file).priv as *mut u8;
+    if (o.isNull()) {
+        return 0;
+    }
+    mutex_lock(lockOf(o));
+    var n: i64 = 0;
+    let result = *Ptr.toBorrow(resultOf(o) as **mut u8);
+    let size = *Ptr.toBorrow(lenOf(o) as *usize);
+    if (result.isNull()) {
+        n = 0;
+    } else if (len < size) {
+        n = -ERANGE as i64; // a result is read whole or not at all
+    } else {
+        let _ = memcpy(buf, result as *void, size);
+        n = truncate<i64>(size);
+    }
+    mutex_unlock(lockOf(o));
+    return n;
+}
+
+static mut NODE: *mut vnode = 0 as *mut vnode;
+
+/// Safety: at boot, once /dev exists.
+@export("fsctl_dev_init")
+unsafe fn devInit() {
+    let rc = ramfs_mkchr("/dev/fsctl\0".ptr as *CChar, MODE, fsctl_floor_ops(), 0 as *mut void,
+        borrow mut NODE as *mut *mut vnode);
+    if (rc != 0) {
+        var buffer: [u8; 64] = [0; 64];
+        var line = TextWriter.create(mut buffer[..]);
+        line.text("fsctl: /dev/fsctl: ");
+        line.signed(rc as i64);
+        KernelLog.send(LogLevel.Error, line);
+        return;
+    }
+    // Said out loud on every boot, release included. No self-test runs in a release build, so this line is the only
+    // evidence that the channel an operator needs is actually there -- and a release kernel that shipped the passes
+    // with no way to reach them is the thing this unit exists to stop.
+    KernelLog.write(LogLevel.Info,
+        "fsctl: /dev/fsctl ready (0600): mount listing, check (mounted or not), scrub, snapshots, pools and keys");
+}

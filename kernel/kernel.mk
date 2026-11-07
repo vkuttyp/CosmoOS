@@ -170,6 +170,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel/core/bootfs.c \
 	kernel-services/vfs/vfs.c \
 	kernel-services/vfs/fsctl.c \
+	kernel-services/vfs/fsctl_floor.c \
 	kernel-services/vfs/blkctl.c \
 	kernel-services/vfs/blkctl_floor.c \
 	kernel-services/vfs/mountns.c \

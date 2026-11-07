@@ -45,7 +45,7 @@ in a removed directory, no directory renamed into itself). Every call, result, n
 the digest; every vnode, entry and allocation is given back. Every line runs but the link without a target, which no
 symlink can make; clang and gcc give the same digest, for the C and for the port.
 
-`tests/host/test_fsctl.c` holds `/dev/fsctl` (`fsctl.c`, roadmap 2.0 SA7) to a digest recorded from the C over random
+`tests/host/test_fsctl.c` holds `/dev/fsctl` (`fsctl.cee`, roadmap 2.0 SA7) to a digest recorded from the C over random
 sessions: files opened with and without the privilege and while the allocator fails; commands of every op, well
 formed and not (short, long, of the wrong version, with flags an op does not take, names without their NUL, key
 commands of the wrong length), against a mount table of filesystems with every pass and with none, mounts that
@@ -53,7 +53,7 @@ cannot be acquired, devices mounted, unmounted and absent, and passes that fail 
 were given room for; each result read back into buffers of every size; and /proc/mounts rendered into buffers of
 every size from namespaces whose paths need escaping. Every call, result and byte read back, and the key command's
 copy as it is freed (its key wiped), are in the digest; every mount and device reference is given back. Every line
-runs; clang and gcc give the same digest.
+runs; clang and gcc give the same digest, for the C and for the port.
 
 `tests/host/test_mountns.c` holds mount namespaces (`mountns.cee`, roadmap 2.0 SA7) to a digest recorded from the C,
 over random histories: mounts made and seen by some namespaces, namespaces copied from one another while the
