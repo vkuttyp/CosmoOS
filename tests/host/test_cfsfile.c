@@ -1,5 +1,5 @@
 /*
- * test_cfsfile.c - a cosmofs regular file's vnode operations (kernel-services/filesystem/cosmofs/cosmofs_file.c) on
+ * test_cfsfile.c - a cosmofs regular file's vnode operations (kernel-services/filesystem/cosmofs/cosmofs_file.cee) on
  * the host: roadmap 2.0 SA7. A digest recorded from the C over files of the live tree, a snapshot's and a clone's
  * (one that is gone), mounted or not, failed or not: pages read and written over holes, plain blocks and compressed
  * records; record-sized write-backs compressed or kept plain by the run bound; dirty pages charged against the run
@@ -24,6 +24,18 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* The values the CeeSafe port writes as its own constants. */
+_Static_assert(EIO == 5 && ENOMEM == 12 && EINVAL == 22 && EFBIG == 27 && ENOSPC == 28 && EROFS == 30 &&
+                   VNODE_REG == 1 && offsetof(struct vnode, type) == 56 && sizeof(((struct vnode *)0)->type) == 4,
+               "cosmofs_file's errno.h and vfs.h values");
+_Static_assert(CFS_BLOCK == 4096 && CFS_RECORD_BLOCKS == 8 && CFS_COMPRESS_NONE == 0 && CFS_ALLOC_DATA == 1 &&
+                   CFS_EXT_COMPRESSED == 0x80000000u && CFS_EXT_COUNT_MASK == 0xFFFF &&
+                   offsetof(struct cfs_vnode, inode) == 0,
+               "cosmofs_file's cosmofs_format.h and cosmofs_internal.h values");
+/* cosmofs_file.cee keeps a run in a stack slot of 2 words and an inode in one of 32. */
+_Static_assert(sizeof(struct cfs_extent) <= 2 * 8 && sizeof(struct cfs_inode) <= 32 * 8,
+               "cosmofs_file.cee's stack slots");
 
 /* The digest of the C (cosmofs_file.c, 2026-11-07), which the CeeSafe port gives. */
 #define FILE_DIGEST 0xde01af8468dcf4ccull

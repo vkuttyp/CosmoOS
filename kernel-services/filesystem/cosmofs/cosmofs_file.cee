@@ -1,0 +1,651 @@
+// cosmofs_file.cee - A regular file's vnode operations, in CeeSafe: roadmap 2.0 SA7. tests/host/test_cfsfile.c holds
+// it to the digest of the C it replaced.
+//
+// Pages read and written (a page inside a compressed record rebuilds the record around it), record-sized write-backs,
+// the run bound and the pool's space charged when a page becomes dirty, truncation, setattr, sync and eviction.
+//
+// struct cfs, the mount, the vnode and its state stay C (cosmofs_internal.h, kernel/vfs.h). The run and the inode the
+// C kept on the stack are kept in zeroed slots of words, checked against their C sizes (tests/host/test_cfsfile.c):
+// a CeeSafe local cannot hold C state. A vnode's type, a field whose name CeeSafe reserves, is read at its offset,
+// which the test checks. cosmofs_file_floor.c keeps what a build configuration decides: the debug build's stuck-page
+// check, the run bound a self-test lowers, and the self-test hook that counts runs.
+
+@header("kernel/vfs.h", "kernel/kmalloc.h", "kernel/mutex.h", "kernel/pagecache.h", "kernel/string.h",
+    "kernel/cosmofs.h", "cosmofs_internal.h")
+extern "C" {
+    struct mount {
+        fs_priv: *mut void;
+        cache_dirty: u64;
+    }
+    struct pagecache {
+        nr_dirty: u32;
+    }
+    struct vnode {
+        ino: u64;
+        size: u64;
+        mtime_ns: u64;
+        nlink: u32;
+        mnt: *mut mount;
+        fs_priv: *mut void;
+        pc: pagecache;
+    }
+    struct cfs_super {
+        inode_count: u64;
+    }
+    struct cfs {
+        sb: cfs_super;
+        free_blocks: u64;
+        reserve: u64;
+        failed: i32;
+        lock: mutex;
+        map_stores: u64;
+        last_store_in: *cfs_inode;
+        last_store_n: u32;
+    }
+    struct cfs_extent {
+        start: u64;
+        count: u32;
+        lblk: u32;
+    }
+    struct cfs_inode {
+        ino: u64;
+        compress_algo: u32;
+    }
+    struct cfs_vnode {
+        inode: cfs_inode;
+        snap_tag: u32;
+        runs: u32;
+        runs_at: u64;
+        runs_valid: bool;
+    }
+    struct cfs_clone {
+        id: u64;
+    }
+
+    fn cfs_map_ext(fs: *mut cfs, inode: *cfs_inode, lblk: u64, out: *mut cfs_extent) -> i32;
+    fn cfs_data_read_verified(fs: *mut cfs, inode: *mut cfs_inode, lblk: u64, dva: u64, buf: *mut void) -> i32;
+    fn cfs_record_read(fs: *mut cfs, inode: *mut cfs_inode, e: *cfs_extent, out: *mut u8) -> i32;
+    fn cfs_record_write(fs: *mut cfs, inode: *mut cfs_inode, lblk0: u64, data: *u8, n: u32, compress: bool) -> i32;
+    fn cfs_data_write_block(fs: *mut cfs, inode: *mut cfs_inode, lblk: u64, buf: *void, cls: u32) -> i32;
+    fn cfs_vnode_inode_sync(fs: *mut cfs, vn: *mut vnode) -> i32;
+    fn cfs_vnode_prepare(fs: *mut cfs, vn: *mut vnode) -> i32;
+    fn cfs_tree_readonly(fs: *mut cfs, vn: *mut vnode) -> bool;
+    fn cfs_lock_tree_w(fs: *mut cfs, vn: *mut vnode) -> i32;
+    fn cfs_unlock_tree(fs: *mut cfs);
+    fn cfs_extents_count(fs: *mut cfs, inode: *cfs_inode, out: *mut u32) -> i32;
+    fn cfs_truncate_blocks(fs: *mut cfs, inode: *mut cfs_inode, keep: u64) -> i32;
+    fn cfs_commit(fs: *mut cfs) -> i32;
+    fn cfs_clone_by_id(fs: *mut cfs, id: u64) -> *mut cfs_clone;
+    fn cfs_inode_write(fs: *mut cfs, ino: u64, inode: *cfs_inode) -> i32;
+    fn cfs_orphan_remove(fs: *mut cfs, ino: u64);
+    fn cfs_fail(fs: *mut cfs, rc: i32);
+    fn pagecache_truncate(vn: *mut vnode, size: u64);
+    fn pagecache_sync(vn: *mut vnode) -> i32;
+    fn vfs_now_ns() -> u64;
+    fn memset(p: *mut void, c: i32, n: usize) -> *mut void;
+    fn memcpy(dst: *mut void, src: *void, n: usize) -> *mut void;
+    /// cosmofs_file_floor.c: the debug build's stuck-page check, and the run bound.
+    fn cfs_file_floor_stuck_page(fs: *mut cfs, vn: *mut vnode, index: u64, rc: i32);
+    fn cfs_file_floor_max_extents(fs: *cfs) -> u32;
+}
+
+// ---- errno.h, vfs.h, cosmofs_format.h and cosmofs_internal.h values (asserted in tests/host/test_cfsfile.c) ----
+
+const EIO: i32 = 5;
+const ENOMEM: i32 = 12;
+const EINVAL: i32 = 22;
+const EFBIG: i32 = 27;
+const ENOSPC: i32 = 28;
+const EROFS: i32 = 30;
+const VNODE_REG: u32 = 1;
+/// Where a struct vnode's `type` is.
+const VN_TYPE: usize = 56;
+const CFS_BLOCK: u64 = 4096;
+const CFS_RECORD_BLOCKS: u32 = 8;
+const CFS_COMPRESS_NONE: u32 = 0;
+const CFS_ALLOC_DATA: u32 = 1;
+const CFS_EXT_COMPRESSED: u32 = 0x80000000;
+const CFS_EXT_COUNT_MASK: u32 = 0xFFFF;
+/// The run bound, charged when a page becomes dirty rather than found at its write-back (CFS-32; design.md, "Refused
+/// at the write"). A dirty page's write-back is one cfs_set_extent, which adds at most two runs (the run it lands in
+/// split around it); a whole record's is one cfs_set_extent for eight pages, so two a page is a bound and not a guess.
+/// A truncate adds runs of its own -- a record it cuts is written again as plain blocks, at most seven, and a partial
+/// last block once more -- so cfs_truncate writes the dirty pages first when its additions could reach the room they
+/// were charged; CFS_TRUNC_ADDS of headroom covers a store that faults a page dirty between that test and the trim.
+const CFS_TRUNC_ADDS: u32 = 8;
+/// The write policy that keeps a compressible file inside the run bound (CFS-32 1b; design.md, "The run bound,
+/// charged at the write"): once the inode holds this share of the runs it may have, a new record is written plain.
+const CFS_RAW_AT_PERCENT: u64 = 75;
+
+// ---- Helpers ----
+
+fn extCompressed(count: u32) -> bool => (count & CFS_EXT_COMPRESSED) != 0;
+
+fn extCount(count: u32) -> u32 => if (extCompressed(count)) count & CFS_EXT_COUNT_MASK else count;
+
+/// The mounted filesystem behind a vnode, or null.
+/// Safety: `vn` is a vnode.
+unsafe fn fsOf(vn: *mut vnode) -> *mut cfs =>
+    Ptr.toBorrow(Ptr.toBorrow(vn as *vnode).mnt as *mount).fs_priv as *mut cfs;
+
+/// Safety: `vn` is a vnode of this filesystem.
+unsafe fn cvOf(vn: *mut vnode) -> *mut cfs_vnode => Ptr.toBorrow(vn as *vnode).fs_priv as *mut cfs_vnode;
+
+/// cosmofs_internal.h's cfs_inode_of.
+/// Safety: as cvOf.
+unsafe fn inodeOf(vn: *mut vnode) -> *mut cfs_inode => borrow mut Ptr.toBorrowMut(cvOf(vn)).inode as *mut cfs_inode;
+
+/// Safety: `fs` is a filesystem's state.
+unsafe fn failed(fs: *mut cfs) -> bool => Ptr.toBorrow(fs as *cfs).failed != 0;
+
+/// Safety: `fs` is a filesystem's state.
+unsafe fn lockOf(fs: *mut cfs) -> *mut mutex => borrow mut Ptr.toBorrowMut(fs).lock as *mut mutex;
+
+/// Safety: `fs` is a filesystem's state.
+unsafe fn mapStores(fs: *mut cfs) -> u64 =>
+    Ptr.toBorrow(borrow mut Ptr.toBorrowMut(fs).map_stores as *mut u64 as *AtomicU64).loadWith(LoadOrdering.Acquire);
+
+/// One logical block, wherever it lives: a hole, a plain block, or one page of a compressed record.
+/// Safety: `fs` is a mounted filesystem's state, its lock held; `inp` an inode; `buf` CFS_BLOCK writable bytes.
+unsafe fn readLogicalBlock(fs: *mut cfs, inp: *mut cfs_inode, lblk: u64, buf: *mut u8) -> i32 {
+    var eslot = [0u64; 2];
+    let e = borrow mut eslot as *mut [u64; 2] as *mut cfs_extent;
+    var rc = cfs_map_ext(fs, inp as *cfs_inode, lblk, e);
+    if (rc < 0) {
+        return rc;
+    }
+    if (rc == 0) {
+        memset(buf as *mut void, 0, CFS_BLOCK as usize); // a hole
+        return 0;
+    }
+    let r = Ptr.toBorrow(e as *cfs_extent);
+    if (!extCompressed(r.count)) {
+        return cfs_data_read_verified(fs, inp, lblk, r.start.wrappingAdd(lblk - r.lblk as u64), buf as *mut void);
+    }
+    // One page of a record costs the whole record: there is no cache of decompressed records (design.md, "What this
+    // costs").
+    let rec = kmalloc(extCount(r.count) as usize * CFS_BLOCK as usize, 0) as *mut u8;
+    if (rec.isNull()) {
+        return -ENOMEM;
+    }
+    rc = cfs_record_read(fs, inp, e as *cfs_extent, rec);
+    if (rc == 0) {
+        memcpy(buf as *mut void, rec.add((lblk - r.lblk as u64) as usize * CFS_BLOCK as usize) as *void,
+            CFS_BLOCK as usize);
+    }
+    kfree(rec as *mut void);
+    return rc;
+}
+
+/// Test hook (CF16): every block below the file's size, read through the map and checksums its open inode holds --
+/// what the next commit would publish -- and verified. `*bad` counts the blocks that fail. Debug builds only, as the
+/// self-test that calls it.
+/// Safety: `vn` is a vnode; `bad` writable.
+@cfg("CONFIG_DEBUG")
+@export("cosmofs_test_verify_file")
+unsafe fn testVerifyFile(vn: *mut vnode, bad: *mut u64) -> i32 {
+    let fs = fsOf(vn);
+    if (fs.isNull()) {
+        return -EINVAL;
+    }
+    let buf = kmalloc(CFS_BLOCK as usize, 0) as *mut u8;
+    if (buf.isNull()) {
+        return -ENOMEM;
+    }
+    bad.write(0);
+    mutex_lock(lockOf(fs));
+    let nblocks = (Ptr.toBorrow(vn as *vnode).size + CFS_BLOCK - 1) / CFS_BLOCK;
+    for (lblk in 0u64..nblocks) {
+        let rc = readLogicalBlock(fs, inodeOf(vn), lblk, buf);
+        if (rc == -ENOMEM) {
+            mutex_unlock(lockOf(fs));
+            kfree(buf as *mut void);
+            return rc;
+        }
+        if (rc < 0) {
+            bad.write(bad.read() + 1);
+        }
+    }
+    mutex_unlock(lockOf(fs));
+    kfree(buf as *mut void);
+    return 0;
+}
+
+/// The VFS `readpage` operation.
+/// Safety: `vn` is a vnode of this filesystem; `buf` CFS_BLOCK writable bytes.
+@export("cfs_readpage")
+unsafe fn readpage(vn: *mut vnode, index: u64, buf: *mut void) -> i32 {
+    let fs = fsOf(vn);
+    if (fs.isNull() || failed(fs)) {
+        return -EIO; // unmounted, or the transaction was abandoned
+    }
+    mutex_lock(lockOf(fs));
+    let rc = readLogicalBlock(fs, inodeOf(vn), index, buf as *mut u8);
+    mutex_unlock(lockOf(fs));
+    return if (rc > 0) 0 else rc;
+}
+
+/// One page. If it falls inside a compressed record the record has to be rebuilt around it: a record is one object,
+/// and there is no way to patch a block of it in place. That is the cost of compression, paid by the write that caused
+/// it.
+/// Safety: as readLogicalBlock; `buf` CFS_BLOCK bytes.
+unsafe fn writeOnePage(fs: *mut cfs, inp: *mut cfs_inode, index: u64, buf: *void) -> i32 {
+    var eslot = [0u64; 2];
+    let e = borrow mut eslot as *mut [u64; 2] as *mut cfs_extent;
+    var rc = cfs_map_ext(fs, inp as *cfs_inode, index, e);
+    if (rc < 0) {
+        return rc;
+    }
+    let r = Ptr.toBorrow(e as *cfs_extent);
+    if (rc == 1 && extCompressed(r.count)) {
+        let count = extCount(r.count);
+        let rec = kmalloc(count as usize * CFS_BLOCK as usize, 0) as *mut u8;
+        if (rec.isNull()) {
+            return -ENOMEM;
+        }
+        rc = cfs_record_read(fs, inp, e as *cfs_extent, rec);
+        if (rc == 0) {
+            memcpy(rec.add((index - r.lblk as u64) as usize * CFS_BLOCK as usize) as *mut void, buf,
+                CFS_BLOCK as usize);
+            rc = cfs_record_write(fs, inp, r.lblk as u64, rec as *u8, count, true); // a record replaced by a record
+        }
+        kfree(rec as *mut void);
+        return rc;
+    }
+    // Holes are representable: only this block is written.
+    return cfs_data_write_block(fs, inp, index, buf, CFS_ALLOC_DATA);
+}
+
+/// The inode is stored after a write-back whether or not the write succeeded. One that fails partway -- the fifth
+/// block of a record finds no room -- has mapped the blocks before it in the open inode, and replaced the ones they
+/// displace; only the inode names the new blocks, and the old ones are already queued free. Left unstored, a vnode that
+/// goes before the retry (its last write-back failing too, the pages dropped) takes that map with it: the new blocks
+/// were nobody's and the old ones were freed under the committed inode that still named them (found by test-pkgtx's
+/// full root: 3 to 7 leaked blocks). What was written is the new contents under their own checksums, so it is kept. An
+/// abandoned transaction has nothing to store.
+/// Safety: as readLogicalBlock; `vn` the inode's vnode.
+unsafe fn syncAfterWrite(fs: *mut cfs, vn: *mut vnode, rc: i32) -> i32 {
+    if (rc != 0 && failed(fs)) {
+        return rc;
+    }
+    let src = cfs_vnode_inode_sync(fs, vn);
+    return if (rc != 0) rc else src;
+}
+
+/// The inode's runs, as last counted while no map has been stored since, or counted now.
+/// Safety: `fs` is a mounted filesystem's state, its lock not held; `vn` a vnode of it; `out` writable.
+unsafe fn inodeRuns(fs: *mut cfs, vn: *mut vnode, out: *mut u32) -> i32 {
+    let cv = Ptr.toBorrowMut(cvOf(vn));
+    if (!cv.runs_valid || cv.runs_at != mapStores(fs)) {
+        var rc = cfs_lock_tree_w(fs, vn);
+        if (rc != 0) {
+            return rc;
+        }
+        var n: u32 = 0;
+        rc = cfs_extents_count(fs, inodeOf(vn) as *cfs_inode, borrow mut n as *mut u32);
+        if (rc == 0) {
+            cv.runs = n;
+            cv.runs_at = Ptr.toBorrow(fs as *cfs).map_stores;
+            cv.runs_valid = true;
+        }
+        cfs_unlock_tree(fs);
+        if (rc != 0) {
+            return rc;
+        }
+    }
+    out.write(cv.runs);
+    return 0;
+}
+
+/// Safety: `fs` is a filesystem's state.
+unsafe fn runsFit(fs: *mut cfs, runs: u32, dirty: u32) -> bool =>
+    runs as u64 + 2 * dirty as u64 + CFS_TRUNC_ADDS as u64 <= cfs_file_floor_max_extents(fs as *cfs) as u64;
+
+/// After a write-back or a truncate under fs->lock: when the last map stored is this vnode's, its length is the inode's
+/// runs now, so the next page asked about needs no count.
+/// Safety: as inodeRuns, the lock held.
+unsafe fn noteRuns(fs: *mut cfs, vn: *mut vnode) {
+    let f = Ptr.toBorrow(fs as *cfs);
+    if (f.last_store_in == inodeOf(vn) as *cfs_inode) {
+        let cv = Ptr.toBorrowMut(cvOf(vn));
+        cv.runs = f.last_store_n;
+        cv.runs_at = f.map_stores;
+        cv.runs_valid = true;
+    }
+}
+
+/// Whether a record written at `index` is compressed: below CFS_RAW_AT_PERCENT of the run bound, or when it replaces a
+/// compressed one (it takes that record's run rather than adding one). The inode's runs fall below the mark again
+/// when a truncate or rewrite takes them away, and compression resumes. Under fs->lock.
+/// Safety: as noteRuns.
+unsafe fn recordCompresses(fs: *mut cfs, vn: *mut vnode, index: u64) -> bool {
+    let cv = Ptr.toBorrow(cvOf(vn) as *cfs_vnode);
+    var runs: u32 = 0;
+    if (cv.runs_valid && cv.runs_at == Ptr.toBorrow(fs as *cfs).map_stores) {
+        runs = cv.runs;
+    } else if (cfs_extents_count(fs, inodeOf(vn) as *cfs_inode, borrow mut runs as *mut u32) != 0) {
+        return true; // the write itself will meet what the count did
+    }
+    if (runs as u64 * 100 < cfs_file_floor_max_extents(fs as *cfs) as u64 * CFS_RAW_AT_PERCENT) {
+        return true;
+    }
+    var eslot = [0u64; 2];
+    let e = borrow mut eslot as *mut [u64; 2] as *mut cfs_extent;
+    return cfs_map_ext(fs, inodeOf(vn) as *cfs_inode, index, e) == 1 &&
+        extCompressed(Ptr.toBorrow(e as *cfs_extent).count);
+}
+
+/// The pool's space, charged at the write as the run bound is (MEM-9; design.md, "Space, charged at the write"). A
+/// dirty page is written back copy-on-write into a new block, so each dirty page of the mount is a data block it will
+/// take: a page may become dirty while the data blocks free above the metadata reserve cover every dirty page of the
+/// mount, this one and CFS_DIRTY_META's allowance, and is refused -ENOSPC otherwise. The checksum and map blocks a
+/// write-back adds are metadata, which may take the reserve; the allowance is for writers who read the count at once
+/// (one page each) and a margin that grows with the pages. The charge is the dirty page itself: write-back takes the
+/// block it stood for, and a truncate or a drop gives it back. A compressed record takes fewer than its pages, so the
+/// charge is never short. Read without the lock: two writers may each take the last page, which the allowance covers.
+/// Safety: as inodeRuns.
+unsafe fn spaceFits(fs: *mut cfs, vn: *mut vnode) -> bool {
+    let f = Ptr.toBorrowMut(fs);
+    let free = Ptr.toBorrow(borrow mut f.free_blocks as *mut u64 as *AtomicU64).loadWith(LoadOrdering.Relaxed);
+    let usable = if (free > f.reserve) free - f.reserve else 0;
+    let mnt = Ptr.toBorrowMut(Ptr.toBorrow(vn as *vnode).mnt);
+    let pages = Ptr.toBorrow(borrow mut mnt.cache_dirty as *mut u64 as *AtomicU64).loadWith(LoadOrdering.Relaxed) + 1;
+    return pages + (pages / 512 + 4) <= usable;
+}
+
+/// Safety: `vn` is a vnode.
+unsafe fn isReg(vn: *mut vnode) -> bool => ((vn as *u8).add(VN_TYPE) as *u32).read() == VNODE_REG;
+
+/// The VFS `dirty_check` operation.
+/// Safety: `vn` is a vnode of this filesystem.
+@export("cfs_dirty_check")
+unsafe fn dirtyCheck(vn: *mut vnode, index: u64, dirty: u32) -> i32 {
+    let fs = fsOf(vn);
+    if (fs.isNull() || failed(fs)) {
+        return -EIO; // write-back would say the same, for ever
+    }
+    if (cfs_tree_readonly(fs, vn)) {
+        return -EROFS; // a snapshot's file: its write-back is refused
+    }
+    if (index >= (1u64 << 32)) {
+        return -EFBIG; // past a 32-bit logical block, which no run can name
+    }
+    var runs: u32 = 0;
+    let rc = inodeRuns(fs, vn, borrow mut runs as *mut u32);
+    if (rc != 0) {
+        return rc;
+    }
+    if (!runsFit(fs, runs, dirty.wrappingAdd(1))) {
+        return -EFBIG;
+    }
+    // A directory's blocks come from the metadata class, the reserve included, so a deletion on a full pool still has
+    // one to write.
+    return if (!isReg(vn) || spaceFits(fs, vn)) 0 else -ENOSPC;
+}
+
+/// The tree locked for a write-back and the inode made writable, or why not.
+/// Safety: as inodeRuns.
+unsafe fn writeBegin(fs: *mut cfs, vn: *mut vnode) -> i32 {
+    var rc = cfs_lock_tree_w(fs, vn);
+    if (rc != 0) {
+        return rc;
+    }
+    rc = cfs_vnode_prepare(fs, vn); // syncAfterWrite's inode write cannot fail after this (CFS-6)
+    if (rc != 0) {
+        cfs_unlock_tree(fs);
+    }
+    return rc;
+}
+
+/// The VFS `writepage` operation.
+/// Safety: `vn` is a vnode of this filesystem; `buf` CFS_BLOCK bytes.
+@export("cfs_writepage")
+unsafe fn writepage(vn: *mut vnode, index: u64, buf: *void) -> i32 {
+    if (cfs_tree_readonly(fsOf(vn), vn)) {
+        return -EROFS; // a snapshot is what the tree was, not what it is
+    }
+    let fs = fsOf(vn);
+    if (fs.isNull() || failed(fs)) {
+        return -EIO; // unmounted, or the transaction was abandoned
+    }
+    var rc = writeBegin(fs, vn);
+    if (rc != 0) {
+        return rc;
+    }
+    rc = writeOnePage(fs, inodeOf(vn), index, buf);
+    rc = syncAfterWrite(fs, vn, rc);
+    noteRuns(fs, vn);
+    cfs_file_floor_stuck_page(fs, vn, index, rc);
+    cfs_unlock_tree(fs);
+    return rc;
+}
+
+/// Several consecutive dirty pages at once. A whole aligned record is written as one -- that is the only shape
+/// compression can shrink -- and anything else falls back to one page, which the cache will offer again with what is
+/// left.
+/// Safety: `vn` is a vnode of this filesystem; `pages` `n` page pointers; `done` writable.
+@export("cfs_writepages")
+unsafe fn writepages(vn: *mut vnode, index: u64, pages: **mut void, n: u32, done: *mut u32) -> i32 {
+    if (cfs_tree_readonly(fsOf(vn), vn)) {
+        return -EROFS;
+    }
+    let fs = fsOf(vn);
+    if (fs.isNull() || failed(fs)) {
+        return -EIO;
+    }
+    var rc = writeBegin(fs, vn);
+    if (rc != 0) {
+        return rc;
+    }
+    let inp = inodeOf(vn);
+    if (index % CFS_RECORD_BLOCKS as u64 == 0 && n >= CFS_RECORD_BLOCKS &&
+        Ptr.toBorrow(inp as *cfs_inode).compress_algo != CFS_COMPRESS_NONE) {
+        let compress = recordCompresses(fs, vn, index);
+        // Gather the record; the pages are separate frames.
+        let rec = kmalloc(CFS_RECORD_BLOCKS as usize * CFS_BLOCK as usize, 0) as *mut u8;
+        if (rec.isNull()) {
+            cfs_unlock_tree(fs);
+            return -ENOMEM;
+        }
+        for (i in 0u32..CFS_RECORD_BLOCKS) {
+            memcpy(rec.add(i as usize * CFS_BLOCK as usize) as *mut void, pages.add(i as usize).read() as *void,
+                CFS_BLOCK as usize);
+        }
+        rc = cfs_record_write(fs, inp, index, rec as *u8, CFS_RECORD_BLOCKS, compress);
+        kfree(rec as *mut void);
+        if (rc == 0) {
+            done.write(CFS_RECORD_BLOCKS);
+        }
+    } else {
+        rc = writeOnePage(fs, inp, index, pages.read() as *void);
+        if (rc == 0) {
+            done.write(1);
+        }
+    }
+    rc = syncAfterWrite(fs, vn, rc);
+    noteRuns(fs, vn);
+    cfs_file_floor_stuck_page(fs, vn, index, rc);
+    cfs_unlock_tree(fs);
+    return rc;
+}
+
+/// The VFS `truncate` operation.
+/// Safety: `vn` is a vnode of this filesystem, its lock held.
+@export("cfs_truncate")
+unsafe fn truncateFile(vn: *mut vnode, size: u64) -> i32 {
+    if (cfs_tree_readonly(fsOf(vn), vn)) {
+        return -EROFS;
+    }
+    let fs = fsOf(vn);
+    if (fs.isNull() || failed(fs)) {
+        return -EIO; // unmounted, or the transaction was abandoned
+    }
+    // The inode made writable before the page cache drops anything (CFS-6): the trim cannot be undone, so an
+    // allocation that fails must fail before it, with the file as it was (Codex on #433). The trim runs without the
+    // tree lock, as it always has, and the preparation is made again under it -- a no-op unless a commit came between,
+    // which leaves this the one window where -ENOMEM can follow a trim.
+    var lrc = cfs_lock_tree_w(fs, vn);
+    if (lrc != 0) {
+        return lrc;
+    }
+    lrc = cfs_vnode_prepare(fs, vn);
+    cfs_unlock_tree(fs);
+    if (lrc != 0) {
+        return lrc;
+    }
+    pagecache_truncate(vn, size);
+    // What the trim adds to the map must not come out of the room the pages still dirty were charged for: near the
+    // bound, write them first. The caller holds the vnode lock, the order pagecache_sync runs in.
+    var runs: u32 = 0;
+    lrc = inodeRuns(fs, vn, borrow mut runs as *mut u32);
+    if (lrc != 0) {
+        return lrc;
+    }
+    let dirty = Ptr.toBorrow(vn as *vnode).pc.nr_dirty;
+    if (dirty != 0 && !runsFit(fs, runs.wrappingAdd(CFS_TRUNC_ADDS), dirty)) {
+        lrc = pagecache_sync(vn);
+        if (lrc != 0) {
+            return lrc;
+        }
+    }
+    lrc = writeBegin(fs, vn);
+    if (lrc != 0) {
+        return lrc;
+    }
+    let keep = (size + CFS_BLOCK - 1) / CFS_BLOCK;
+    var rc = cfs_truncate_blocks(fs, inodeOf(vn), keep);
+    // The last block may now be partial. What is past the new end has to read as zeros if the file grows again, and
+    // the page cache only cleared its own copy, so the block itself is cleared here -- on disk, where a later read will
+    // look for it.
+    if (rc == 0 && size % CFS_BLOCK != 0) {
+        let lblk = size / CFS_BLOCK;
+        var eslot = [0u64; 2];
+        let e = borrow mut eslot as *mut [u64; 2] as *mut cfs_extent;
+        let mrc = cfs_map_ext(fs, inodeOf(vn) as *cfs_inode, lblk, e);
+        if (mrc < 0) {
+            rc = mrc;
+        } else if (mrc == 1) {
+            let page = kmalloc(CFS_BLOCK as usize, 0) as *mut u8;
+            if (page.isNull()) {
+                rc = -ENOMEM;
+            } else {
+                rc = readLogicalBlock(fs, inodeOf(vn), lblk, page);
+                if (rc == 0) {
+                    let cut = (size % CFS_BLOCK) as usize;
+                    memset(page.add(cut) as *mut void, 0, CFS_BLOCK as usize - cut);
+                    rc = writeOnePage(fs, inodeOf(vn), lblk, page as *void);
+                }
+                kfree(page as *mut void);
+            }
+        }
+    }
+    if (rc == 0) {
+        let v = Ptr.toBorrowMut(vn);
+        v.size = size;
+        v.mtime_ns = vfs_now_ns();
+        rc = cfs_vnode_inode_sync(fs, vn);
+    }
+    noteRuns(fs, vn);
+    cfs_unlock_tree(fs);
+    return rc;
+}
+
+/// The VFS `setattr` operation (chmod, utimensat, chown): the vnode's new mode, times and owner go into the inode, as a
+/// write's new size does. Directories, files and -- for chown, shell completeness S4 -- links, whose inode keeps its
+/// type and its 0777.
+/// Safety: `vn` is a vnode of this filesystem.
+@export("cfs_vnode_setattr")
+unsafe fn vnodeSetattr(vn: *mut vnode) -> i32 {
+    let fs = fsOf(vn);
+    if (fs.isNull()) {
+        return 0;
+    }
+    if (cfs_tree_readonly(fs, vn)) {
+        return -EROFS; // a snapshot's metadata is what it was, as its data is (the caller restores the vnode)
+    }
+    var rc = cfs_lock_tree_w(fs, vn);
+    if (rc != 0) {
+        return rc;
+    }
+    rc = cfs_vnode_prepare(fs, vn); // a failure here changed nothing: the VFS puts the vnode back (CFS-6)
+    if (rc == 0) {
+        rc = cfs_vnode_inode_sync(fs, vn);
+    }
+    cfs_unlock_tree(fs);
+    return rc;
+}
+
+/// The VFS `sync` operation (file_sync after the page cache wrote the file's pages): the inode goes through, then the
+/// open transaction is committed, which is what durability means here (design.md, "fsync commits").
+/// Safety: `vn` is a vnode of this filesystem.
+@export("cfs_vnode_sync")
+unsafe fn vnodeSync(vn: *mut vnode) -> i32 {
+    let fs = fsOf(vn);
+    if (fs.isNull()) {
+        return 0;
+    }
+    // In the vnode's own tree: a clone's inode is the clone's, and the commit leaves the clone first. A snapshot's has
+    // nothing to write.
+    var rc = cfs_lock_tree_w(fs, vn);
+    if (rc != 0) {
+        return if (rc == -EROFS) 0 else rc;
+    }
+    rc = cfs_vnode_prepare(fs, vn);
+    if (rc == 0) {
+        rc = cfs_vnode_inode_sync(fs, vn);
+    }
+    if (rc == 0) {
+        rc = cfs_commit(fs);
+    }
+    cfs_unlock_tree(fs);
+    return rc;
+}
+
+/// The VFS `evict` operation: the vnode's state goes, and with the last link and the last reference the file's blocks
+/// and inode slot.
+/// Safety: `vn` is a vnode whose last reference went.
+@export("cfs_evict")
+unsafe fn evict(vn: *mut vnode) {
+    let fs = fsOf(vn);
+    let cv = cvOf(vn);
+    // A snapshot's vnode, or a clone's whose clone is gone (deleting it freed its blocks), has nothing here to release:
+    // its inode number is not the live tree's.
+    var otherTree = false;
+    if (!fs.isNull() && !cv.isNull() && Ptr.toBorrow(cv as *cfs_vnode).snap_tag != 0) {
+        mutex_lock(lockOf(fs));
+        let tag = Ptr.toBorrow(cv as *cfs_vnode).snap_tag;
+        otherTree = tag == 0xFFFF || cfs_clone_by_id(fs, tag as u64).isNull();
+        mutex_unlock(lockOf(fs));
+    }
+    if (!fs.isNull() && !cv.isNull() && Ptr.toBorrow(vn as *vnode).nlink == 0 && !otherTree &&
+        cfs_lock_tree_w(fs, vn) == 0) {
+        // The last link and the last reference are gone: release the data blocks and the inode slot. (A tree lock
+        // refused means its clone went since the check above: nothing here is the live tree's.)
+        let trc = cfs_truncate_blocks(fs, inodeOf(vn), 0);
+        if (trc != 0) {
+            // The same hazard as a failed slot write, one step earlier: the truncate frees every extent before storing
+            // the shortened list, so a failure leaves blocks queued free under an inode that still names them.
+            cfs_fail(fs, trc);
+        } else {
+            var empty = [0u64; 32];
+            // Only when the slot is actually cleared. Retiring the record on a failed write would let the next commit
+            // publish the deferred frees while the old slot still names those blocks, and no later mount would retry
+            // the inode because nothing would say it was owed.
+            let ino = Ptr.toBorrow(vn as *vnode).ino;
+            if (cfs_inode_write(fs, ino, borrow empty as *[u64; 32] as *cfs_inode) == 0) {
+                let f = Ptr.toBorrowMut(fs);
+                if (f.sb.inode_count > 0) {
+                    f.sb.inode_count -= 1;
+                }
+                cfs_orphan_remove(fs, ino);
+            } else {
+                // The blocks are queued to be freed and the slot still names them: no root may publish that.
+                cfs_fail(fs, -EIO);
+            }
+        }
+        cfs_unlock_tree(fs);
+    }
+    kfree(cv as *mut void);
+    let v = Ptr.toBorrowMut(vn);
+    v.fs_priv = 0 as *mut void;
+}

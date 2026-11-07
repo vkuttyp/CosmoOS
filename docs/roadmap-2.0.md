@@ -1472,6 +1472,15 @@ clang and gcc; every line and branch that can be reached).
 `cosmofs_data_floor.c` keeps the fault seams, the debug build's note,
 the run bound a self-test lowers, and `cfs_set_extent`, whose run comes
 by value.
+`cosmofs_file.cee`, the eleventh, a regular file's vnode operations:
+pages read and written over holes, blocks and records, record-sized
+write-backs, the run bound and the pool's space charged at the write,
+truncation, setattr, sync and eviction. `tests/host/test_cfsfile.c` runs
+them on files of the live tree, a snapshot's and a clone's, mounted or
+not, failed or not (0xde01af8468dcf4cc, clang and gcc; every line and
+branch that can be reached). `cosmofs_file_floor.c` keeps the debug
+build's stuck-page check, the run bound a self-test lowers and the
+self-test hook that counts runs.
 
 Size: about 4.5x.
 
