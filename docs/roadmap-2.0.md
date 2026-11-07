@@ -1504,6 +1504,13 @@ link's rollback failing twice over). `cosmofs_dir_floor.c` keeps
 `cfs_readdir`'s entry point and the call through its callback, whose
 type takes an enum. With it no C of cosmofs's VFS side is left but the
 floors.
+`cosmofs_keytest.cee`, the first of the self-tests, cosmofs-encrypted-root:
+a self-test has no host digest, so its evidence is the boot test, which
+passes with every line the C printed (x86_64 debug, 2026-11-07).
+`cosmofs_keytest_floor.c` keeps its fault-injection and debug-only parts
+and asserts the layout the CeeSafe half writes as constants. A check's
+reason keeps the C's form, "check failed: COND at line N", N its line in
+the .cee.
 
 Size: about 4.5x.
 

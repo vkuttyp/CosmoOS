@@ -1,0 +1,1057 @@
+// cosmofs_keytest.cee - Self-test of format version 14, an encrypted root's pool (roadmap 1.2 B5;
+// docs/kernel-services/filesystem/cosmofs/design.md, "Format version 14"), in CeeSafe: roadmap 2.0 SA7. The key
+// table, the key operations, the metadata MAC in every domain, and the two-level checksum index.
+//
+// Everything here runs on RAM devices of its own. The slots are not sealed: the kernel never opens one (cosmo-key
+// does, in user space), so a slot here only has to have a slot's shape.
+//
+// The superblock, the key slots, the reports and the requests stay C (cosmofs_format.h, kernel/cosmofs.h,
+// uapi/cosmo/). cosmofs_keytest_floor.c keeps the parts a build configuration decides -- the fault-injection build's
+// failed copy, the debug build's two-member pool -- and asserts the layout this file writes as constants.
+
+@header("kernel/blk.h", "kernel/vfs.h", "kernel/kmalloc.h", "kernel/mutex.h", "kernel/string.h", "kernel/random.h",
+    "kernel/ramblk.h", "kernel/storage.h", "kernel/cosmofs.h", "uapi/cosmo/fsctl.h", "uapi/cosmo/keyslot.h",
+    "cosmofs_internal.h")
+extern "C" {
+    struct blkdev;
+    struct spool;
+    struct mount {
+        fs_priv: *mut void;
+    }
+    struct vnode {
+        ino: u64;
+        mnt: *mut mount;
+    }
+    struct file {
+        vn: *mut vnode;
+    }
+    struct cosmo_keyslot {
+        kind: u32;
+        t_cost: u32;
+        m_cost_kib: u32;
+        lanes: u32;
+        salt: [u8; 16];
+        wrapped: [u8; 32];
+        tag: [u8; 16];
+    }
+    struct cosmo_fsctl_keyinfo {
+        flags: u32;
+        nslots: u32;
+        slot: [cosmo_keyslot; 8];
+    }
+    struct cosmofs_key_req {
+        op: u32;
+        slot: u32;
+        key: *u8;
+        rec: *cosmo_keyslot;
+        info: *mut cosmo_fsctl_keyinfo;
+    }
+    struct cosmofs_check_class {
+        count: u64;
+    }
+    struct cosmofs_check_report {
+        unreadable: cosmofs_check_class;
+        csum_two_level: u64;
+        clean: bool;
+    }
+    struct cosmofs_dev_report {
+        flags: u32;
+        mount_error: i32;
+    }
+    struct cosmofs_scrub_stats {
+        repaired: u64;
+        unrecoverable: u64;
+        bad_copies: u64;
+    }
+    struct cfs_super {
+        version: u32;
+        imap_root: u64;
+        members: u64;
+        uuid: [u8; 16];
+        key_root: u64;
+    }
+    struct cfs_inode {
+        csum_root: u64;
+    }
+    struct cfs_mhdr {
+        kind: u32;
+    }
+    struct cfs_buf {
+        data: *mut u8;
+    }
+    struct cfs {
+        lock: mutex;
+    }
+
+    fn random_ready() -> bool;
+    fn kzalloc(size: usize) -> *mut void;
+    fn random_get_bytes(buf: *mut void, len: usize);
+    fn ramblk_create(nblocks: u64) -> *mut blkdev;
+    fn ramblk_destroy(bd: *mut blkdev);
+    fn vfs_mkdir(start: *mut vnode, path: *CChar, mode: u32) -> i32;
+    fn vfs_rmdir(start: *mut vnode, path: *CChar) -> i32;
+    fn vfs_mount(path: *CChar, fsname: *CChar, bd: *mut blkdev, flags: u32) -> i32;
+    fn vfs_umount2(path: *CChar, flags: u32) -> i32;
+    fn vfs_lookup(start: *mut vnode, path: *CChar, out: *mut *mut vnode) -> i32;
+    fn vnode_put(vn: *mut vnode);
+    fn vfs_open(start: *mut vnode, path: *CChar, flags: u32, mode: u32, out: *mut *mut file) -> i32;
+    fn file_pwrite(f: *mut file, buf: *void, len: usize, off: u64) -> i64;
+    fn file_pread(f: *mut file, buf: *mut void, len: usize, off: u64) -> i64;
+    fn vfs_sync() -> i32;
+    fn pool_open(bd: *mut blkdev, out: *mut *mut spool) -> i32;
+    fn pool_close(p: *mut spool);
+    fn pool_read(p: *mut spool, dva: u64, buf: *mut void) -> i32;
+    fn pool_write(p: *mut spool, dva: u64, buf: *void) -> i32;
+    fn pool_flush(p: *mut spool) -> i32;
+    fn cfs_super_peek(p: *mut spool, out: *mut cfs_super) -> i32;
+    fn cfs_keytab_has(uuid: *u8) -> bool;
+    fn cfs_keytab_unload(uuid: *u8) -> i32;
+    fn cfs_inode_read(fs: *mut cfs, ino: u64, out: *mut cfs_inode) -> i32;
+    fn cfs_buf_get(fs: *mut cfs, blkno: u64, kind: u32, out: *mut *mut cfs_buf) -> i32;
+    fn cfs_buf_put(fs: *mut cfs, b: *mut cfs_buf);
+    fn cfs_buf_hdr(b: *mut cfs_buf) -> *mut cfs_mhdr;
+    fn cosmofs_keyctl(bd: *mut blkdev, mnt: *mut mount, req: *mut cosmofs_key_req) -> i32;
+    fn cosmofs_format(bd: *mut blkdev) -> i32;
+    fn cosmofs_format_keys(bd: *mut *mut blkdev, n: u32, label: *CChar, uuid: *u8, master: *u8,
+        slots: *cosmo_keyslot) -> i32;
+    fn cosmofs_check(mnt: *mut mount, out: *mut cosmofs_check_report, flags: u32) -> i32;
+    fn cosmofs_check_dev(bd: *mut blkdev, flags: u32, rep: *mut cosmofs_check_report, dev: *mut cosmofs_dev_report)
+        -> i32;
+    fn cosmofs_scrub(mnt: *mut mount, out: *mut cosmofs_scrub_stats, flags: u32) -> i32;
+    fn cosmofs_test_set_writeback(mnt: *mut mount, on: bool);
+    fn crc32c(data: *void, len: usize) -> u32;
+    fn memset(p: *mut void, c: i32, n: usize) -> *mut void;
+    fn memcpy(dst: *mut void, src: *void, n: usize) -> *mut void;
+    fn memcmp(a: *void, b: *void, n: usize) -> i32;
+    /// cosmofs_keytest_floor.c: the fault-injection build's failed copy, the debug build's two members, and the
+    /// fault rule cleared.
+    fn cfs_keytest_floor_cow(blk: *u8, reason: *mut *CChar) -> bool;
+    fn cfs_keytest_floor_labels(two: *mut *mut blkdev, slots: *cosmo_keyslot, uuid2: *u8, master2: *u8,
+        save: *mut u8, reason: *mut *CChar) -> bool;
+    fn cfs_keytest_floor_clear();
+}
+
+// ---- Values (asserted in cosmofs_keytest_floor.c) ----
+
+const EEXIST: i32 = 17;
+const EINVAL: i32 = 22;
+const EIO: i32 = 5;
+const EBUSY: i32 = 16;
+const ENOKEY: i32 = 126;
+const EKEYREJECTED: i32 = 129;
+const O_RDONLY: u32 = 0;
+const O_WRONLY: u32 = 1;
+const O_CREAT: u32 = 0x40;
+const VFS_UMOUNT_FORCE: u32 = 1;
+const CFS_BLOCK: usize = 4096;
+const CFS_MHDR_SIZE: usize = 32;
+const CFS_PTRS_PER_BLOCK: u32 = 508;
+const CFS_SUPER_A: u64 = 0;
+const CFS_SUPER_B: u64 = 1;
+const CFS_FORMAT_VERSION: u32 = 11;
+const CFS_KIND_CSUMIDX2: u32 = 18;
+const CFS_CSUM_CRC32C: u32 = 1;
+const MHDR_CRC: usize = 24;
+const MHDR_CSUM_ALGO: usize = 28;
+const SUPER_CRC: usize = 160;
+const SUPER_FREE_BLOCKS: usize = 64;
+/// Member 0's free count in a member table block: the payload, the count, the member's free_blocks.
+const MEMBER0_FREE: usize = 32 + 8 + 40;
+const KEY_SLOTS: u32 = 8;
+const KEYSLOT_SIZE: usize = 96;
+const KEYSLOT_EMPTY: u32 = 0;
+const KEYSLOT_PASSPHRASE: u32 = 1;
+const KEYSLOT_KEYFILE: u32 = 2;
+const KEY_INFO: u32 = 0;
+const KEY_LOAD: u32 = 1;
+const KEY_SLOT: u32 = 3;
+const KEY_F_ENCRYPTED: u32 = 1;
+const KEY_F_UNLOCKED: u32 = 2;
+const KEY_F_MAC: u32 = 4;
+const DEV_F_CHECKED: u32 = 1;
+const DEV_F_SUPER_NONE: u32 = 2;
+const DEV_F_MOUNT_FAILED: u32 = 8;
+const DEV_F_FELL_BACK: u32 = 16;
+const DEV_F_LOCKED: u32 = 2048;
+const SCRUB_REPAIR: u32 = 1;
+/// Past the one-level index of an encrypted file: 508 * 127 = 64516.
+const KT_FAR_LBLK: u64 = 70000;
+/// The test's mount point.
+const KT: StringView = "/mnt/keytest\0";
+
+// ---- Helpers ----
+
+fn kt() -> *CChar => KT.ptr as *CChar;
+
+/// A path under the test's mount point, terminated, in `buf`.
+/// Safety: the path is used while `buf` lives; `leaf` fits.
+unsafe fn under(buf: borrow mut [u8; 32], leaf: StringView) -> *CChar {
+    var n: usize = 0;
+    while (n < 12) {
+        buf[n] = KT[n];
+        n += 1;
+    }
+    buf[n] = 47; // '/'
+    n += 1;
+    for (i in 0usize..leaf.length) {
+        buf[n + i] = leaf[i];
+    }
+    buf[n + leaf.length] = 0;
+    return buf as *[u8; 32] as *CChar;
+}
+
+/// The fault the check names, as the C's KT_CHECK said it.
+/// Safety: `reason` writable.
+unsafe fn failed(reason: *mut *CChar, why: StringView) -> bool {
+    reason.write(why.ptr as *CChar);
+    return false;
+}
+
+/// Slot 0 a passphrase slot of random contents, the rest empty.
+/// Safety: `s` is KEY_SLOTS writable slots.
+unsafe fn ktSlots(s: *mut cosmo_keyslot) {
+    memset(s as *mut void, 0, KEYSLOT_SIZE * KEY_SLOTS as usize);
+    let s0 = Ptr.toBorrowMut(s);
+    s0.kind = KEYSLOT_PASSPHRASE;
+    s0.t_cost = 1;
+    s0.m_cost_kib = 8;
+    s0.lanes = 1;
+    random_get_bytes(borrow mut s0.salt as *mut [u8; 16] as *mut void, 16);
+    random_get_bytes(borrow mut s0.wrapped as *mut [u8; 32] as *mut void, 32);
+    random_get_bytes(borrow mut s0.tag as *mut [u8; 16] as *mut void, 16);
+}
+
+/// Safety: `bd` null or a device; `mnt` null or a mount; `info` writable.
+unsafe fn ktInfo(bd: *mut blkdev, mnt: *mut mount, info: *mut cosmo_fsctl_keyinfo) -> i32 {
+    var slot = [0u64; 5];
+    let req = borrow mut slot as *mut [u64; 5] as *mut cosmofs_key_req;
+    let r = Ptr.toBorrowMut(req);
+    r.op = KEY_INFO;
+    r.info = info;
+    return cosmofs_keyctl(bd, mnt, req);
+}
+
+/// Safety: `bd` is a device; `key` 32 bytes.
+@export("cfs_keytest_load")
+unsafe fn ktLoad(bd: *mut blkdev, key: *u8) -> i32 {
+    var slot = [0u64; 5];
+    let req = borrow mut slot as *mut [u64; 5] as *mut cosmofs_key_req;
+    let r = Ptr.toBorrowMut(req);
+    r.op = KEY_LOAD;
+    r.key = key;
+    return cosmofs_keyctl(bd, 0 as *mut mount, req);
+}
+
+/// Safety: `mnt` is a mount; `key` 32 bytes; `rec` a slot.
+unsafe fn ktSlot(mnt: *mut mount, index: u32, key: *u8, rec: *cosmo_keyslot) -> i32 {
+    var slot = [0u64; 5];
+    let req = borrow mut slot as *mut [u64; 5] as *mut cosmofs_key_req;
+    let r = Ptr.toBorrowMut(req);
+    r.op = KEY_SLOT;
+    r.slot = index;
+    r.key = key;
+    r.rec = rec;
+    return cosmofs_keyctl(0 as *mut blkdev, mnt, req);
+}
+
+/// The mount at the test's mount point, or null.
+/// Safety: none beyond the VFS's own.
+@export("cfs_keytest_mount")
+unsafe fn ktMount() -> *mut mount {
+    var vn = 0 as *mut vnode;
+    if (vfs_lookup(0 as *mut vnode, kt(), borrow mut vn as *mut *mut vnode) != 0) {
+        return 0 as *mut mount;
+    }
+    let m = Ptr.toBorrow(vn as *vnode).mnt;
+    vnode_put(vn);
+    return m;
+}
+
+/// Mount `bd` at the test's mount point, with autonomous commits off.
+/// Safety: `bd` is a device.
+@export("cfs_keytest_mount_dev")
+unsafe fn ktMountDev(bd: *mut blkdev) -> i32 {
+    let rc = vfs_mount(kt(), "cosmofs\0".ptr as *CChar, bd, 0);
+    if (rc == 0) {
+        cosmofs_test_set_writeback(ktMount(), false);
+    }
+    return rc;
+}
+
+/// What a forger with the disk and no key does: change a byte, then make the block look sealed the old way --
+/// csum_algo CRC32C and a CRC32C over the block with the CRC field zero, at `crcOff`. `save` gets the block as it was.
+/// Safety: `bd` is a device; `save` CFS_BLOCK writable bytes.
+@export("cfs_keytest_forge")
+unsafe fn ktForge(bd: *mut blkdev, dva: u64, crcOff: usize, header: bool, touch: usize, save: *mut u8) -> bool {
+    var p = 0 as *mut spool;
+    if (pool_open(bd, borrow mut p as *mut *mut spool) != 0) {
+        return false;
+    }
+    let b = kmalloc(CFS_BLOCK, 0) as *mut u8;
+    var ok = !b.isNull() && pool_read(p, dva, b as *mut void) == 0;
+    if (ok) {
+        memcpy(save as *mut void, b as *void, CFS_BLOCK);
+        let t = b.add(touch);
+        t.write(t.read() ^ 1);
+        let blk = SliceMut.fromRaw(b, CFS_BLOCK);
+        if (header) {
+            ByteOrder.writeU32LE(blk, MHDR_CSUM_ALGO, CFS_CSUM_CRC32C);
+        }
+        ByteOrder.writeU32LE(blk, crcOff, 0);
+        ByteOrder.writeU32LE(blk, crcOff, crc32c(b as *void, CFS_BLOCK));
+        ok = pool_write(p, dva, b as *void) == 0 && pool_flush(p) == 0;
+    }
+    kfree(b as *mut void);
+    pool_close(p);
+    return ok;
+}
+
+/// Safety: `bd` is a device; `save` CFS_BLOCK bytes.
+@export("cfs_keytest_put_back")
+unsafe fn ktPutBack(bd: *mut blkdev, dva: u64, save: *u8) -> bool {
+    var p = 0 as *mut spool;
+    if (pool_open(bd, borrow mut p as *mut *mut spool) != 0) {
+        return false;
+    }
+    let ok = pool_write(p, dva, save as *void) == 0 && pool_flush(p) == 0;
+    pool_close(p);
+    return ok;
+}
+
+/// Safety: `bd` is a device; `sb` writable.
+unsafe fn ktSuper(bd: *mut blkdev, sb: *mut cfs_super) -> bool {
+    var p = 0 as *mut spool;
+    if (pool_open(bd, borrow mut p as *mut *mut spool) != 0) {
+        return false;
+    }
+    let ok = cfs_super_peek(p, sb) == 0;
+    pool_close(p);
+    return ok;
+}
+
+/// Safety: `path` a terminated string; `data` `len` bytes.
+@export("cfs_keytest_write_at")
+unsafe fn ktWriteAt(path: *CChar, off: u64, data: *void, len: usize) -> bool {
+    var f = 0 as *mut file;
+    if (vfs_open(0 as *mut vnode, path, O_WRONLY | O_CREAT, 420, borrow mut f as *mut *mut file) != 0) {
+        return false;
+    }
+    let n = file_pwrite(f, data, len, off);
+    kobject_put(f as *mut kobject); // file_put: the file's kobject is its first field
+    return n == truncate<i64>(len);
+}
+
+/// Safety: `path` a terminated string; `want` `len` bytes.
+@export("cfs_keytest_read_at")
+unsafe fn ktReadAt(path: *CChar, off: u64, want: *void, len: usize) -> bool {
+    var f = 0 as *mut file;
+    if (vfs_open(0 as *mut vnode, path, O_RDONLY, 0, borrow mut f as *mut *mut file) != 0) {
+        return false;
+    }
+    let buf = kmalloc(len, 0) as *mut u8;
+    let ok = !buf.isNull() && file_pread(f, buf as *mut void, len, off) == truncate<i64>(len) &&
+        memcmp(buf as *void, want, len) == 0;
+    kfree(buf as *mut void);
+    kobject_put(f as *mut kobject);
+    return ok;
+}
+
+/// The block a file's two-level checksum root names at `entry`: a CSUMIDX.
+/// Safety: `mnt` is a cosmofs mount; `path` a terminated string; `rootKind` writable.
+unsafe fn ktCsumMid(mnt: *mut mount, path: *CChar, entry: u32, rootKind: *mut u32) -> u64 {
+    var f = 0 as *mut file;
+    if (vfs_open(0 as *mut vnode, path, O_RDONLY, 0, borrow mut f as *mut *mut file) != 0) {
+        return 0;
+    }
+    let inum = Ptr.toBorrow(Ptr.toBorrow(f as *file).vn as *vnode).ino;
+    kobject_put(f as *mut kobject);
+    let fs = Ptr.toBorrow(mnt as *mount).fs_priv as *mut cfs;
+    var mid: u64 = 0;
+    let lock = borrow mut Ptr.toBorrowMut(fs).lock as *mut mutex;
+    mutex_lock(lock);
+    var islot = [0u64; 32];
+    let ip = borrow mut islot as *mut [u64; 32] as *mut cfs_inode;
+    var b = 0 as *mut cfs_buf;
+    if (cfs_inode_read(fs, inum, ip) == 0 &&
+        cfs_buf_get(fs, Ptr.toBorrow(ip as *cfs_inode).csum_root, 0, borrow mut b as *mut *mut cfs_buf) == 0) {
+        rootKind.write(Ptr.toBorrow(cfs_buf_hdr(b) as *cfs_mhdr).kind);
+        let data = Slice.fromRaw(Ptr.toBorrow(b as *cfs_buf).data as *u8, CFS_BLOCK);
+        mid = ByteOrder.readU64LE(data, CFS_MHDR_SIZE + entry as usize * 8);
+        cfs_buf_put(fs, b);
+    }
+    mutex_unlock(lock);
+    return mid;
+}
+
+/// cosmofs_format.h's cfs_super_is_mac.
+fn superIsMac(sb: borrow cfs_super, version: u32) -> bool => version >= 14 && sb.key_root != 0;
+
+// ---- The test ----
+
+/// What the test made, for the cleanup whatever happened.
+struct Kt {
+    bd: *mut blkdev;
+    two: [*mut blkdev; 2];
+    mir: [*mut blkdev; 2];
+    plain: *mut blkdev;
+    mounted: bool;
+    master: [u8; 32];
+    wrong: [u8; 32];
+    master2: [u8; 32];
+    master3: [u8; 32];
+    uuid: [u8; 16];
+    uuid2: [u8; 16];
+    uuid3: [u8; 16];
+    slots: *mut cosmo_keyslot;
+    info: *mut cosmo_fsctl_keyinfo;
+    save: *mut u8;
+    save2: *mut u8;
+    blk: *mut u8;
+    rep: *mut cosmofs_check_report;
+    bad: *mut cosmo_keyslot;
+}
+
+/// The sentence an encrypted root keeps off the disk.
+const SECRET: StringView = "an encrypted root keeps this sentence off the disk";
+
+/// Safety: `k` holds what the test made; `reason` writable.
+unsafe fn body(k: borrow mut Kt, reason: *mut *CChar) -> bool {
+    var path = [0u8; 32];
+    var sbSlot = [0u64; 21];
+    let sb = borrow mut sbSlot as *mut [u64; 21] as *mut cfs_super;
+    var devSlot = [0u64; 16];
+    let dev = borrow mut devSlot as *mut [u64; 16] as *mut cosmofs_dev_report;
+    let secret = SECRET.ptr as *void;
+    let slen = SECRET.length;
+    let master = borrow k.master as *[u8; 32] as *u8;
+    let wrong = borrow k.wrong as *[u8; 32] as *u8;
+    let rep = k.rep;
+    let info = k.info;
+    let mk = vfs_mkdir(0 as *mut vnode, kt(), 493);
+    if (!(mk == 0 || mk == -EEXIST)) {
+        return failed(reason, "check failed: mk == 0 || mk == -EEXIST at line 432\0");
+    }
+
+    // First, so that without the fix (tools/cfs31-probe.py --old) this is the failure the test stops at. CFS-31, on a
+    // plain pool: the member table damaged in place -- one byte of member 0's advisory free count, its CRC32C left as
+    // it was -- is refused like any other metadata block. It used to be read with only its magic, kind and address
+    // checked, and the check's mount loaded the newest root with it.
+    k.plain = ramblk_create(1024);
+    if (k.plain.isNull()) {
+        return failed(reason, "check failed: plain != NULL at line 441\0");
+    }
+    if (cosmofs_format(k.plain) != 0) {
+        return failed(reason, "check failed: cosmofs_format(plain) == 0 at line 444\0");
+    }
+    if (ktMountDev(k.plain) != 0) {
+        return failed(reason, "check failed: kt_mount_dev(plain) == 0 at line 447\0");
+    }
+    k.mounted = true;
+    if (!ktWriteAt(under(mut path, "a"), 0, secret, slen)) {
+        return failed(reason, "check failed: kt_write_at(KT \"/a\", 0, secret, sizeof(secret) - 1) at line 451\0");
+    }
+    if (vfs_sync() != 0) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 454\0");
+    }
+    if (!ktWriteAt(under(mut path, "b"), 0, secret, slen)) {
+        return failed(reason, "check failed: kt_write_at(KT \"/b\", 0, secret, sizeof(secret) - 1) at line 457\0");
+    }
+    if (vfs_sync() != 0) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 460\0");
+    }
+    if (vfs_umount2(kt(), 0) != 0) {
+        return failed(reason, "check failed: vfs_umount(KT) == 0 at line 463\0");
+    }
+    k.mounted = false;
+    if (!ktSuper(k.plain, sb)) {
+        return failed(reason, "check failed: kt_super(plain, &sb) at line 467\0");
+    }
+    var p = 0 as *mut spool;
+    if (pool_open(k.plain, borrow mut p as *mut *mut spool) != 0) {
+        return failed(reason, "check failed: pool_open(plain, &p) == 0 at line 471\0");
+    }
+    let members = Ptr.toBorrow(sb as *cfs_super).members;
+    var w = pool_read(p, members, k.save as *mut void) == 0;
+    memcpy(k.save2 as *mut void, k.save as *void, CFS_BLOCK);
+    let at = k.save2.add(MEMBER0_FREE);
+    at.write(at.read() ^ 1);
+    w = w && pool_write(p, members, k.save2 as *void) == 0 && pool_flush(p) == 0;
+    pool_close(p);
+    if (!w) {
+        return failed(reason, "check failed: w at line 481\0");
+    }
+    let prc = cosmofs_check_dev(k.plain, 0, rep, dev);
+    let dflags = Ptr.toBorrow(dev as *cosmofs_dev_report).flags;
+    let plainRefused = prc == 0 && (dflags & (DEV_F_MOUNT_FAILED | DEV_F_FELL_BACK)) != 0;
+    say2("a plain pool's member table damaged in place: ", if (plainRefused) "refused" else "ACCEPTED", prc,
+        dflags);
+    if (!plainRefused) {
+        return failed(reason, "check failed: plain_refused at line 489\0");
+    }
+    if (!ktPutBack(k.plain, members, k.save as *u8)) {
+        return failed(reason, "check failed: kt_put_back(plain, sb.members, save) at line 492\0");
+    }
+    ramblk_destroy(k.plain);
+    k.plain = 0 as *mut blkdev;
+
+    // A slot of the wrong shape, and no usable slot at all, are refused before anything is written.
+    let bad = k.bad;
+    memcpy(bad as *mut void, k.slots as *void, KEYSLOT_SIZE * KEY_SLOTS as usize);
+    let b3 = Ptr.toBorrowMut(bad.add(3));
+    b3.kind = KEYSLOT_KEYFILE;
+    let bdp = borrow mut k.bd as *mut *mut blkdev;
+    let label = "keytest\0".ptr as *CChar;
+    let uuid = borrow k.uuid as *[u8; 16] as *u8;
+    if (cosmofs_format_keys(bdp, 1, label, uuid, master, bad as *cosmo_keyslot) != -EINVAL) {
+        return failed(reason,
+            "check failed: cosmofs_format_keys(&bd, 1, \"keytest\", uuid, master, bad) == -EINVAL at line 507\0");
+    }
+    memset(bad as *mut void, 0, KEYSLOT_SIZE * KEY_SLOTS as usize);
+    if (cosmofs_format_keys(bdp, 1, label, uuid, master, bad as *cosmo_keyslot) != -EINVAL) {
+        return failed(reason,
+            "check failed: cosmofs_format_keys(&bd, 1, \"keytest\", uuid, master, bad) == -EINVAL at line 512\0");
+    }
+    var nouuid = [0u8; 16];
+    if (cosmofs_format_keys(bdp, 1, label, borrow nouuid as *[u8; 16] as *u8, master, k.slots as *cosmo_keyslot) !=
+        -EINVAL) {
+        return failed(reason,
+            "check failed: cosmofs_format_keys(&bd, 1, \"keytest\", nouuid, master, slots) == -EINVAL at line 518\0");
+    }
+
+    // Made at 14, MAC'd, and unlocked by the format: it mounts at once.
+    if (cosmofs_format_keys(bdp, 1, label, uuid, master, k.slots as *cosmo_keyslot) != 0) {
+        return failed(reason,
+            "check failed: cosmofs_format_keys(&bd, 1, \"keytest\", uuid, master, slots) == 0 at line 524\0");
+    }
+    let s = Ptr.toBorrow(sb as *cfs_super);
+    if (!(ktSuper(k.bd, sb) && s.version == 14 && s.key_root != 0 && superIsMac(s, s.version))) {
+        return failed(reason,
+            "check failed: kt_super(bd, &sb) && sb.version == 14 && sb.key_root != 0 && cfs_super_is... at line 529\0");
+    }
+    if (memcmp(borrow s.uuid as *[u8; 16] as *void, uuid as *void, 16) != 0) { // the uuid the slots were sealed for
+        return failed(reason, "check failed: memcmp(sb.uuid, uuid, 16) == 0 at line 532\0");
+    }
+    if (ktMountDev(k.bd) != 0) {
+        return failed(reason, "check failed: kt_mount_dev(bd) == 0 at line 535\0");
+    }
+    k.mounted = true;
+    if (!ktWriteAt(under(mut path, "secret"), 0, secret, slen)) {
+        return failed(reason, "check failed: kt_write_at(KT \"/secret\", 0, secret, sizeof(secret) - 1) at line 539\0");
+    }
+    // A sparse file with a block past the one-level index: its checksum root becomes a CSUMIDX2 whose entry 0 is the
+    // old index (CFS-10).
+    let blk = k.blk as *void;
+    let far = KT_FAR_LBLK * CFS_BLOCK as u64;
+    if (!ktWriteAt(under(mut path, "far"), 0, blk, CFS_BLOCK)) {
+        return failed(reason, "check failed: kt_write_at(KT \"/far\", 0, blk, CFS_BLOCK) at line 546\0");
+    }
+    if (!ktWriteAt(under(mut path, "far"), far, blk, CFS_BLOCK)) {
+        return failed(reason,
+            "check failed: kt_write_at(KT \"/far\", (uint64_t)KT_FAR_LBLK * CFS_BLOCK, blk, CFS_BLOCK) at line 550\0");
+    }
+    if (vfs_sync() != 0) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 553\0");
+    }
+    if (!ktReadAt(under(mut path, "far"), 0, blk, CFS_BLOCK)) {
+        return failed(reason, "check failed: kt_read_at(KT \"/far\", 0, blk, CFS_BLOCK) at line 556\0");
+    }
+    if (!ktReadAt(under(mut path, "far"), far, blk, CFS_BLOCK)) {
+        return failed(reason,
+            "check failed: kt_read_at(KT \"/far\", (uint64_t)KT_FAR_LBLK * CFS_BLOCK, blk, CFS_BLOCK) at line 560\0");
+    }
+    if (!cfs_keytest_floor_cow(k.blk as *u8, reason)) {
+        return false;
+    }
+    var rootKind: u32 = 0;
+    let entry = truncate<u32>(KT_FAR_LBLK / 127 / CFS_PTRS_PER_BLOCK as u64);
+    let mid = ktCsumMid(ktMount(), under(mut path, "far"), entry, borrow mut rootKind as *mut u32);
+    if (!(rootKind == CFS_KIND_CSUMIDX2 && mid != 0)) {
+        return failed(reason, "check failed: root_kind == CFS_KIND_CSUMIDX2 && mid != 0 at line 569\0");
+    }
+    let r = Ptr.toBorrow(rep as *cosmofs_check_report);
+    if (!(cosmofs_check(ktMount(), rep, 0) == 0 && r.clean && r.csum_two_level == 1)) {
+        return failed(reason,
+            "check failed: cosmofs_check(kt_mount(), rep, 0) == 0 && rep->clean && rep->csum_two_lev... at line 574\0");
+    }
+    if (ktInfo(0 as *mut blkdev, ktMount(), info) != 0) {
+        return failed(reason, "check failed: kt_info(NULL, kt_mount(), info) == 0 at line 577\0");
+    }
+    let inf = Ptr.toBorrow(info as *cosmo_fsctl_keyinfo);
+    let want = KEY_F_ENCRYPTED | KEY_F_MAC | KEY_F_UNLOCKED;
+    if ((inf.flags & want) != want) {
+        return failed(reason,
+            "check failed: (info->flags & (COSMO_FSCTL_KEY_F_ENCRYPTED | COSMO_FSCTL_KEY_F_MAC | COS... at line 583\0");
+    }
+    let s0 = Ptr.toBorrow(k.slots as *cosmo_keyslot);
+    if (!(inf.nslots == KEY_SLOTS && inf.slot[0].kind == KEYSLOT_PASSPHRASE &&
+        memcmp(borrow inf.slot[0].salt as *[u8; 16] as *void, borrow s0.salt as *[u8; 16] as *void, 16) == 0)) {
+        return failed(reason,
+            "check failed: info->nslots == COSMO_KEY_SLOTS && info->slot[0].kind == COSMO_KEYSLOT_PA... at line 589\0");
+    }
+
+    // The slots of a mounted pool: written with its master key only, and never all emptied.
+    var recSlot = [0u64; 12];
+    let rec = borrow mut recSlot as *mut [u64; 12] as *mut cosmo_keyslot;
+    memcpy(rec as *mut void, k.slots as *void, KEYSLOT_SIZE);
+    var emptySlot = [0u64; 12];
+    let empty = borrow emptySlot as *[u64; 12] as *cosmo_keyslot;
+    let rs = Ptr.toBorrowMut(rec);
+    random_get_bytes(borrow mut rs.salt as *mut [u8; 16] as *mut void, 16);
+    if (ktSlot(ktMount(), 1, wrong, rec as *cosmo_keyslot) != -EKEYREJECTED) {
+        return failed(reason, "check failed: kt_slot(kt_mount(), 1, wrong, &rec) == -EKEYREJECTED at line 601\0");
+    }
+    if (ktSlot(ktMount(), 1, master, rec as *cosmo_keyslot) != 0) {
+        return failed(reason, "check failed: kt_slot(kt_mount(), 1, master, &rec) == 0 at line 604\0");
+    }
+    if (ktSlot(ktMount(), 0, master, empty) != 0) {
+        return failed(reason, "check failed: kt_slot(kt_mount(), 0, master, &empty) == 0 at line 607\0");
+    }
+    if (ktSlot(ktMount(), 1, master, empty) != -EBUSY) {
+        return failed(reason, "check failed: kt_slot(kt_mount(), 1, master, &empty) == -EBUSY at line 610\0");
+    }
+
+    // The unmount takes the key with it: the pool is locked, so it neither mounts nor checks, and says which.
+    if (vfs_umount2(kt(), 0) != 0) {
+        return failed(reason, "check failed: vfs_umount(KT) == 0 at line 615\0");
+    }
+    k.mounted = false;
+    if (ktInfo(k.bd, 0 as *mut mount, info) != 0) {
+        return failed(reason, "check failed: kt_info(bd, NULL, info) == 0 at line 619\0");
+    }
+    if (!((inf.flags & KEY_F_MAC) != 0 && (inf.flags & KEY_F_UNLOCKED) == 0)) {
+        return failed(reason,
+            "check failed: (info->flags & COSMO_FSCTL_KEY_F_MAC) && !(info->flags & COSMO_FSCTL_KEY_... at line 623\0");
+    }
+    if (!(inf.slot[0].kind == KEYSLOT_EMPTY && inf.slot[1].kind == KEYSLOT_PASSPHRASE &&
+        memcmp(borrow inf.slot[1].salt as *[u8; 16] as *void, borrow rs.salt as *[u8; 16] as *void, 16) == 0)) {
+        // the slot change was durable
+        return failed(reason,
+            "check failed: info->slot[0].kind == COSMO_KEYSLOT_EMPTY && info->slot[1].kind == COSMO_... at line 629\0");
+    }
+    if (ktMountDev(k.bd) != -ENOKEY) {
+        return failed(reason, "check failed: kt_mount_dev(bd) == -ENOKEY at line 632\0");
+    }
+    let d = Ptr.toBorrow(dev as *cosmofs_dev_report);
+    if (!(cosmofs_check_dev(k.bd, 0, rep, dev) == 0 && (d.flags & DEV_F_LOCKED) != 0)) {
+        return failed(reason,
+            "check failed: cosmofs_check_dev(bd, 0, rep, &dev) == 0 && (dev.flags & COSMO_FSCTL_DEV_... at line 637\0");
+    }
+    if (ktLoad(k.bd, wrong) != -EKEYREJECTED) {
+        return failed(reason, "check failed: kt_load(bd, wrong) == -EKEYREJECTED at line 640\0");
+    }
+    if (ktLoad(k.bd, master) != 0) {
+        return failed(reason, "check failed: kt_load(bd, master) == 0 at line 643\0");
+    }
+    if (!(cosmofs_check_dev(k.bd, 0, rep, dev) == 0 && (d.flags & DEV_F_CHECKED) != 0 && r.clean)) {
+        return failed(reason,
+            "check failed: cosmofs_check_dev(bd, 0, rep, &dev) == 0 && (dev.flags & COSMO_FSCTL_DEV_... at line 647\0");
+    }
+    // The check's mount held nothing: the key is still there.
+    if (ktMountDev(k.bd) != 0) {
+        return failed(reason, "check failed: kt_mount_dev(bd) == 0 at line 651\0");
+    }
+    k.mounted = true;
+    if (!ktReadAt(under(mut path, "secret"), 0, secret, slen)) {
+        return failed(reason, "check failed: kt_read_at(KT \"/secret\", 0, secret, sizeof(secret) - 1) at line 655\0");
+    }
+    if (!ktReadAt(under(mut path, "far"), far, blk, CFS_BLOCK)) {
+        return failed(reason,
+            "check failed: kt_read_at(KT \"/far\", (uint64_t)KT_FAR_LBLK * CFS_BLOCK, blk, CFS_BLOCK) at line 659\0");
+    }
+    if (vfs_umount2(kt(), 0) != 0) {
+        return failed(reason, "check failed: vfs_umount(KT) == 0 at line 662\0");
+    }
+    k.mounted = false;
+
+    // Each domain, forged the way a CRC'd pool would accept: refused. The superblock names the roots; a header is any
+    // CFS_KIND block, here the inode map's root, which every mount reads; the key block; and a block the mount does
+    // not read -- the far file's mid-level checksum index -- which the checker reports and a read refuses.
+    if (!ktSuper(k.bd, sb)) {
+        return failed(reason, "check failed: kt_super(bd, &sb) at line 670\0");
+    }
+    let hdrs = [s.imap_root, s.members, s.key_root];
+    let what = ["the inode map's root", "the member table", "the key block"];
+    for (i in 0usize..3) {
+        if (!(cfs_keytab_has(borrow s.uuid as *[u8; 16] as *u8) || ktLoad(k.bd, master) == 0)) {
+            return failed(reason, "check failed: cfs_keytab_has(sb.uuid) || kt_load(bd, master) == 0 at line 676\0");
+        }
+        if (!ktForge(k.bd, hdrs[i], MHDR_CRC, true, CFS_MHDR_SIZE + 9, k.save)) {
+            return failed(reason,
+                "check failed: kt_forge(bd, hdrs[i].dva, offsetof(struct cfs_mhdr, crc), true, CFS_M... at line 680\0");
+        }
+        // Refused is: the newest root does not load. The check's mount then fails, or falls back to the older slot's
+        // root -- which names an older copy of a block the commit since rewrote, and loads (design.md, "Older-slot
+        // fallback at mount").
+        let crc = cosmofs_check_dev(k.bd, 0, rep, dev);
+        let refused = crc == 0 && (d.flags & (DEV_F_MOUNT_FAILED | DEV_F_FELL_BACK)) != 0;
+        sayForged(what[i], refused, crc, d.flags, d.mount_error);
+        if (!refused) {
+            return failed(reason, "check failed: refused at line 689\0");
+        }
+        if (!ktPutBack(k.bd, hdrs[i], k.save as *u8)) {
+            return failed(reason, "check failed: kt_put_back(bd, hdrs[i].dva, save) at line 692\0");
+        }
+    }
+    // Both superblock slots: a recomputed CRC is not a seal here.
+    if (!ktForge(k.bd, CFS_SUPER_A, SUPER_CRC, false, SUPER_FREE_BLOCKS, k.save)) {
+        return failed(reason,
+            "check failed: kt_forge(bd, CFS_SUPER_A, offsetof(struct cfs_super, crc), false, offseto... at line 698\0");
+    }
+    if (!ktForge(k.bd, CFS_SUPER_B, SUPER_CRC, false, SUPER_FREE_BLOCKS, k.save2)) {
+        return failed(reason,
+            "check failed: kt_forge(bd, CFS_SUPER_B, offsetof(struct cfs_super, crc), false, offseto... at line 702\0");
+    }
+    let src = ktMountDev(k.bd);
+    if (src == 0) {
+        let _ = vfs_umount2(kt(), 0);
+    }
+    if (src != -EIO) {
+        return failed(reason, "check failed: src == -EIO at line 709\0");
+    }
+    if (!(cosmofs_check_dev(k.bd, 0, rep, dev) == 0 && (d.flags & DEV_F_SUPER_NONE) != 0)) {
+        return failed(reason,
+            "check failed: cosmofs_check_dev(bd, 0, rep, &dev) == 0 && (dev.flags & COSMO_FSCTL_DEV_... at line 713\0");
+    }
+    if (!(ktPutBack(k.bd, CFS_SUPER_A, k.save as *u8) && ktPutBack(k.bd, CFS_SUPER_B, k.save2 as *u8))) {
+        return failed(reason,
+            "check failed: kt_put_back(bd, CFS_SUPER_A, save) && kt_put_back(bd, CFS_SUPER_B, save2) at line 717\0");
+    }
+    saySupers(src);
+    // The mid-level index, which only the far block's read and a walk reach.
+    if (!ktForge(k.bd, mid, MHDR_CRC, true, CFS_MHDR_SIZE + 3, k.save)) {
+        return failed(reason,
+            "check failed: kt_forge(bd, mid, offsetof(struct cfs_mhdr, crc), true, CFS_MHDR_SIZE + 3... at line 723\0");
+    }
+    if (ktMountDev(k.bd) != 0) {
+        return failed(reason, "check failed: kt_mount_dev(bd) == 0 at line 726\0");
+    }
+    k.mounted = true;
+    if (!ktReadAt(under(mut path, "far"), 0, blk, CFS_BLOCK)) {
+        return failed(reason, "check failed: kt_read_at(KT \"/far\", 0, blk, CFS_BLOCK) at line 730\0");
+    }
+    if (ktReadAt(under(mut path, "far"), far, blk, CFS_BLOCK)) {
+        return failed(reason,
+            "check failed: !kt_read_at(KT \"/far\", (uint64_t)KT_FAR_LBLK * CFS_BLOCK, blk, CFS_BLOCK) at line 734\0");
+    }
+    if (!(cosmofs_check(ktMount(), rep, 0) == 0 && !r.clean && r.unreadable.count >= 1)) {
+        return failed(reason,
+            "check failed: cosmofs_check(kt_mount(), rep, 0) == 0 && !rep->clean && rep->unreadable.... at line 738\0");
+    }
+    sayMid(r.unreadable.count);
+    if (vfs_umount2(kt(), 0) != 0) {
+        return failed(reason, "check failed: vfs_umount(KT) == 0 at line 742\0");
+    }
+    k.mounted = false;
+    if (!ktPutBack(k.bd, mid, k.save as *u8)) {
+        return failed(reason, "check failed: kt_put_back(bd, mid, save) at line 746\0");
+    }
+    if (ktLoad(k.bd, master) != 0) {
+        return failed(reason, "check failed: kt_load(bd, master) == 0 at line 749\0");
+    }
+    if (ktMountDev(k.bd) != 0) {
+        return failed(reason, "check failed: kt_mount_dev(bd) == 0 at line 752\0");
+    }
+    k.mounted = true;
+    if (!(cosmofs_check(ktMount(), rep, 0) == 0 && r.clean)) {
+        return failed(reason, "check failed: cosmofs_check(kt_mount(), rep, 0) == 0 && rep->clean at line 756\0");
+    }
+    if (vfs_umount2(kt(), 0) != 0) {
+        return failed(reason, "check failed: vfs_umount(KT) == 0 at line 759\0");
+    }
+    k.mounted = false;
+
+    // A two-level tree on a mirror, its mid block's first copy damaged: the scrub counts the bad copy and repairs it.
+    // It used to read the block through the cache first, whose read on a writable mirror repaired the copy unseen
+    // (Codex on #447).
+    k.mir[0] = ramblk_create(2048);
+    k.mir[1] = ramblk_create(2048);
+    if (k.mir[0].isNull() || k.mir[1].isNull()) {
+        return failed(reason, "check failed: mir[0] != NULL && mir[1] != NULL at line 769\0");
+    }
+    let master3 = borrow k.master3 as *[u8; 32] as *u8;
+    if (cosmofs_format_keys(borrow mut k.mir as *mut [*mut blkdev; 2] as *mut *mut blkdev, 2, label,
+        borrow k.uuid3 as *[u8; 16] as *u8, master3, k.slots as *cosmo_keyslot) != 0) {
+        return failed(reason,
+            "check failed: cosmofs_format_keys(mir, 2, \"keytest\", uuid3, master3, slots) == 0 at line 775\0");
+    }
+    if (ktMountDev(k.mir[0]) != 0) {
+        return failed(reason, "check failed: kt_mount_dev(mir[0]) == 0 at line 778\0");
+    }
+    k.mounted = true;
+    if (!ktWriteAt(under(mut path, "far"), far, blk, CFS_BLOCK)) {
+        return failed(reason,
+            "check failed: kt_write_at(KT \"/far\", (uint64_t)KT_FAR_LBLK * CFS_BLOCK, blk, CFS_BLOCK) at line 783\0");
+    }
+    if (vfs_sync() != 0) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 786\0");
+    }
+    let mmid = ktCsumMid(ktMount(), under(mut path, "far"), entry, borrow mut rootKind as *mut u32);
+    if (!(rootKind == CFS_KIND_CSUMIDX2 && mmid != 0)) {
+        return failed(reason, "check failed: root_kind == CFS_KIND_CSUMIDX2 && mmid != 0 at line 790\0");
+    }
+    if (vfs_umount2(kt(), 0) != 0) {
+        return failed(reason, "check failed: vfs_umount(KT) == 0 at line 793\0");
+    }
+    k.mounted = false;
+    if (!ktForge(k.mir[0], mmid, MHDR_CRC, true, CFS_MHDR_SIZE + 3, k.save)) {
+        return failed(reason,
+            "check failed: kt_forge(mir[0], mmid, offsetof(struct cfs_mhdr, crc), true, CFS_MHDR_SIZ... at line 798\0");
+    }
+    if (ktLoad(k.mir[0], master3) != 0) {
+        return failed(reason, "check failed: kt_load(mir[0], master3) == 0 at line 801\0");
+    }
+    if (ktMountDev(k.mir[0]) != 0) {
+        return failed(reason, "check failed: kt_mount_dev(mir[0]) == 0 at line 804\0");
+    }
+    k.mounted = true;
+    var scSlot = [0u64; 8];
+    let sc = borrow mut scSlot as *mut [u64; 8] as *mut cosmofs_scrub_stats;
+    if (cosmofs_scrub(ktMount(), sc, SCRUB_REPAIR) != 0) {
+        return failed(reason, "check failed: cosmofs_scrub(kt_mount(), &sc, COSMOFS_SCRUB_REPAIR) == 0 at line 810\0");
+    }
+    let st = Ptr.toBorrow(sc as *cosmofs_scrub_stats);
+    sayScrub(st.bad_copies, st.repaired, st.unrecoverable);
+    if (!(st.bad_copies == 1 && st.repaired == 1 && st.unrecoverable == 0)) {
+        return failed(reason,
+            "check failed: sc.bad_copies == 1 && sc.repaired == 1 && sc.unrecoverable == 0 at line 816\0");
+    }
+    if (!(cosmofs_scrub(ktMount(), sc, SCRUB_REPAIR) == 0 && st.bad_copies == 0)) {
+        return failed(reason,
+            "check failed: cosmofs_scrub(kt_mount(), &sc, COSMOFS_SCRUB_REPAIR) == 0 && sc.bad_copie... at line 820\0");
+    }
+    if (!ktReadAt(under(mut path, "far"), far, blk, CFS_BLOCK)) {
+        return failed(reason,
+            "check failed: kt_read_at(KT \"/far\", (uint64_t)KT_FAR_LBLK * CFS_BLOCK, blk, CFS_BLOCK) at line 824\0");
+    }
+    if (vfs_umount2(kt(), 0) != 0) {
+        return failed(reason, "check failed: vfs_umount(KT) == 0 at line 827\0");
+    }
+    k.mounted = false;
+
+    if (!cfs_keytest_floor_labels(borrow mut k.two as *mut [*mut blkdev; 2] as *mut *mut blkdev,
+        k.slots as *cosmo_keyslot, borrow k.uuid2 as *[u8; 16] as *u8, borrow k.master2 as *[u8; 32] as *u8, k.save,
+        reason)) {
+        return false;
+    }
+
+    // A plain pool whose file outgrows the one-level index is raised to 14 and keeps CRC32C: no key block, so no MAC
+    // (design.md, "Import rule"). 600000 blocks is entry 590 of an index of CRCs.
+    k.plain = ramblk_create(1024);
+    if (k.plain.isNull()) {
+        return failed(reason, "check failed: plain != NULL at line 841\0");
+    }
+    if (cosmofs_format(k.plain) != 0) {
+        return failed(reason, "check failed: cosmofs_format(plain) == 0 at line 844\0");
+    }
+    if (!(ktSuper(k.plain, sb) && s.version == CFS_FORMAT_VERSION)) {
+        return failed(reason, "check failed: kt_super(plain, &sb) && sb.version == CFS_FORMAT_VERSION at line 847\0");
+    }
+    if (ktMountDev(k.plain) != 0) {
+        return failed(reason, "check failed: kt_mount_dev(plain) == 0 at line 850\0");
+    }
+    k.mounted = true;
+    let far2 = 600000u64 * CFS_BLOCK as u64;
+    if (!ktWriteAt(under(mut path, "far"), far2, blk, CFS_BLOCK)) {
+        return failed(reason,
+            "check failed: kt_write_at(KT \"/far\", 600000ull * CFS_BLOCK, blk, CFS_BLOCK) at line 856\0");
+    }
+    if (vfs_sync() != 0) {
+        return failed(reason, "check failed: vfs_sync() == 0 at line 859\0");
+    }
+    if (vfs_umount2(kt(), 0) != 0) {
+        return failed(reason, "check failed: vfs_umount(KT) == 0 at line 862\0");
+    }
+    k.mounted = false;
+    if (!(ktSuper(k.plain, sb) && s.version == 14 && s.key_root == 0 && !superIsMac(s, s.version))) {
+        return failed(reason,
+            "check failed: kt_super(plain, &sb) && sb.version == 14 && sb.key_root == 0 && !cfs_supe... at line 867\0");
+    }
+    if (ktMountDev(k.plain) != 0) {
+        return failed(reason, "check failed: kt_mount_dev(plain) == 0 at line 870\0");
+    }
+    k.mounted = true;
+    if (!ktReadAt(under(mut path, "far"), far2, blk, CFS_BLOCK)) {
+        return failed(reason,
+            "check failed: kt_read_at(KT \"/far\", 600000ull * CFS_BLOCK, blk, CFS_BLOCK) at line 875\0");
+    }
+    if (!(cosmofs_check(ktMount(), rep, 0) == 0 && r.clean && r.csum_two_level == 1)) {
+        return failed(reason,
+            "check failed: cosmofs_check(kt_mount(), rep, 0) == 0 && rep->clean && rep->csum_two_lev... at line 879\0");
+    }
+    if (vfs_umount2(kt(), 0) != 0) {
+        return failed(reason, "check failed: vfs_umount(KT) == 0 at line 882\0");
+    }
+    k.mounted = false;
+    sayRaised();
+    return true;
+}
+
+/// "selftest: cosmofs-encrypted-root: WHAT forged with its CRC32C recomputed: VERDICT (check, flags, mount error)".
+fn sayForged(what: StringView, refused: bool, rc: i32, flags: u32, mountError: i32) {
+    var buffer = [0u8; 192];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: cosmofs-encrypted-root: ");
+    line.text(what);
+    line.text(" forged with its CRC32C recomputed: ");
+    line.text(if (refused) "refused" else "ACCEPTED");
+    line.text(" (check ");
+    line.signed(rc as i64);
+    line.text(", flags 0x");
+    line.hex(flags as u64, 0);
+    line.text(", mount error ");
+    line.signed(mountError as i64);
+    line.text(")");
+    KernelLog.send(LogLevel.Info, line);
+}
+
+fn saySupers(rc: i32) {
+    var buffer = [0u8; 160];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: cosmofs-encrypted-root: both superblock slots forged with their CRC32C ");
+    line.text("recomputed: mount refused (");
+    line.signed(rc as i64);
+    line.text(")");
+    KernelLog.send(LogLevel.Info, line);
+}
+
+fn sayMid(unreadable: u64) {
+    var buffer = [0u8; 160];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: cosmofs-encrypted-root: a two-level index's mid block forged: read refused, the check ");
+    line.text("counts ");
+    line.decimal(unreadable);
+    line.text(" unreadable");
+    KernelLog.send(LogLevel.Info, line);
+}
+
+fn sayScrub(bad: u64, repaired: u64, unrecoverable: u64) {
+    var buffer = [0u8; 192];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: cosmofs-encrypted-root: a mirrored two-level index's mid block, first copy damaged: ");
+    line.text("the scrub counted ");
+    line.decimal(bad);
+    line.text(" bad, repaired ");
+    line.decimal(repaired);
+    line.text(", ");
+    line.decimal(unrecoverable);
+    line.text(" unrecoverable");
+    KernelLog.send(LogLevel.Info, line);
+}
+
+fn sayRaised() {
+    var buffer = [0u8; 192];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: cosmofs-encrypted-root: a plain pool's file past the one-level index: raised to 14, ");
+    line.text("CRC32C kept, read back, checked clean");
+    KernelLog.send(LogLevel.Info, line);
+}
+
+/// "selftest: cosmofs-encrypted-root: WHAT VERDICT (check RC, flags 0xFLAGS)".
+fn say2(what: StringView, verdict: StringView, rc: i32, flags: u32) {
+    var buffer = [0u8; 160];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: cosmofs-encrypted-root: ");
+    line.text(what);
+    line.text(verdict);
+    line.text(" (check ");
+    line.signed(rc as i64);
+    line.text(", flags 0x");
+    line.hex(flags as u64, 0);
+    line.text(")");
+    KernelLog.send(LogLevel.Info, line);
+}
+
+/// The superblock's uuid of `bd`'s pool unloaded from the key table, if it can be read.
+/// Safety: `bd` is a device.
+unsafe fn unloadKey(bd: *mut blkdev) {
+    var sbSlot = [0u64; 21];
+    let sb = borrow mut sbSlot as *mut [u64; 21] as *mut cfs_super;
+    if (ktSuper(bd, sb)) {
+        let _ = cfs_keytab_unload(borrow Ptr.toBorrow(sb as *cfs_super).uuid as *[u8; 16] as *u8);
+    }
+}
+
+/// The self-test: everything above, then everything it made taken down, whatever happened.
+/// Safety: `reason` writable.
+@export("selftest_cosmofs_encrypted_root")
+unsafe fn selftestEncryptedRoot(reason: *mut *CChar) -> bool {
+    if (!random_ready()) {
+        KernelLog.write(LogLevel.Info, "selftest: cosmofs-encrypted-root: the entropy pool is not seeded; skipping");
+        return true;
+    }
+    let _ = vfs_umount2(kt(), VFS_UMOUNT_FORCE);
+    let kp = kzalloc(layoutOf<Kt>().size) as *mut Kt;
+    if (kp.isNull()) {
+        reason.write("check failed: bd != NULL ... at line 985\0".ptr as *CChar);
+        return false;
+    }
+    let k = Ptr.toBorrowMut(kp);
+    k.bd = ramblk_create(4096);
+    k.slots = kmalloc(KEYSLOT_SIZE * KEY_SLOTS as usize, 0) as *mut cosmo_keyslot;
+    k.info = kmalloc(layoutOf<cosmo_fsctl_keyinfo>().size, 0) as *mut cosmo_fsctl_keyinfo;
+    k.save = kmalloc(CFS_BLOCK, 0) as *mut u8;
+    k.save2 = kmalloc(CFS_BLOCK, 0) as *mut u8;
+    k.blk = kmalloc(CFS_BLOCK, 0) as *mut u8;
+    k.rep = kmalloc(layoutOf<cosmofs_check_report>().size, 0) as *mut cosmofs_check_report;
+    k.bad = kmalloc(KEYSLOT_SIZE * KEY_SLOTS as usize, 0) as *mut cosmo_keyslot;
+    var ok = false;
+    if (k.bd.isNull() || k.slots.isNull() || k.info.isNull() || k.save.isNull() || k.save2.isNull() ||
+        k.blk.isNull() || k.rep.isNull() || k.bad.isNull()) {
+        reason.write(
+            "check failed: bd != NULL && slots != NULL && info != NULL... at line 1001\0".ptr as *CChar);
+    } else {
+        random_get_bytes(borrow mut k.master as *mut [u8; 32] as *mut void, 32);
+        random_get_bytes(borrow mut k.master2 as *mut [u8; 32] as *mut void, 32);
+        random_get_bytes(borrow mut k.uuid as *mut [u8; 16] as *mut void, 16);
+        random_get_bytes(borrow mut k.uuid2 as *mut [u8; 16] as *mut void, 16);
+        random_get_bytes(borrow mut k.master3 as *mut [u8; 32] as *mut void, 32);
+        random_get_bytes(borrow mut k.uuid3 as *mut [u8; 16] as *mut void, 16);
+        k.wrong = k.master;
+        k.wrong[7] ^= 0x40;
+        for (i in 0usize..CFS_BLOCK) {
+            k.blk.add(i).write(truncate<u8>(i * 13 + 1));
+        }
+        ktSlots(k.slots);
+        ok = body(k, reason);
+    }
+    if (k.mounted) {
+        let _ = vfs_umount2(kt(), VFS_UMOUNT_FORCE);
+    }
+    let _ = vfs_rmdir(0 as *mut vnode, kt());
+    if (!k.bd.isNull()) {
+        unloadKey(k.bd);
+        ramblk_destroy(k.bd);
+    }
+    for (i in 0usize..2) {
+        if (!k.two[i].isNull()) {
+            if (i == 0) {
+                unloadKey(k.two[0]);
+            }
+            ramblk_destroy(k.two[i]);
+        }
+    }
+    if (!k.mir[0].isNull()) {
+        let _ = cfs_keytab_unload(borrow k.uuid3 as *[u8; 16] as *u8);
+    }
+    for (i in 0usize..2) {
+        if (!k.mir[i].isNull()) {
+            ramblk_destroy(k.mir[i]);
+        }
+    }
+    if (!k.plain.isNull()) {
+        ramblk_destroy(k.plain);
+    }
+    cfs_keytest_floor_clear();
+    k.master = [0u8; 32];
+    k.master2 = [0u8; 32];
+    k.master3 = [0u8; 32];
+    kfree(k.slots as *mut void);
+    kfree(k.info as *mut void);
+    kfree(k.save as *mut void);
+    kfree(k.save2 as *mut void);
+    kfree(k.blk as *mut void);
+    kfree(k.rep as *mut void);
+    kfree(k.bad as *mut void);
+    kfree(kp as *mut void);
+    return ok;
+}
