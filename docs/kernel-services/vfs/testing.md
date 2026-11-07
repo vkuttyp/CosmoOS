@@ -35,7 +35,7 @@ recorded from the C it replaced: `memdev_init` with its `ramfs_mkchr` calls fail
 each device's operations, and random reads and writes of both, with every byte of the buffer and of the guards
 around it. clang and gcc give the same digest, for the C and for the port.
 
-`tests/host/test_ramfs.c` holds ramfs (`ramfs.c`, roadmap 2.0 SA7) to a digest recorded from the C over random
+`tests/host/test_ramfs.c` holds ramfs (`ramfs.cee`, roadmap 2.0 SA7) to a digest recorded from the C over random
 histories of mounts: files, directories, links, sockets, named pipes and character devices made, looked up, linked,
 unlinked, renamed over one another and across directories, listed a few entries at a time, truncated and read;
 devices made by path and by directory with tables of every shape, opened with and without the privilege and torn
@@ -43,7 +43,7 @@ down; anonymous files; the boot archive copied in; and every tree released by un
 allocators fail now and then. It keeps to what the VFS lets through (no link to a file without a name, nothing made
 in a removed directory, no directory renamed into itself). Every call, result, name, inode number and log line is in
 the digest; every vnode, entry and allocation is given back. Every line runs but the link without a target, which no
-symlink can make; clang and gcc give the same digest.
+symlink can make; clang and gcc give the same digest, for the C and for the port.
 
 `tests/host/test_mountns.c` holds mount namespaces (`mountns.cee`, roadmap 2.0 SA7) to a digest recorded from the C,
 over random histories: mounts made and seen by some namespaces, namespaces copied from one another while the

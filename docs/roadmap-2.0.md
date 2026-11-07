@@ -1620,6 +1620,22 @@ frame's direct-map address. The hash buckets, an array of pointers no
 imported field may be, are reached at the cache's start, where the
 floor asserts they are.
 
+`ramfs.cee`, the in-memory filesystem: `tests/host/test_ramfs.c` runs
+random histories of mounts -- every kind of node made, looked up,
+linked, unlinked, renamed over one another and across directories and
+listed a few entries at a time; devices made by path and by directory
+with tables of every shape and opened with and without the privilege;
+anonymous files; the boot archive copied in; every tree released by
+unmount -- while the vnode and heap allocators fail now and then
+(0x34bf9feeddcfa426, clang and gcc; every line but a link with no
+target, which no symlink makes). A directory entry and a node's private
+state are CeeSafe structs, laid out by C's rules: the digest records
+every allocation's size, and the port's are the C's. `ramfs_floor.c`
+keeps the six operation tables and `ramfs_fs_type`, C data naming the
+operations, readdir's entry point and the call through its callback,
+whose type takes an enum, and `bootarchive_entry`, a function CeeSafe
+cannot name beside its struct.
+
 Size: about 4.5x.
 
 ### SA8 The Linux personality and the system-call layer

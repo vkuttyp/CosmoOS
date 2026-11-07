@@ -16,7 +16,7 @@ storage pool.
         ▼
    kernel-services/vfs/     vfs.c        mounts, path walk, vnodes, files, the fs_type registry
                             pagecache.cee  per-vnode page cache: read-through, dirty pages, writeback
-                            ramfs.c      in-memory filesystem (the root, /tmp, /boot from the archive)
+                            ramfs.cee    in-memory filesystem (the root, /tmp, /boot from the archive)
         │
         ▼
    kernel-services/filesystem/cosmofs/   the on-disk CoW filesystem: superblock slots, inode map,

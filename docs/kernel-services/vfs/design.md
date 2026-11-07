@@ -362,7 +362,7 @@ mount that is unmounting, so a second unmount by path fails before it
 gets there; the guard is for the relative path resolved from inside the
 mount, which does not traverse the mountpoint.
 
-### ramfs (`kernel-services/vfs/ramfs.c`)
+### ramfs (`kernel-services/vfs/ramfs.cee`)
 
 `ramfs_node` = the vnode plus, for directories, a list of
 `ramfs_dirent { name, len, struct vnode *child (referenced) }`. Regular

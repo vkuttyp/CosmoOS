@@ -136,7 +136,7 @@ Open lines (struck lines are not counted):
 
 - **DOC-1** usability, S. The Parallels guide does not say the live image's plain disk must be the image's own size (a larger disk's GPT is refused).
 - **DOC-2** nice-to-have, S. `handle.h` says every function is non-blocking, but `handle_close` can block in the last put.
-- **DOC-3** nice-to-have, M. The stale names, counts and lists in the [2026-10-28 audit](audit/2026-10-28-state-of-the-project.md) section 3 that its PR did not fix (the medium and low rows: renamed identifiers, file maps, the Linux personality's per-call rows, the guide's applet and `/sbin` lists, the libc and make-target tables), two stale code comments (`kernel/core/log.c`'s "no ring buffer yet", `ramfs.c`'s "sticky bit … not yet enforced"), and a check that would keep them from returning: `scripts/check-docs.py` checks only that the five files exist; a scan of backticked identifiers against the tree, with an allow-list for spec and Linux names, finds most of them.
+- **DOC-3** nice-to-have, M. The stale names, counts and lists in the [2026-10-28 audit](audit/2026-10-28-state-of-the-project.md) section 3 that its PR did not fix (the medium and low rows: renamed identifiers, file maps, the Linux personality's per-call rows, the guide's applet and `/sbin` lists, the libc and make-target tables), two stale code comments (`kernel/core/log.c`'s "no ring buffer yet", `ramfs.cee`'s "sticky bit … not yet enforced"), and a check that would keep them from returning: `scripts/check-docs.py` checks only that the five files exist; a scan of backticked identifiers against the tree, with an allow-list for spec and Linux names, finds most of them.
 
 ## Drivers and platforms
 

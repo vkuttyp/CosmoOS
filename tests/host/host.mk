@@ -92,7 +92,8 @@ HOST_BLKCTL_SRCS := $(HOST_COMMON_SRCS) kernel-services/vfs/blkctl.c kernel-serv
 	kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_blkctl.c
 HOST_PAGECACHE_SRCS := $(HOST_COMMON_SRCS) kernel-services/vfs/pagecache.c kernel-services/vfs/pagecache_floor.c \
 	kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_pagecache.c
-HOST_RAMFS_SRCS := $(HOST_COMMON_SRCS) kernel-services/vfs/ramfs.c kernel/core/printf.c tests/host/test_ramfs.c
+HOST_RAMFS_SRCS := $(HOST_COMMON_SRCS) kernel-services/vfs/ramfs.c kernel-services/vfs/ramfs_floor.c \
+	kernel/core/printf.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_ramfs.c
 # /proc: the process table, terminals, handles, scheduler, clocks, memory figures, mounts, the network stack's
 # tables and the vnode cache are the test's.
 HOST_PROCFS_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/procfs/procfs.c \

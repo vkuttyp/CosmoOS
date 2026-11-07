@@ -1,0 +1,1124 @@
+// ramfs.cee - The in-memory filesystem: the root at boot, /tmp, /boot (docs/kernel-services/vfs/design.md), in
+// CeeSafe: roadmap 2.0 SA7. tests/host/test_ramfs.c holds it to the digest of the C it replaced.
+//
+// Directories are lists of entries pointing at pinned vnodes; regular file data lives in the vnode's page cache
+// (readpage zero-fills, writepage keeps the page resident). Inode numbers are per mount.
+//
+// The vnodes, mounts and device tables stay C (vfs.h). ramfs_floor.c keeps the operation tables and ramfs_fs_type,
+// C data the VFS and boot composition name, and readdir's entry point and the call through its callback, whose type
+// takes an enum vnode_type a CeeSafe function type cannot spell.
+
+@header("kernel/bootarchive.h", "kernel/cred.h", "kernel/errno.h", "kernel/fifo.h", "kernel/kmalloc.h",
+    "kernel/list.h", "kernel/lockdep.h", "kernel/log.h", "kernel/mutex.h", "kernel/pagecache.h", "kernel/string.h",
+    "kernel/vfs.h")
+extern "C" {
+    struct vnode_ops;
+    struct fifo;
+    struct file;
+    struct waitqueue;
+    struct blkdev;
+    struct fs_type;
+    struct mount {
+        flags: u32;
+        root: *mut vnode;
+        cache_limit_pages: u64;
+        next_ino: AtomicU64;
+    }
+    struct vnode {
+        obj: kobject;
+        mnt: *mut mount;
+        ino: u64;
+        @cname("type") kind: u32;
+        mode: u32;
+        uid: u32;
+        gid: u32;
+        nlink: u32;
+        size: u64;
+        mtime_ns: u64;
+        ctime_ns: u64;
+        ops: *vnode_ops;
+        fs_priv: *mut void;
+        lock: mutex;
+        flags: u32;
+    }
+    struct chrdev_ops {
+        read: extern "C" fn(*mut vnode, u64, *mut void, usize) -> i64;
+        write: extern "C" fn(*mut vnode, u64, *void, usize) -> i64;
+        open: extern "C" fn(*mut vnode, *mut file) -> i32;
+        release: extern "C" fn(*mut vnode, *mut file);
+        open_priv: u32;
+        read_file: extern "C" fn(*mut vnode, *mut file, u64, *mut void, usize) -> i64;
+        write_file: extern "C" fn(*mut vnode, *mut file, u64, *void, usize) -> i64;
+        ready: extern "C" fn(*mut vnode, *mut file) -> u32;
+        poll_wq: extern "C" fn(*mut vnode, *mut file, u32) -> *mut waitqueue;
+        set_nonblock: extern "C" fn(*mut vnode, *mut file, i32) -> i32;
+    }
+    struct credentials {
+        euid: u32;
+        egid: u32;
+        privs: u32;
+    }
+    struct bootarchive_entry {
+        name: [u8; 101];
+        data: *void;
+        size: usize;
+        link: [u8; 101];
+    }
+
+    fn kzalloc(size: usize) -> *mut void;
+    fn memcmp(a: *void, b: *void, n: usize) -> i32;
+    fn memcpy(dst: *mut void, src: *void, n: usize) -> *mut void;
+    fn memset(p: *mut void, c: i32, n: usize) -> *mut void;
+    fn strlen(s: *CChar) -> usize;
+    fn strnlen(s: *CChar, max: usize) -> usize;
+    fn strchr(s: *CChar, c: i32) -> *mut CChar;
+    fn strcmp(a: *CChar, b: *CChar) -> i32;
+    fn strncmp(a: *CChar, b: *CChar, n: usize) -> i32;
+    fn mutex_lock_nested(m: *mut mutex, subclass: u32);
+    fn cred_current() -> *credentials;
+    fn vnode_alloc(mnt: *mut mount, ino: u64) -> *mut vnode;
+    fn vnode_hash_insert(vn: *mut vnode);
+    fn vnode_put(vn: *mut vnode);
+    fn vfs_now_ns() -> u64;
+    fn vfs_lookup(start: *mut vnode, path: *CChar, out: *mut *mut vnode) -> i32;
+    fn vfs_open(start: *mut vnode, path: *CChar, flags: u32, mode: u32, out: *mut *mut file) -> i32;
+    fn vfs_mkdir(start: *mut vnode, path: *CChar, mode: u32) -> i32;
+    fn vfs_symlink(start: *mut vnode, path: *CChar, target: *CChar) -> i32;
+    fn file_write(f: *mut file, buf: *void, len: usize) -> i64;
+    fn pagecache_truncate(vn: *mut vnode, size: u64);
+    fn fifo_alloc() -> *mut fifo;
+    fn fifo_free(f: *mut fifo);
+    fn fifo_open(fifo: *mut fifo, f: *mut file) -> i32;
+    fn fifo_release(fifo: *mut fifo, f: *mut file);
+    fn fifo_read(fifo: *mut fifo, f: *mut file, buf: *mut void, len: usize) -> i64;
+    fn fifo_write(fifo: *mut fifo, f: *mut file, buf: *void, len: usize) -> i64;
+    fn fifo_ready(fifo: *mut fifo, f: *mut file) -> u32;
+    fn fifo_poll_wq(fifo: *mut fifo, f: *mut file, events: u32) -> *mut waitqueue;
+    fn fifo_set_nonblock(fifo: *mut fifo, f: *mut file, on: i32) -> i32;
+    fn bootarchive_count() -> u32;
+
+    // ramfs_floor.c
+    fn ramfs_floor_ops(which: u32) -> *vnode_ops;
+    /// bootarchive_entry, whose name is the struct's.
+    fn ramfs_floor_archive(index: u32) -> *bootarchive_entry;
+    fn ramfs_floor_emit(cb: *mut void, arg: *mut void, name: *CChar, len: usize, ino: u64, kind: u32) -> i32;
+}
+
+// errno.h, vfs.h, lockdep.h, cred.h, kmalloc.h and syscall.h, which ramfs_floor.c checks.
+const EPERM: i32 = 1;
+const ENOENT: i32 = 2;
+const EIO: i32 = 5;
+const ENOMEM: i32 = 12;
+const EEXIST: i32 = 17;
+const ENOTDIR: i32 = 20;
+const EINVAL: i32 = 22;
+const EFBIG: i32 = 27;
+const ENAMETOOLONG: i32 = 36;
+const ENOTEMPTY: i32 = 39;
+const ENOTSUP: i32 = 95;
+const VNODE_REG: u32 = 1;
+const VNODE_DIR: u32 = 2;
+const VNODE_CHR: u32 = 3;
+const VNODE_FIFO: u32 = 4;
+const VNODE_SOCK: u32 = 5;
+const VNODE_LNK: u32 = 6;
+const VNODE_PINNED: u32 = 1;
+const VNODE_DEAD: u32 = 2;
+const VNODE_NESTED_CHILD: u32 = 2;
+const MOUNT_CACHE_IS_STORE: u32 = 2;
+const MOUNT_SCRATCH: u32 = 4;
+const VFS_NAME_MAX: usize = 255;
+const VFS_PATH_MAX: usize = 1024;
+const PAGE_BYTES: usize = 4096;
+const CRED_ROOT_UID: u32 = 0;
+const COSMO_O_WRONLY: u32 = 0x0001;
+const COSMO_O_CREAT: u32 = 0x0040;
+const COSMO_O_TRUNC: u32 = 0x0200;
+const COSMO_IO_READABLE: u32 = 1;
+const COSMO_IO_WRITABLE: u32 = 2;
+
+const RAMFS_MAX_FILE: u64 = 64 << 20;
+const RAMFS_MAX_PAGES: u64 = 16384;
+
+// The modes, octal in the C: 0644, 0755, 01777, 0555, 0777 and 07777.
+const MODE_FILE: u32 = 0x1A4;
+const MODE_EXEC: u32 = 0x1ED;
+const MODE_TMP: u32 = 0x3FF;
+const MODE_PROC: u32 = 0x16D;
+const MODE_LINK: u32 = 0x1FF;
+const MODE_BITS: u32 = 0xFFF;
+
+// ramfs_floor_ops' tables.
+const OPS_DIR: u32 = 0;
+const OPS_FILE: u32 = 1;
+const OPS_LNK: u32 = 2;
+const OPS_SOCK: u32 = 3;
+const OPS_FIFO: u32 = 4;
+const OPS_CHR: u32 = 5;
+
+/// A directory entry: a name and the vnode it pins, one pin however many names (VFS-4). Laid out by C's rules, as
+/// every struct is (type-system.md §12).
+struct Dirent {
+    link: list_node;
+    child: *mut vnode;
+    len: u8;
+    name: [u8; 256];
+}
+
+/// What ramfs keeps of a vnode (its fs_priv).
+struct Node {
+    entries: list_node; // directories
+    parent: *mut vnode; // unreferenced back pointer, null for the root
+    nrEntries: u32;
+    chr: *chrdev_ops; // character nodes
+    chrPriv: AtomicUSize;
+    target: *mut u8; // symbolic links: the path, NUL terminated
+    fifo: *mut fifo; // named pipes: the ring's holder (kernel/ipc/fifo.c)
+}
+
+/// The ramfs mount that backs anonymous files (memfd, SysV shm): a mount of its own that boot composition makes and
+/// attaches nowhere (ramfs_set_anon_mount), so a memfd works regardless of the process's root (a chroot, or a cosmofs
+/// root) and survives the live root being released when init switches to a disk root (roadmap M2). It used to be the
+/// first ramfs mounted, which was the root.
+static mut ANON_MNT: *mut mount = 0 as *mut mount;
+
+/// Safety: `mnt` is null or a ramfs mount that outlives every anonymous file made on it.
+@export("ramfs_set_anon_mount")
+unsafe fn setAnonMount(mnt: *mut mount) {
+    ANON_MNT = mnt;
+}
+
+/// Safety: `vn` is a live ramfs vnode.
+unsafe fn nodeOf(vn: *mut vnode) -> *mut Node => Ptr.toBorrow(vn as *vnode).fs_priv as *mut Node;
+
+/// Safety: `vn` is a live vnode.
+unsafe fn fileOf(vn: *mut vnode) -> borrow mut(static) vnode => Ptr.toBorrowMut(vn);
+
+/// Safety: `n` is a live node.
+unsafe fn entriesOf(n: *mut Node) -> *mut list_node => borrow mut Ptr.toBorrowMut(n).entries as *mut list_node;
+
+/// Safety: `e` is a live entry.
+unsafe fn linkOf(e: *mut Dirent) -> *mut list_node => borrow mut Ptr.toBorrowMut(e).link as *mut list_node;
+
+/// Safety: `node` is an entry's `link`.
+unsafe fn entryOf(node: *mut list_node) -> *mut Dirent => containerOf(node, offsetOf<Dirent>(link)) as *mut Dirent;
+
+/// Safety: `e` is a live entry.
+unsafe fn nameOf(e: *mut Dirent) -> *mut u8 => (e as *mut u8).add(offsetOf<Dirent>(name));
+
+/// vfs.h's vnode_get.
+/// Safety: `vn` is a live vnode.
+unsafe fn vnodeGet(vn: *mut vnode) {
+    kobject_get(borrow mut Ptr.toBorrowMut(vn).obj as *mut kobject);
+}
+
+/// Safety: `vn` is a live vnode.
+unsafe fn lockOf(vn: *mut vnode) -> *mut mutex => borrow mut Ptr.toBorrowMut(vn).lock as *mut mutex;
+
+/// Safety: as cred.h's cred_has.
+unsafe fn credHas(priv: u32) -> bool {
+    let c = Ptr.toBorrow(cred_current());
+    return (c.privs & priv) == priv && priv != 0 && c.euid == CRED_ROOT_UID;
+}
+
+/// Safety: `mnt` is a live ramfs mount; `parent` is null or a live directory of it.
+unsafe fn ramfsNew(mnt: *mut mount, kind: u32, mode: u32, parent: *mut vnode) -> *mut vnode {
+    // The inode number is bumped atomically: a named create holds the parent dir's lock, but two creates in different
+    // directories of one mount (or an anonymous create, which holds no dir lock) would otherwise race this mount-wide
+    // counter and hand two files the same number.
+    let ino = Ptr.toBorrow(mnt as *mount).next_ino.fetchAddWith(1, Ordering.Relaxed);
+    let vn = vnode_alloc(mnt, ino);
+    if (vn.isNull()) {
+        return vn;
+    }
+    let n = kzalloc(layoutOf<Node>().size) as *mut Node;
+    if (n.isNull()) {
+        vnode_put(vn);
+        return 0 as *mut vnode;
+    }
+    List.init(entriesOf(n));
+    let node = Ptr.toBorrowMut(n);
+    node.parent = parent;
+    let file = fileOf(vn);
+    file.kind = kind;
+    file.mode = mode;
+    // Owned by whoever creates it: the kernel (root) for the boot namespace, the calling process afterwards.
+    file.uid = Ptr.toBorrow(cred_current()).euid;
+    file.gid = Ptr.toBorrow(cred_current()).egid;
+    let which = if (kind == VNODE_DIR) OPS_DIR else if (kind == VNODE_LNK) OPS_LNK
+        else if (kind == VNODE_SOCK) OPS_SOCK else if (kind == VNODE_FIFO) OPS_FIFO else OPS_FILE;
+    file.ops = ramfs_floor_ops(which);
+    file.fs_priv = n as *mut void;
+    file.flags = file.flags | VNODE_PINNED; // the reference from vnode_alloc is the pin
+    file.nlink = if (kind == VNODE_DIR) 2 else 1;
+    vnode_hash_insert(vn);
+    return vn;
+}
+
+/// Safety: `dir` is a live ramfs directory, locked; `name` holds `len` bytes.
+unsafe fn findEntry(dir: *mut vnode, name: *CChar, len: usize) -> *mut Dirent {
+    let head = entriesOf(nodeOf(dir));
+    var node = List.first(head as *list_node);
+    while (!node.isNull()) {
+        let e = entryOf(node);
+        if (Ptr.toBorrow(e as *Dirent).len as usize == len && memcmp(nameOf(e) as *void, name as *void, len) == 0) {
+            return e;
+        }
+        node = List.next(head as *list_node, node);
+    }
+    return 0 as *mut Dirent;
+}
+
+/// Safety: `out` is writable.
+unsafe fn give(out: *mut *mut vnode, vn: *mut vnode) {
+    let slot = Ptr.toBorrowMut(out);
+    *slot = vn;
+}
+
+/// Safety: `dir` is a live ramfs directory, locked; `name` holds `len` bytes; `out` is writable.
+@export("ramfs_lookup")
+unsafe fn lookup(dir: *mut vnode, name: *CChar, len: usize, out: *mut *mut vnode) -> i32 {
+    let b = name as *u8;
+    if (len == 2 && *Ptr.toBorrow(b) == 0x2E && *Ptr.toBorrow(b.add(1)) == 0x2E) {
+        let parent = Ptr.toBorrow(nodeOf(dir) as *Node).parent;
+        let p = if (parent.isNull()) dir else parent;
+        vnodeGet(p);
+        give(out, p);
+        return 0;
+    }
+    let e = findEntry(dir, name, len);
+    if (e.isNull()) {
+        return -ENOENT;
+    }
+    let child = Ptr.toBorrow(e as *Dirent).child;
+    vnodeGet(child);
+    give(out, child);
+    return 0;
+}
+
+/// Safety: `dir` is a live ramfs directory, locked; `name` holds `len` bytes, at most VFS_NAME_MAX.
+unsafe fn addEntry(dir: *mut vnode, name: *CChar, len: usize, child: *mut vnode) -> i32 {
+    let e = kzalloc(layoutOf<Dirent>().size) as *mut Dirent;
+    if (e.isNull()) {
+        return -ENOMEM;
+    }
+    List.init(linkOf(e));
+    let entry = Ptr.toBorrowMut(e);
+    entry.child = child;
+    entry.len = truncate<u8>(len);
+    let _ = memcpy(nameOf(e) as *mut void, name as *void, len);
+    let n = nodeOf(dir);
+    List.pushBack(entriesOf(n), linkOf(e));
+    let node = Ptr.toBorrowMut(n);
+    node.nrEntries += 1;
+    let fileDir = fileOf(dir);
+    fileDir.mtime_ns = vfs_now_ns();
+    return 0;
+}
+
+/// Safety: as lookup; `out` is writable.
+unsafe fn createCommon(dir: *mut vnode, name: *CChar, len: usize, mode: u32, kind: u32, out: *mut *mut vnode) -> i32 {
+    if (!findEntry(dir, name, len).isNull()) {
+        return -EEXIST;
+    }
+    let vn = ramfsNew(Ptr.toBorrow(dir as *vnode).mnt, kind, mode, dir);
+    if (vn.isNull()) {
+        return -ENOMEM;
+    }
+    let rc = addEntry(dir, name, len, vn); // the pin moves into the entry
+    if (rc != 0) {
+        let file = fileOf(vn);
+        file.flags = file.flags & (VNODE_PINNED ^ 0xFFFFFFFF);
+        vnode_put(vn);
+        return rc;
+    }
+    if (kind == VNODE_DIR) {
+        let d = fileOf(dir);
+        d.nlink += 1;
+    }
+    vnodeGet(vn); // the caller's reference
+    give(out, vn);
+    return 0;
+}
+
+/// Safety: as createCommon.
+@export("ramfs_create")
+unsafe fn create(dir: *mut vnode, name: *CChar, len: usize, mode: u32, out: *mut *mut vnode) -> i32 =>
+    createCommon(dir, name, len, mode, VNODE_REG, out);
+
+/// Safety: as createCommon.
+@export("ramfs_mkdir")
+unsafe fn mkdir(dir: *mut vnode, name: *CChar, len: usize, mode: u32, out: *mut *mut vnode) -> i32 =>
+    createCommon(dir, name, len, mode, VNODE_DIR, out);
+
+/// A unix socket's name: a node with no contents and no operations but its own removal; open() refuses it in the VFS.
+/// A named pipe: a node whose opens share the pipe's ring (kernel/ipc/fifo.c), the fifo made here and freed with the
+/// node.
+/// Safety: as createCommon.
+@export("ramfs_mknod")
+unsafe fn mknod(dir: *mut vnode, name: *CChar, len: usize, mode: u32, kind: u32, out: *mut *mut vnode) -> i32 {
+    if (kind == VNODE_SOCK) {
+        return createCommon(dir, name, len, mode, VNODE_SOCK, out);
+    }
+    if (kind != VNODE_FIFO) {
+        return -EINVAL;
+    }
+    let pipe = fifo_alloc();
+    if (pipe.isNull()) {
+        return -ENOMEM;
+    }
+    let rc = createCommon(dir, name, len, mode, VNODE_FIFO, out);
+    if (rc != 0) {
+        fifo_free(pipe);
+        return rc;
+    }
+    let node = Ptr.toBorrowMut(nodeOf(*Ptr.toBorrow(out as **mut vnode)));
+    node.fifo = pipe;
+    return 0;
+}
+
+/// A link's target is the node's own bytes, not a page: the link operations have no readpage or writepage, so a link
+/// is never in the page cache (which for ramfs is the store) and `size` is the target's length, as stat reports it.
+/// Safety: as createCommon; `target` is NUL-terminated.
+@export("ramfs_symlink")
+unsafe fn symlink(dir: *mut vnode, name: *CChar, len: usize, target: *CChar, out: *mut *mut vnode) -> i32 {
+    let tlen = strnlen(target, VFS_PATH_MAX);
+    if (tlen == 0 || tlen >= VFS_PATH_MAX) {
+        return -ENAMETOOLONG;
+    }
+    let copy = kmalloc(tlen + 1, 0) as *mut u8;
+    if (copy.isNull()) {
+        return -ENOMEM;
+    }
+    let _ = memcpy(copy as *mut void, target as *void, tlen);
+    let end = Ptr.toBorrowMut(copy.add(tlen));
+    *end = 0;
+    let rc = createCommon(dir, name, len, MODE_LINK, VNODE_LNK, out);
+    if (rc != 0) {
+        kfree(copy as *mut void);
+        return rc;
+    }
+    let vn = *Ptr.toBorrow(out as **mut vnode);
+    let node = Ptr.toBorrowMut(nodeOf(vn));
+    node.target = copy;
+    let fileVn = fileOf(vn);
+    fileVn.size = tlen as u64;
+    return 0;
+}
+
+/// Safety: `vn` is a live ramfs link; `buf` holds `len` bytes.
+@export("ramfs_readlink")
+unsafe fn readlink(vn: *mut vnode, buf: *mut CChar, len: usize) -> i32 {
+    let target = Ptr.toBorrow(nodeOf(vn) as *Node).target;
+    if (target.isNull()) {
+        return -EIO;
+    }
+    let full = strlen(target as *CChar);
+    let tlen = if (full > len) len else full;
+    let _ = memcpy(buf as *mut void, target as *void, tlen);
+    return truncate<i32>(tlen);
+}
+
+/// Drop the entry, and the pin with the last name (VFS-4: a file's other names keep it). Caller holds dir and victim
+/// locks.
+/// Safety: `e` is an entry of `dir`.
+unsafe fn dropEntry(dir: *mut vnode, e: *mut Dirent) {
+    let n = Ptr.toBorrowMut(nodeOf(dir));
+    let child = Ptr.toBorrow(e as *Dirent).child;
+    List.remove(linkOf(e));
+    n.nrEntries -= 1;
+    kfree(e as *mut void);
+    let fileDir = fileOf(dir);
+    fileDir.mtime_ns = vfs_now_ns();
+    let c = fileOf(child);
+    c.nlink = if (c.kind == VNODE_DIR) 0 else c.nlink.wrappingSub(1);
+    c.ctime_ns = vfs_now_ns();
+    if (c.kind == VNODE_DIR) {
+        let d = fileOf(dir);
+        d.nlink -= 1;
+    }
+    if (c.nlink == 0) {
+        c.flags = c.flags & (VNODE_PINNED ^ 0xFFFFFFFF);
+        vnode_put(child); // the pin; open files keep it alive
+    }
+}
+
+/// A second name for `target` (VFS-4): an entry under the pin it already has, and one more link. Under dir->lock and
+/// target->lock.
+/// Safety: as createCommon; `target` is a live vnode of this mount, no directory.
+@export("ramfs_link")
+unsafe fn link(dir: *mut vnode, name: *CChar, len: usize, target: *mut vnode) -> i32 {
+    if (!findEntry(dir, name, len).isNull()) {
+        return -EEXIST;
+    }
+    let rc = addEntry(dir, name, len, target);
+    if (rc != 0) {
+        return rc;
+    }
+    let t = fileOf(target);
+    t.nlink += 1;
+    t.ctime_ns = vfs_now_ns();
+    return 0;
+}
+
+/// Safety: as lookup; `victim` locked.
+@export("ramfs_unlink")
+unsafe fn unlink(dir: *mut vnode, name: *CChar, len: usize, victim: *mut vnode) -> i32 {
+    let e = findEntry(dir, name, len);
+    if (e.isNull() || Ptr.toBorrow(e as *Dirent).child != victim) {
+        return -ENOENT;
+    }
+    dropEntry(dir, e);
+    return 0;
+}
+
+/// Safety: as unlink.
+@export("ramfs_rmdir")
+unsafe fn rmdir(dir: *mut vnode, name: *CChar, len: usize, victim: *mut vnode) -> i32 {
+    let e = findEntry(dir, name, len);
+    if (e.isNull() || Ptr.toBorrow(e as *Dirent).child != victim) {
+        return -ENOENT;
+    }
+    if (Ptr.toBorrow(nodeOf(victim) as *Node).nrEntries != 0) {
+        return -ENOTEMPTY;
+    }
+    dropEntry(dir, e);
+    return 0;
+}
+
+/// Safety: both directories live ramfs directories of one mount, locked as the VFS's rename locks them; `victim` is
+/// named `oname` in `odir`; `replaced` is null or a live vnode named `nname` in `ndir`.
+@export("ramfs_rename")
+unsafe fn rename(
+    odir: *mut vnode,
+    oname: *CChar,
+    olen: usize,
+    victim: *mut vnode,
+    ndir: *mut vnode,
+    nname: *CChar,
+    nlen: usize,
+    replaced: *mut vnode,
+) -> i32 {
+    let e = findEntry(odir, oname, olen);
+    if (e.isNull() || Ptr.toBorrow(e as *Dirent).child != victim) {
+        return -ENOENT;
+    }
+    if (!replaced.isNull()) {
+        let r = findEntry(ndir, nname, nlen);
+        if (r.isNull() || Ptr.toBorrow(r as *Dirent).child != replaced) {
+            return -ENOENT;
+        }
+        let full = Ptr.toBorrow(nodeOf(replaced) as *Node).nrEntries != 0;
+        if (Ptr.toBorrow(replaced as *vnode).kind == VNODE_DIR && full) {
+            return -ENOTEMPTY;
+        }
+        mutex_lock_nested(lockOf(replaced), VNODE_NESTED_CHILD); // under both parents (V7)
+        dropEntry(ndir, r);
+        mutex_unlock(lockOf(replaced));
+    }
+    List.remove(linkOf(e));
+    let on = Ptr.toBorrowMut(nodeOf(odir));
+    on.nrEntries -= 1;
+    let entry = Ptr.toBorrowMut(e);
+    entry.len = truncate<u8>(nlen);
+    let _ = memcpy(nameOf(e) as *mut void, nname as *void, nlen);
+    List.pushBack(entriesOf(nodeOf(ndir)), linkOf(e));
+    let nn = Ptr.toBorrowMut(nodeOf(ndir));
+    nn.nrEntries += 1;
+    if (odir != ndir) {
+        let moved = Ptr.toBorrowMut(nodeOf(victim));
+        moved.parent = ndir;
+        if (Ptr.toBorrow(victim as *vnode).kind == VNODE_DIR) {
+            let o = fileOf(odir);
+            o.nlink -= 1;
+            let d = fileOf(ndir);
+            d.nlink += 1;
+        }
+    }
+    let now = vfs_now_ns();
+    let fileNdir = fileOf(ndir);
+    fileNdir.mtime_ns = now;
+    let fileOdir = fileOf(odir);
+    fileOdir.mtime_ns = now;
+    return 0;
+}
+
+/// The directory's entries from `*pos` -- 0 is ".", 1 is "..", 2 on the entries in order -- until the reader wants no
+/// more; `*pos` is where the next call starts.
+/// Safety: `dir` is a live ramfs directory, locked; `pos` is writable; `cb` is a vfs_dirent_cb and `arg` its argument.
+@export("ramfs_readdir_cee")
+unsafe fn readdir(dir: *mut vnode, pos: *mut u64, cb: *mut void, arg: *mut void) -> i32 {
+    let n = nodeOf(dir);
+    let at = Ptr.toBorrowMut(pos);
+    var i: u64 = 0;
+    if (*at == 0) {
+        if (ramfs_floor_emit(cb, arg, ".\0".ptr as *CChar, 1, Ptr.toBorrow(dir as *vnode).ino, VNODE_DIR) != 0) {
+            return 0;
+        }
+        *at = 1;
+    }
+    if (*at == 1) {
+        let parent = Ptr.toBorrow(n as *Node).parent;
+        let p = if (parent.isNull()) dir else parent;
+        if (ramfs_floor_emit(cb, arg, "..\0".ptr as *CChar, 2, Ptr.toBorrow(p as *vnode).ino, VNODE_DIR) != 0) {
+            return 0;
+        }
+        *at = 2;
+    }
+    let head = entriesOf(n);
+    var node = List.first(head as *list_node);
+    while (!node.isNull()) {
+        let e = entryOf(node);
+        node = List.next(head as *list_node, node);
+        if (i + 2 < *at) {
+            i += 1;
+            continue;
+        }
+        let entry = Ptr.toBorrow(e as *Dirent);
+        let child = Ptr.toBorrow(entry.child as *vnode);
+        if (ramfs_floor_emit(cb, arg, nameOf(e) as *CChar, entry.len as usize, child.ino, child.kind) != 0) {
+            return 0;
+        }
+        i += 1;
+        *at = i + 2;
+    }
+    return 0;
+}
+
+/// Holes; resident pages never miss.
+/// Safety: `buf` holds a page.
+@export("ramfs_readpage")
+unsafe fn readpage(vn: *mut vnode, index: u64, buf: *mut void) -> i32 {
+    let _ = memset(buf, 0, PAGE_BYTES);
+    return 0;
+}
+
+/// The page cache is the store.
+@export("ramfs_writepage")
+fn writepage(vn: *mut vnode, index: u64, buf: *void) -> i32 => 0;
+
+/// Safety: `vn` is a live ramfs file, locked.
+@export("ramfs_truncate")
+unsafe fn truncateTo(vn: *mut vnode, size: u64) -> i32 {
+    if (size > RAMFS_MAX_FILE) {
+        return -EFBIG;
+    }
+    pagecache_truncate(vn, size);
+    let file = fileOf(vn);
+    file.size = size;
+    file.mtime_ns = vfs_now_ns();
+    return 0;
+}
+
+/// Safety: `vn` is a ramfs vnode at its last reference.
+@export("ramfs_evict")
+unsafe fn evict(vn: *mut vnode) {
+    let n = nodeOf(vn);
+    if (!n.isNull()) {
+        let node = Ptr.toBorrow(n as *Node);
+        kfree(node.target as *mut void);
+        if (!node.fifo.isNull()) {
+            fifo_free(node.fifo); // asserts no ring: the opens went before the node could
+        }
+    }
+    kfree(n as *mut void);
+    let fileVn = fileOf(vn);
+    fileVn.fs_priv = 0 as *mut void;
+}
+
+// ---- named pipes: every operation is the fifo's, given the file ----
+
+/// Safety: `vn` is a live ramfs named pipe.
+unsafe fn fifoOf(vn: *mut vnode) -> *mut fifo => Ptr.toBorrow(nodeOf(vn) as *Node).fifo;
+
+/// Safety: as fifoOf; `f` is an open file of it.
+@export("ramfs_fifo_open")
+unsafe fn fifoOpen(vn: *mut vnode, f: *mut file) -> i32 => fifo_open(fifoOf(vn), f);
+
+/// Safety: as fifoOpen.
+@export("ramfs_fifo_release")
+unsafe fn fifoRelease(vn: *mut vnode, f: *mut file) {
+    fifo_release(fifoOf(vn), f);
+}
+
+/// Safety: as fifoOpen; `buf` holds `len` bytes.
+@export("ramfs_fifo_read")
+unsafe fn fifoRead(vn: *mut vnode, f: *mut file, off: u64, buf: *mut void, len: usize) -> i64 =>
+    fifo_read(fifoOf(vn), f, buf, len);
+
+/// Safety: as fifoRead.
+@export("ramfs_fifo_write")
+unsafe fn fifoWrite(vn: *mut vnode, f: *mut file, off: u64, buf: *void, len: usize) -> i64 =>
+    fifo_write(fifoOf(vn), f, buf, len);
+
+/// Safety: as fifoOpen.
+@export("ramfs_fifo_ready")
+unsafe fn fifoReady(vn: *mut vnode, f: *mut file) -> u32 => fifo_ready(fifoOf(vn), f);
+
+/// Safety: as fifoOpen.
+@export("ramfs_fifo_poll_wq")
+unsafe fn fifoPollWq(vn: *mut vnode, f: *mut file, events: u32) -> *mut waitqueue =>
+    fifo_poll_wq(fifoOf(vn), f, events);
+
+/// Safety: as fifoOpen.
+@export("ramfs_fifo_set_nonblock")
+unsafe fn fifoSetNonblock(vn: *mut vnode, f: *mut file, on: i32) -> i32 => fifo_set_nonblock(fifoOf(vn), f, on);
+
+// ---- character devices: the device's operation where it has one ----
+
+/// Safety: `vn` is a live ramfs character node.
+unsafe fn devOf(vn: *mut vnode) -> borrow(static) chrdev_ops => Ptr.toBorrow(Ptr.toBorrow(nodeOf(vn) as *Node).chr);
+
+/// Safety: as devOf; `buf` holds `len` bytes.
+@export("ramfs_chr_read")
+unsafe fn chrRead(vn: *mut vnode, off: u64, buf: *mut void, len: usize) -> i64 {
+    let dev = devOf(vn);
+    return if (dev.read.isNull()) -ENOTSUP as i64 else dev.read(vn, off, buf, len);
+}
+
+/// Safety: as chrRead.
+@export("ramfs_chr_write")
+unsafe fn chrWrite(vn: *mut vnode, off: u64, buf: *void, len: usize) -> i64 {
+    let dev = devOf(vn);
+    return if (dev.write.isNull()) -ENOTSUP as i64 else dev.write(vn, off, buf, len);
+}
+
+/// Safety: as devOf; `f` is the file being opened.
+@export("ramfs_chr_open")
+unsafe fn chrOpen(vn: *mut vnode, f: *mut file) -> i32 {
+    let dev = devOf(vn);
+    if (dev.open_priv != 0 && !credHas(dev.open_priv)) {
+        return -EPERM; // a raw device: the mode is not the whole of it (roadmap M5)
+    }
+    return if (dev.open.isNull()) 0 else dev.open(vn, f);
+}
+
+/// Safety: as chrOpen.
+@export("ramfs_chr_release")
+unsafe fn chrRelease(vn: *mut vnode, f: *mut file) {
+    let dev = devOf(vn);
+    if (!dev.release.isNull()) {
+        dev.release(vn, f);
+    }
+}
+
+/// Devices with per-open state get the file; the others keep read/write.
+/// Safety: as chrRead; `f` is an open file of it.
+@export("ramfs_chr_read_file")
+unsafe fn chrReadFile(vn: *mut vnode, f: *mut file, off: u64, buf: *mut void, len: usize) -> i64 {
+    let dev = devOf(vn);
+    if (!dev.read_file.isNull()) {
+        return dev.read_file(vn, f, off, buf, len);
+    }
+    return if (dev.read.isNull()) -ENOTSUP as i64 else dev.read(vn, off, buf, len);
+}
+
+/// Safety: as chrReadFile.
+@export("ramfs_chr_write_file")
+unsafe fn chrWriteFile(vn: *mut vnode, f: *mut file, off: u64, buf: *void, len: usize) -> i64 {
+    let dev = devOf(vn);
+    if (!dev.write_file.isNull()) {
+        return dev.write_file(vn, f, off, buf, len);
+    }
+    return if (dev.write.isNull()) -ENOTSUP as i64 else dev.write(vn, off, buf, len);
+}
+
+/// Readiness, for a device that has an opinion; the file type's defaults (always ready, never changes, -EOPNOTSUPP)
+/// for one that has not.
+/// Safety: as chrOpen.
+@export("ramfs_chr_ready")
+unsafe fn chrReady(vn: *mut vnode, f: *mut file) -> u32 {
+    let dev = devOf(vn);
+    return if (dev.ready.isNull()) COSMO_IO_READABLE | COSMO_IO_WRITABLE else dev.ready(vn, f);
+}
+
+/// Safety: as chrOpen.
+@export("ramfs_chr_poll_wq")
+unsafe fn chrPollWq(vn: *mut vnode, f: *mut file, events: u32) -> *mut waitqueue {
+    let dev = devOf(vn);
+    return if (dev.poll_wq.isNull()) 0 as *mut waitqueue else dev.poll_wq(vn, f, events);
+}
+
+/// Safety: as chrOpen.
+@export("ramfs_chr_set_nonblock")
+unsafe fn chrSetNonblock(vn: *mut vnode, f: *mut file, on: i32) -> i32 {
+    let dev = devOf(vn);
+    return if (dev.set_nonblock.isNull()) -ENOTSUP else dev.set_nonblock(vn, f, on);
+}
+
+/// The device table of a ramfs character node; null for any other vnode.
+/// Safety: `vn` is a live vnode.
+@export("ramfs_chr_ops_of")
+unsafe fn chrOpsOf(vn: *vnode) -> *chrdev_ops {
+    if (Ptr.toBorrow(vn).ops != ramfs_floor_ops(OPS_CHR)) {
+        return 0 as *chrdev_ops;
+    }
+    return Ptr.toBorrow(nodeOf(vn as *mut vnode) as *Node).chr;
+}
+
+/// Safety: `vn` is a live ramfs character node.
+@export("ramfs_chr_priv")
+unsafe fn chrPriv(vn: *vnode) -> *mut void =>
+    Ptr.toBorrow(nodeOf(vn as *mut vnode) as *Node).chrPriv.loadWith(LoadOrdering.Relaxed) as *mut void;
+
+/// Whether `dir` is a ramfs directory.
+/// Safety: `dir` is a live vnode.
+unsafe fn ramfsDir(dir: *mut vnode) -> bool {
+    let d = Ptr.toBorrow(dir as *vnode);
+    return d.kind == VNODE_DIR && d.ops == ramfs_floor_ops(OPS_DIR);
+}
+
+/// The character node at `path`, whose directory is a ramfs directory.
+/// Safety: `path` is NUL-terminated; `ops` outlives the node; `out` is null or writable.
+@export("ramfs_mkchr")
+unsafe fn mkchr(path: *CChar, mode: u32, ops: *chrdev_ops, priv: *mut void, out: *mut *mut vnode) -> i32 {
+    let p = path as *u8;
+    let total = strlen(path);
+    var slash: usize = total; // none
+    for (i in 0..total) {
+        if (*Ptr.toBorrow(p.add(i)) == 0x2F) {
+            slash = i;
+        }
+    }
+    if (slash == total || slash + 1 == total || strlen(p.add(slash + 1) as *CChar) > VFS_NAME_MAX) {
+        return -EINVAL;
+    }
+    var dirpath: [u8; 1024] = [0; 1024];
+    var dl = slash;
+    if (dl == 0) {
+        dirpath[0] = 0x2F;
+        dl = 1;
+    } else {
+        if (dl >= VFS_PATH_MAX) {
+            return -ENAMETOOLONG;
+        }
+        let _ = memcpy(borrow mut dirpath as *mut [u8; 1024] as *mut void, p as *void, dl);
+    }
+    dirpath[dl] = 0;
+    var dir = 0 as *mut vnode;
+    var rc = vfs_lookup(0 as *mut vnode, borrow dirpath as *[u8; 1024] as *CChar, borrow mut dir as *mut *mut vnode);
+    if (rc != 0) {
+        return rc;
+    }
+    if (!ramfsDir(dir)) {
+        vnode_put(dir);
+        return -ENOTDIR;
+    }
+    rc = mkchrAt(dir, p.add(slash + 1) as *CChar, mode, ops, priv, out);
+    vnode_put(dir);
+    return rc;
+}
+
+/// The node `name` in `dir`, a ramfs directory the caller holds a reference on: no path, no credentials -- the
+/// kernel's own (the pty slaves).
+/// Safety: `dir` is a live vnode, unlocked; `name` is NUL-terminated; `ops` outlives the node; `out` is null or
+/// writable.
+@export("ramfs_mkchr_at")
+unsafe fn mkchrAt(
+    dir: *mut vnode,
+    name: *CChar,
+    mode: u32,
+    ops: *chrdev_ops,
+    priv: *mut void,
+    out: *mut *mut vnode,
+) -> i32 {
+    if (!ramfsDir(dir) || *Ptr.toBorrow(name as *u8) == 0 || strlen(name) > VFS_NAME_MAX ||
+        !strchr(name, 0x2F).isNull()) {
+        return -EINVAL;
+    }
+    let nl = strlen(name);
+    mutex_lock(lockOf(dir));
+    var vn = 0 as *mut vnode;
+    let rc = createCommon(dir, name, nl, mode, VNODE_CHR, borrow mut vn as *mut *mut vnode);
+    if (rc == 0) {
+        let node = Ptr.toBorrowMut(nodeOf(vn));
+        node.chr = ops;
+        node.chrPriv.storeWith(priv as usize, StoreOrdering.Relaxed);
+        let fileVn = fileOf(vn);
+        fileVn.ops = ramfs_floor_ops(OPS_CHR);
+        // This lock used to be given its own lockdep class here, because a device whose operations consult the mount
+        // table -- /dev/fsctl does, by definition -- read as an inversion of `mounts -> vnode` and panicked on its
+        // first boot. The split was sound (nothing mounts onto a character device) and it answered the wrong question:
+        // the lock was being held across the device's operations at all, which is what made a mount-table lookup
+        // inside one an ordering at all.
+        //
+        // file_pread and file_pwrite no longer hold it across a driver
+        // (docs/audit/next-subsystem-chrdev-vnode-lock.md), so there is no inversion to excuse and no reason to tell
+        // lockdep to look away from this class. A device node's lock is an ordinary vnode lock again.
+    }
+    mutex_unlock(lockOf(dir));
+    if (rc != 0) {
+        return rc;
+    }
+    if (out.isNull()) {
+        vnode_put(vn);
+    } else {
+        give(out, vn); // the caller's reference from createCommon
+    }
+    return 0;
+}
+
+/// Remove `victim`, a character node `name` of `dir`, whatever the calling process may or may not do there: the
+/// kernel's own teardown of a node it made (ramfs_mkchr_at).
+/// Safety: `dir` and `victim` are live vnodes, unlocked; `name` is NUL-terminated.
+@export("ramfs_unlink_chr_at")
+unsafe fn unlinkChrAt(dir: *mut vnode, name: *CChar, victim: *mut vnode) -> i32 {
+    if (Ptr.toBorrow(dir as *vnode).ops != ramfs_floor_ops(OPS_DIR) ||
+        Ptr.toBorrow(victim as *vnode).ops != ramfs_floor_ops(OPS_CHR)) {
+        return -EINVAL;
+    }
+    mutex_lock(lockOf(dir));
+    mutex_lock_nested(lockOf(victim), VNODE_NESTED_CHILD);
+    let rc = unlink(dir, name, strlen(name), victim);
+    if (rc == 0) {
+        let v = fileOf(victim);
+        v.flags = v.flags | VNODE_DEAD;
+    }
+    mutex_unlock(lockOf(victim));
+    mutex_unlock(lockOf(dir));
+    return rc;
+}
+
+/// Safety: `vn` is a live ramfs character node.
+@export("ramfs_chr_set_priv")
+unsafe fn chrSetPriv(vn: *mut vnode, priv: *mut void) {
+    Ptr.toBorrow(nodeOf(vn) as *Node).chrPriv.storeWith(priv as usize, StoreOrdering.Release);
+}
+
+/// Safety: `out` is writable.
+@export("ramfs_anon_reg")
+unsafe fn anonReg(mode: u32, out: *mut *mut vnode) -> i32 {
+    // Back the file on the system ramfs mount, not the caller's root (which may be a chroot or a non-ramfs
+    // filesystem). ramfsNew's inode bump and hash insert are each self-synchronising, so no external lock is needed.
+    if (ANON_MNT.isNull()) {
+        return -ENOTSUP; // no ramfs mounted (should not happen after boot)
+    }
+    let vn = ramfsNew(ANON_MNT, VNODE_REG, mode & MODE_BITS, 0 as *mut vnode);
+    if (vn.isNull()) {
+        return -ENOMEM;
+    }
+    // Born unlinked: no directory entry ever referenced it, so do the unlink's work now -- clear the pin ramfsNew sets
+    // and make nlink 0. The single vnode_alloc reference is the caller's, to be consumed by vfs_open_vnode; when the
+    // last fd and mapping drop it, the eviction frees the node and its pages. No one else holds a reference yet, so
+    // this needs no lock.
+    let file = fileOf(vn);
+    file.flags = file.flags & (VNODE_PINNED ^ 0xFFFFFFFF);
+    file.nlink = 0;
+    give(out, vn);
+    return 0;
+}
+
+/// Safety: `mnt` is a mount being made.
+@export("ramfs_mount")
+unsafe fn mountFs(fs: *mut fs_type, bdev: *mut blkdev, flags: u32, mnt: *mut mount) -> i32 {
+    if (!bdev.isNull()) {
+        return -EINVAL;
+    }
+    // The page cache is this filesystem's store: its pages are never reclaimed, and the mount has a page budget so no
+    // process fills RAM through /tmp (docs/kernel/security/design.md §3).
+    let m = Ptr.toBorrowMut(mnt);
+    m.flags = m.flags | MOUNT_CACHE_IS_STORE;
+    m.cache_limit_pages = RAMFS_MAX_PAGES;
+    // MOUNT_SCRATCH: everyone's scratch space, a /tmp (init's on a disk root, roadmap 1.1's index-expiry PR); the
+    // sticky bit is recorded.
+    let mode = if ((flags & MOUNT_SCRATCH) != 0) MODE_TMP else MODE_EXEC;
+    let root = ramfsNew(mnt, VNODE_DIR, mode, 0 as *mut vnode);
+    if (root.isNull()) {
+        return -ENOMEM;
+    }
+    // The pin doubles as the mount's reference on the root.
+    let named = Ptr.toBorrowMut(mnt);
+    named.root = root;
+    return 0;
+}
+
+/// Release every entry under `dir` (recursively) so the vnodes can go. Runs from unmount after vfs_umount's reference
+/// scan proved that nothing outside the filesystem holds any vnode of this mount, and with the root locked: the tree
+/// is exclusively ours, so the children are not locked here (a lock per level would nest the vnode class to arbitrary
+/// depth, which no annotation can express, and would exclude nothing).
+/// Safety: `dir` is a live ramfs directory of a mount being unmounted.
+unsafe fn releaseTree(dir: *mut vnode) {
+    let n = nodeOf(dir);
+    let head = entriesOf(n);
+    var node = List.first(head as *list_node);
+    while (!node.isNull()) {
+        let after = List.next(head as *list_node, node);
+        let e = entryOf(node);
+        let child = Ptr.toBorrow(e as *Dirent).child;
+        List.remove(linkOf(e));
+        let parent = Ptr.toBorrowMut(n);
+        parent.nrEntries -= 1;
+        kfree(e as *mut void);
+        if (Ptr.toBorrow(child as *vnode).kind == VNODE_DIR) {
+            releaseTree(child);
+        }
+        // The pin goes with the last name: a file named twice (VFS-4) is met twice, and the first meeting must not
+        // free it.
+        let c = fileOf(child);
+        c.nlink = if (c.kind == VNODE_DIR) 0 else c.nlink.wrappingSub(1);
+        if (c.nlink == 0) {
+            c.flags = c.flags & (VNODE_PINNED ^ 0xFFFFFFFF);
+            vnode_put(child); // the pin; nothing else references it (unmount checked)
+        }
+        node = after;
+    }
+}
+
+/// Safety: `mnt` is a ramfs mount no one outside it references.
+@export("ramfs_unmount")
+unsafe fn unmount(mnt: *mut mount) -> i32 {
+    let root = Ptr.toBorrow(mnt as *mount).root;
+    mutex_lock(lockOf(root));
+    releaseTree(root);
+    mutex_unlock(lockOf(root));
+    return 0;
+}
+
+// ---- boot population ----
+
+/// Safety: `path` and `data` as vfs_open and file_write take them.
+unsafe fn writeFile(path: *CChar, data: *void, len: usize, mode: u32) -> i32 {
+    var f = 0 as *mut file;
+    let rc = vfs_open(0 as *mut vnode, path, COSMO_O_WRONLY | COSMO_O_CREAT | COSMO_O_TRUNC, mode,
+        borrow mut f as *mut *mut file);
+    if (rc != 0) {
+        return rc;
+    }
+    let n = file_write(f, data, len);
+    kobject_put(f as *mut kobject); // file_put: the file's kobject is its first field
+    return if (n == truncate<i64>(len)) 0 else if (n < 0) truncate<i32>(n) else -EIO;
+}
+
+/// "ramfs: cannot <what> <path> (<rc>)", a warning.
+/// Safety: `path` is NUL-terminated within VFS_PATH_MAX bytes.
+unsafe fn cannot(what: StringView, path: *u8, rc: i32) {
+    var buffer: [u8; 256] = [0; 256];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("ramfs: cannot ");
+    line.text(what);
+    line.byte(0x20);
+    var i: usize = 0;
+    while (i < VFS_PATH_MAX && *Ptr.toBorrow(path.add(i)) != 0) {
+        line.byte(*Ptr.toBorrow(path.add(i)));
+        i += 1;
+    }
+    line.text(" (");
+    line.signed(rc as i64);
+    line.text(")");
+    KernelLog.send(LogLevel.Warn, line);
+}
+
+/// mkdir -p for the parents of `path` (archive entries may be nested). Cuts `path` at each separator in place and
+/// puts it back, rather than copying it: a second 1 KiB path took the boot population's frame past the kernel-stack
+/// guard (scripts/frame-baseline.txt).
+/// Safety: `path` is a NUL-terminated path in a buffer of VFS_PATH_MAX bytes.
+unsafe fn ensureParents(path: *mut u8) {
+    var i: usize = 1;
+    while (i < VFS_PATH_MAX && *Ptr.toBorrow(path.add(i) as *u8) != 0) {
+        let at = Ptr.toBorrowMut(path.add(i));
+        if (*at == 0x2F) {
+            *at = 0;
+            let rc = vfs_mkdir(0 as *mut vnode, path as *CChar, MODE_EXEC);
+            if (rc != 0 && rc != -EEXIST) {
+                cannot("create", path as *u8, rc);
+            }
+            *at = 0x2F;
+        }
+        i += 1;
+    }
+}
+
+/// The directories made first, and their modes.
+fn bootDir(i: u32) -> StringView => match (i) {
+    0 => "/boot\0",
+    1 => "/boot/modules\0",
+    2 => "/boot/tests\0",
+    3 => "/tmp\0", // world-writable scratch space (the sticky bit is recorded, not yet enforced)
+    4 => "/mnt\0",
+    5 => "/dev\0",
+    6 => "/bin\0",
+    7 => "/sbin\0",
+    8 => "/etc\0",
+    9 => "/lib\0", // musl's libc.so and the dynamic linker (roadmap 1.1 P4)
+    _ => "/proc\0",
+};
+
+fn bootDirMode(i: u32) -> u32 => if (i == 3) MODE_TMP else if (i == 10) MODE_PROC else MODE_EXEC;
+
+const BOOT_DIRS: u32 = 11;
+
+/// Whether the C string `s` starts with `prefix` (NUL-terminated).
+/// Safety: `s` is NUL-terminated.
+unsafe fn startsWith(s: *CChar, prefix: StringView) -> bool =>
+    strncmp(s, prefix.ptr as *CChar, prefix.length - 1) == 0;
+
+/// `prefix` and then the C string `name`, cut at the buffer's end as ksnprintf cut it.
+/// Safety: `name` is NUL-terminated.
+unsafe fn compose(path: borrow mut [u8; 1024], prefix: StringView, name: *CChar) {
+    var w = TextWriter.create(mut path[..]);
+    w.text(prefix);
+    let b = name as *u8;
+    var i: usize = 0;
+    while (*Ptr.toBorrow(b.add(i)) != 0) {
+        w.byte(*Ptr.toBorrow(b.add(i)));
+        i += 1;
+    }
+}
+
+/// The boot namespace's directories, and the boot archive copied into it.
+/// Safety: at boot, with the root mounted and nothing else using it.
+@export("ramfs_populate_boot")
+unsafe fn populateBoot() {
+    for (d in 0..BOOT_DIRS) {
+        let name = bootDir(d);
+        let rc = vfs_mkdir(0 as *mut vnode, name.ptr as *CChar, bootDirMode(d));
+        if (rc != 0) {
+            cannot("create", name.ptr, rc);
+        }
+    }
+    var copied: u32 = 0;
+    let count = bootarchive_count();
+    var path: [u8; 1024] = [0; 1024];
+    for (i in 0..count) {
+        let e = ramfs_floor_archive(i);
+        let name = (e as *u8).add(offsetOf<bootarchive_entry>(name)) as *CChar;
+        let target = (e as *u8).add(offsetOf<bootarchive_entry>(link)) as *CChar;
+        // The bootstrap namespace: bin/, sbin/, etc/ and usr/ entries are the installed system (docs/userland/);
+        // everything else is /boot. usr/ since the scp-sftp unit: /usr/libexec/sftp-server, where dropbear runs it,
+        // which /boot/usr/... was not. lib/ and usr/lib/ since 1.1 P4: shared objects, 0755 as on Linux, the dynamic
+        // linker among them (an interpreter needs the x bit).
+        var mode = MODE_FILE;
+        if (strcmp(name, "init\0".ptr as *CChar) == 0) {
+            compose(mut path, "/boot/", name);
+            mode = MODE_EXEC; // the program the kernel starts; its self-test respawns it
+        } else if (startsWith(name, "bin/\0") || startsWith(name, "sbin/\0") || startsWith(name, "usr/bin/\0") ||
+            startsWith(name, "usr/sbin/\0") || startsWith(name, "usr/libexec/\0") || startsWith(name, "lib/\0") ||
+            startsWith(name, "usr/lib/\0")) {
+            compose(mut path, "/", name);
+            mode = MODE_EXEC;
+        } else if (startsWith(name, "etc/\0") || startsWith(name, "usr/\0")) {
+            compose(mut path, "/", name);
+        } else {
+            compose(mut path, "/boot/", name);
+            if (startsWith(name, "tests/\0")) {
+                mode = MODE_EXEC; // test programs and fixtures run from the shell
+            }
+        }
+        ensureParents(borrow mut path as *mut [u8; 1024] as *mut u8);
+        let entry = Ptr.toBorrow(e);
+        let p = borrow path as *[u8; 1024] as *CChar;
+        let rc = if (*Ptr.toBorrow(target as *u8) != 0) vfs_symlink(0 as *mut vnode, p, target)
+            else writeFile(p, entry.data, entry.size, mode);
+        if (rc != 0) {
+            cannot("populate", borrow path as *[u8; 1024] as *u8, rc);
+        } else {
+            copied += 1;
+        }
+    }
+    var buffer: [u8; 256] = [0; 256];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("ramfs: /boot holds ");
+    line.decimal(copied as u64);
+    line.text(" file(s) and link(s) from the boot archive");
+    KernelLog.send(LogLevel.Info, line);
+}
