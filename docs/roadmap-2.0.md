@@ -1517,6 +1517,14 @@ none stranding a block or putting one on two deadlists (x86_64 debug,
 2026-11-07). `cosmofscrash_floor.c` lists a directory through its
 vnode's readdir, a function an operations table names, and is the
 self-test in a build without CONFIG_DEBUG.
+`cosmofstest_lib.cee`, the first of `cosmofstest.c`'s helpers, the ones
+its test groups share: files written and read back, the mount at
+/mnt/eng, incompressible pages, rotted and flipped blocks, the
+structural check's fixture and its failure message, a snapshot request.
+The tests still in C reach them through `cosmofstest.h`;
+`cosmofstest_lib_floor.c` keeps the engine mount's fault seams and
+their self-test, cosmofs-fixture-cleanup, which only a build with
+CONFIG_SELFTEST and CONFIG_FAULTINJECT has.
 
 Size: about 4.5x.
 

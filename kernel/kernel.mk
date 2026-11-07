@@ -221,6 +221,8 @@ KERNEL_GENERIC_SRCS := \
 	kernel-services/filesystem/cosmofs/cosmofs.c \
 	kernel-services/filesystem/cosmofs/cosmofs_floor.c \
 	kernel-services/filesystem/cosmofs/cosmofstest.c \
+	kernel-services/filesystem/cosmofs/cosmofstest_lib.c \
+	kernel-services/filesystem/cosmofs/cosmofstest_lib_floor.c \
 	kernel-services/filesystem/cosmofs/cosmofs_keytest.c \
 	kernel-services/filesystem/cosmofs/cosmofs_keytest_floor.c \
 	kernel-services/filesystem/cosmofs/cosmofscrash.c \
@@ -385,7 +387,7 @@ $(OUT)/kernel-services/network/nettest_bench.o $(OUT)/kernel-services/network/ne
 $(OUT)/kernel-services/network/nettest_harness.o $(OUT)/kernel-services/network/nettest_harness.analyzed: EXTRA_CFLAGS += -I$(ROOT)/kernel-services/network
 $(OUT)/kernel-services/network/nettest_frame.o $(OUT)/kernel-services/network/nettest_frame.analyzed: EXTRA_CFLAGS += -I$(ROOT)/kernel-services/network
 
-# kernel-services/filesystem/cosmofs/cfsparse.c, cosmofs_reach.c, cosmofs_clone.c, cosmofs_rollback.c, cosmofs_scrub.c, cosmofs_crypt.c, cosmofs_resilver.c, cosmofs_member.c, cosmofs_check.c, cosmofs_snap.c, cosmofs_buf.c, cosmofs_alloc.c, cosmofs_commit.c, cosmofs_format.c, cosmofs_corrupt.c, cosmofs_hooks.c, cosmofs_core.c, cosmofs_snapctl.c, cosmofs_csum.c, cosmofs_data.c, cosmofs_file.c, cosmofs_vnode.c, cosmofs.c, cosmofs_dir.c, cosmofs_keytest.c and cosmofscrash.c are generated from their .cee into out/cee (scripts/cee-gen.py), away
+# kernel-services/filesystem/cosmofs/cfsparse.c, cosmofs_reach.c, cosmofs_clone.c, cosmofs_rollback.c, cosmofs_scrub.c, cosmofs_crypt.c, cosmofs_resilver.c, cosmofs_member.c, cosmofs_check.c, cosmofs_snap.c, cosmofs_buf.c, cosmofs_alloc.c, cosmofs_commit.c, cosmofs_format.c, cosmofs_corrupt.c, cosmofs_hooks.c, cosmofs_core.c, cosmofs_snapctl.c, cosmofs_csum.c, cosmofs_data.c, cosmofs_file.c, cosmofs_vnode.c, cosmofs.c, cosmofs_dir.c, cosmofs_keytest.c, cosmofscrash.c and cosmofstest_lib.c are generated from their .cee into out/cee (scripts/cee-gen.py), away
 # from the cosmofs_internal.h they include by name: their objects, and their analyses, look in the cosmofs directory too.
 $(OUT)/kernel-services/filesystem/cosmofs/cfsparse.o $(OUT)/kernel-services/filesystem/cosmofs/cfsparse.analyzed: \
 	EXTRA_CFLAGS += -I$(ROOT)/kernel-services/filesystem/cosmofs

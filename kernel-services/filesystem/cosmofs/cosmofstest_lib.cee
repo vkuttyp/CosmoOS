@@ -1,0 +1,483 @@
+// cosmofstest_lib.cee - What the cosmofs self-tests share, in CeeSafe: roadmap 2.0 SA7.
+//
+// The scratch disk, files written and read back whole, the mount a path is on, pages nothing can compress, the RAM
+// device every engine test mounts at /mnt/eng, a byte flipped or a block rotted behind the filesystem's back, the
+// structural check's fixture and its failure message, and a snapshot request. The tests call these by their C names
+// (cosmofstest.h). cosmofstest_lib_floor.c holds the fault-injection seams of the engine mount, which only a build
+// with CONFIG_SELFTEST and CONFIG_FAULTINJECT has, and the self-test of those seams.
+
+@header("kernel/blk.h", "kernel/vfs.h", "kernel/kmalloc.h", "kernel/ramblk.h", "kernel/string.h", "kernel/storage.h",
+    "kernel/crc32c.h", "kernel/cosmofs.h", "uapi/cosmo/syscall.h")
+extern "C" {
+    struct blkdev;
+    struct mount;
+    struct vnode {
+        mnt: *mut mount;
+    }
+    struct file;
+    struct spool;
+    struct cosmo_stat {
+        ino: u64;
+    }
+    struct cosmofs_check_class {
+        count: u64;
+        name: [u64; 8];
+        named: u32;
+    }
+    struct cosmofs_check_report {
+        alloc_not_seen: cosmofs_check_class;
+        seen_not_alloc: cosmofs_check_class;
+        dup: cosmofs_check_class;
+        nlink_wrong: cosmofs_check_class;
+        orphan: cosmofs_check_class;
+        dangling_entry: cosmofs_check_class;
+        dir_bad: cosmofs_check_class;
+        extent_order: cosmofs_check_class;
+        extent_overlap: cosmofs_check_class;
+        dir_dup_name: cosmofs_check_class;
+        counter_wrong: cosmofs_check_class;
+        chain_cycle: cosmofs_check_class;
+        unreadable: cosmofs_check_class;
+        partial: bool;
+        clean: bool;
+    }
+    struct cosmofs_snap_info {
+        name: [u8; 32];
+    }
+    struct cosmofs_snap_req {
+        op: u32;
+        name: *CChar;
+        out: *mut cosmofs_snap_info;
+        max: u32;
+        count: u32;
+    }
+
+    fn blk_find_test(name: *CChar) -> *mut blkdev;
+    fn ramblk_create(nblocks: u64) -> *mut blkdev;
+    fn ramblk_destroy(bd: *mut blkdev);
+    fn vfs_open(start: *mut vnode, path: *CChar, flags: u32, mode: u32, out: *mut *mut file) -> i32;
+    fn file_read(f: *mut file, buf: *mut void, len: usize) -> i64;
+    fn file_write(f: *mut file, buf: *void, len: usize) -> i64;
+    fn vfs_lookup(start: *mut vnode, path: *CChar, out: *mut *mut vnode) -> i32;
+    fn vnode_put(vn: *mut vnode);
+    fn vfs_mkdir(start: *mut vnode, path: *CChar, mode: u32) -> i32;
+    fn vfs_rmdir(start: *mut vnode, path: *CChar) -> i32;
+    fn vfs_mount(path: *CChar, fsname: *CChar, bd: *mut blkdev, flags: u32) -> i32;
+    fn vfs_umount2(path: *CChar, flags: u32) -> i32;
+    fn vfs_stat(start: *mut vnode, path: *CChar, st: *mut cosmo_stat) -> i32;
+    fn vfs_sync() -> i32;
+    fn pool_open(bd: *mut blkdev, out: *mut *mut spool) -> i32;
+    fn pool_close(p: *mut spool);
+    fn pool_read(p: *mut spool, dva: u64, buf: *mut void) -> i32;
+    fn pool_write(p: *mut spool, dva: u64, buf: *void) -> i32;
+    fn pool_flush(p: *mut spool) -> i32;
+    fn crc32c(data: *void, len: usize) -> u32;
+    fn crc32c_update(crc: u32, data: *void, len: usize) -> u32;
+    fn cosmofs_format(bd: *mut blkdev) -> i32;
+    fn cosmofs_check(mnt: *mut mount, out: *mut cosmofs_check_report, flags: u32) -> i32;
+    fn cosmofs_snapctl(mnt: *mut mount, req: *mut cosmofs_snap_req) -> i32;
+    fn cosmofs_test_set_writeback(mnt: *mut mount, on: bool);
+    fn strcmp(a: *CChar, b: *CChar) -> i32;
+    fn memcmp(a: *void, b: *void, n: usize) -> i32;
+    fn memset(p: *mut void, c: i32, n: usize) -> *mut void;
+    /// cosmofstest_lib_floor.c: arm (begin) and disarm (end) the fault the fixture's self-test injects at `stage`, in
+    /// a build with CONFIG_SELFTEST and CONFIG_FAULTINJECT; nothing elsewhere.
+    fn cfst_floor_fail_begin(stage: u32, bd: *mut blkdev);
+    fn cfst_floor_fail_end(stage: u32);
+}
+
+// ---- Values (asserted in cosmofstest_lib_floor.c) ----
+
+const EEXIST: i32 = 17;
+const O_RDONLY: u32 = 0;
+const O_WRONLY: u32 = 1;
+const O_CREAT: u32 = 0x40;
+const O_TRUNC: u32 = 0x200;
+const VFS_UMOUNT_FORCE: u32 = 1;
+const CFS_BLOCK: usize = 4096;
+const MHDR_CRC: usize = 24;
+const SNAP_INFO: usize = 104;
+
+/// The engine tests' mount point.
+const ENG: StringView = "/mnt/eng\0";
+
+fn eng() -> *CChar => ENG.ptr as *CChar;
+
+/// Safety: `reason` writable.
+unsafe fn failed(reason: *mut *CChar, why: StringView) -> bool {
+    reason.write(why.ptr as *CChar);
+    return false;
+}
+
+/// Safety: `f` is an open file.
+unsafe fn filePut(f: *mut file) { kobject_put(f as *mut kobject); }
+
+/// The scratch virtio disk, referenced, or null.
+/// Safety: none beyond the block layer's own.
+@export("cfst_scratch")
+unsafe fn scratch() -> *mut blkdev => blk_find_test("vda\0".ptr as *CChar);
+
+/// `path` created or truncated, holding `len` bytes of `data`.
+/// Safety: `path` a terminated string; `data` `len` bytes.
+@export("cfst_write_file")
+unsafe fn writeFile(path: *CChar, data: *void, len: usize) -> bool {
+    var f = 0 as *mut file;
+    if (vfs_open(0 as *mut vnode, path, O_WRONLY | O_CREAT | O_TRUNC, 420, borrow mut f as *mut *mut file) != 0) {
+        return false;
+    }
+    let n = file_write(f, data, len);
+    filePut(f);
+    return n == truncate<i64>(len);
+}
+
+/// Whether `path` holds exactly the `len` bytes of `data`.
+/// Safety: `path` a terminated string; `data` `len` bytes.
+@export("cfst_read_matches")
+unsafe fn readMatches(path: *CChar, data: *void, len: usize) -> bool {
+    var f = 0 as *mut file;
+    if (vfs_open(0 as *mut vnode, path, O_RDONLY, 0, borrow mut f as *mut *mut file) != 0) {
+        return false;
+    }
+    let buf = kmalloc(len + 1, 0) as *mut u8;
+    if (buf.isNull()) {
+        filePut(f);
+        return false;
+    }
+    let n = file_read(f, buf as *mut void, len + 1);
+    let ok = n == truncate<i64>(len) && memcmp(buf as *void, data, len) == 0;
+    kfree(buf as *mut void);
+    filePut(f);
+    return ok;
+}
+
+/// The mount `path` is on, or null.
+/// Safety: `path` a terminated string.
+@export("cfst_mount_of")
+unsafe fn mountOf(path: *CChar) -> *mut mount {
+    var vn = 0 as *mut vnode;
+    if (vfs_lookup(0 as *mut vnode, path, borrow mut vn as *mut *mut vnode) != 0) {
+        return 0 as *mut mount;
+    }
+    let m = Ptr.toBorrow(vn as *vnode).mnt;
+    vnode_put(vn);
+    return m;
+}
+
+/// Bytes with nothing worth compressing in them. A test that measures space has to write these, or it measures the
+/// compressor instead of whatever it meant to measure.
+/// Safety: `buf` `len` writable bytes.
+@export("cfst_fill_incompressible")
+unsafe fn fillIncompressible(buf: *mut u8, len: usize, seed: u32) {
+    var x = seed | 1;
+    for (i in 0usize..len) {
+        x = x.wrappingMul(1103515245).wrappingAdd(12345);
+        buf.add(i).write(truncate<u8>(x >> 16));
+    }
+}
+
+static mut g_page: [u8; 4096] = [0; 4096];
+
+/// A file of `pages` blocks nothing can compress. A test that counts blocks has to write these: a page of zeros costs
+/// almost nothing here, so six hundred pages of them are not six hundred blocks.
+/// Safety: `path` a terminated string; the self-tests run one at a time (the page is shared).
+@export("cfst_write_wide_file")
+unsafe fn writeWideFile(path: *CChar, pages: u32) -> bool {
+    var f = 0 as *mut file;
+    if (vfs_open(0 as *mut vnode, path, O_WRONLY | O_CREAT | O_TRUNC, 420, borrow mut f as *mut *mut file) != 0) {
+        return false;
+    }
+    let page = borrow mut g_page as *mut [u8; 4096] as *mut u8;
+    var ok = true;
+    var i: u32 = 0;
+    while (ok && i < pages) {
+        // Spread the seeds, do not walk them. `fillIncompressible` starts from `seed | 1`, so seeds `n` and `n + 1`
+        // collide whenever `n` is even and every second page comes out byte-identical to the one before it -- which
+        // the filesystem then stores once, and 600 pages cost 452 blocks instead of 601. An odd multiplier keeps
+        // consecutive pages apart.
+        fillIncompressible(page, CFS_BLOCK, 0x9E3779B9u32.wrappingMul(i + 1));
+        ok = file_write(f, page as *void, CFS_BLOCK) == 4096;
+        i += 1;
+    }
+    filePut(f);
+    return ok;
+}
+
+/// A RAM device of `nblocks` blocks, formatted and mounted at /mnt/eng with autonomous commits off, into `bdp`. A
+/// failure releases what it made: the device, and the directory if it made it.
+/// Safety: `bdp` and `reason` writable.
+@export("cfst_engine_mount")
+unsafe fn engineMount(bdp: *mut *mut blkdev, nblocks: u64, reason: *mut *CChar) -> bool {
+    let _ = vfs_umount2(eng(), VFS_UMOUNT_FORCE); // a failed earlier test may have left one behind
+    let bd = ramblk_create(nblocks);
+    if (bd.isNull()) {
+        return failed(reason, "check failed: bd != NULL at line 213\0");
+    }
+    var createdDir = false;
+    cfst_floor_fail_begin(1, bd);
+    let fmt = cosmofs_format(bd);
+    cfst_floor_fail_end(1);
+    var why = 0 as *CChar;
+    if (fmt != 0) {
+        why = "check failed: fmt == 0 at line 221\0".ptr as *CChar;
+    } else {
+        cfst_floor_fail_begin(2, bd);
+        let mk = vfs_mkdir(0 as *mut vnode, eng(), 493);
+        cfst_floor_fail_end(2);
+        if (mk == 0) {
+            createdDir = true;
+        }
+        if (!(mk == 0 || mk == -EEXIST)) {
+            why = "check failed: mk == 0 || mk == -EEXIST at line 230\0".ptr as *CChar;
+        } else {
+            cfst_floor_fail_begin(3, bd);
+            let mrc = vfs_mount(eng(), "cosmofs\0".ptr as *CChar, bd, 0);
+            cfst_floor_fail_end(3);
+            if (mrc != 0) {
+                why = "check failed: mrc == 0 at line 236\0".ptr as *CChar;
+            } else {
+                cosmofs_test_set_writeback(mountOf(eng()), false);
+                bdp.write(bd);
+                return true;
+            }
+        }
+    }
+    reason.write(why);
+    if (createdDir) {
+        let _ = vfs_rmdir(0 as *mut vnode, eng());
+    }
+    ramblk_destroy(bd);
+    return false;
+}
+
+/// /mnt/eng unmounted and removed, and its device destroyed.
+/// Safety: `bd` the engine mount's device; `reason` writable.
+@export("cfst_engine_unmount")
+unsafe fn engineUnmount(bd: *mut blkdev, reason: *mut *CChar) -> bool {
+    if (vfs_umount2(eng(), 0) != 0) {
+        return failed(reason, "check failed: vfs_umount(ENG) == 0 at line 257\0");
+    }
+    if (vfs_rmdir(0 as *mut vnode, eng()) != 0) {
+        return failed(reason, "check failed: vfs_rmdir(NULL, ENG) == 0 at line 260\0");
+    }
+    ramblk_destroy(bd);
+    return true;
+}
+
+/// Pool block `blkno` of `bd` with byte `off` flipped (^ 0x5a), behind the filesystem's back.
+/// Safety: `bd` is a device; `off` < CFS_BLOCK.
+@export("cfst_corrupt_block")
+unsafe fn corruptBlock(bd: *mut blkdev, blkno: u64, off: u32) -> bool {
+    var p = 0 as *mut spool;
+    if (pool_open(bd, borrow mut p as *mut *mut spool) != 0) {
+        return false;
+    }
+    let blk = kmalloc(CFS_BLOCK, 0) as *mut u8;
+    var ok = !blk.isNull() && pool_read(p, blkno, blk as *mut void) == 0;
+    if (ok) {
+        let b = blk.add(off as usize);
+        b.write(b.read() ^ 0x5a);
+        ok = pool_write(p, blkno, blk as *void) == 0 && pool_flush(p) == 0;
+    }
+    kfree(blk as *mut void);
+    pool_close(p);
+    return ok;
+}
+
+/// A metadata block's CRC32C as its header seals it: over the block with the header's CRC field taken as zero.
+/// Safety: `block` CFS_BLOCK bytes.
+@export("cfst_block_crc")
+unsafe fn blockCrc(block: *u8) -> u32 {
+    let zero4 = [0u8; 4];
+    let c = crc32c(block as *void, MHDR_CRC);
+    let c2 = crc32c_update(c, borrow zero4 as *[u8; 4] as *void, 4);
+    return crc32c_update(c2, block.add(MHDR_CRC + 4) as *void, CFS_BLOCK - MHDR_CRC - 4);
+}
+
+/// Overwrite one copy of one block with rubbish (`fill`), behind the filesystem's back: what a rotting disk does.
+/// Safety: `bd` is a device.
+@export("cfst_rot_copy")
+unsafe fn rotCopy(bd: *mut blkdev, blk: u64, fill: u8) -> bool {
+    var p = 0 as *mut spool;
+    if (pool_open(bd, borrow mut p as *mut *mut spool) != 0) {
+        return false;
+    }
+    let b = kmalloc(CFS_BLOCK, 0) as *mut u8;
+    if (b.isNull()) {
+        pool_close(p);
+        return false;
+    }
+    memset(b as *mut void, fill as i32, CFS_BLOCK);
+    let ok = pool_write(p, blk, b as *void) == 0 && pool_flush(p) == 0; // CFS_DVA(0, blk) is blk
+    kfree(b as *mut void);
+    pool_close(p);
+    return ok;
+}
+
+// ---- The structural check (docs/audit/next-subsystem-fsck.md) ----
+//
+// The scrub asks whether every block is still what was written; these ask whether the blocks add up.
+
+/// The check of /mnt/eng into `rep`; false, with the reason, when the check itself failed.
+/// Safety: `reason` and `rep` writable.
+@export("cfst_check_is_clean")
+unsafe fn checkIsClean(reason: *mut *CChar, rep: *mut cosmofs_check_report) -> bool {
+    if (cosmofs_check(mountOf(eng()), rep, 0) != 0) {
+        return failed(reason, "the check itself failed\0");
+    }
+    return true;
+}
+
+/// A filesystem with one file and one directory, mounted at /mnt/eng, write-back off: the fixture every fault test
+/// starts from.
+/// Safety: `bd` and `reason` writable.
+@export("cfst_check_fixture")
+unsafe fn checkFixture(bd: *mut *mut blkdev, reason: *mut *CChar) -> bool {
+    let _ = vfs_umount2(eng(), VFS_UMOUNT_FORCE);
+    let d = ramblk_create(512);
+    bd.write(d);
+    if (d.isNull()) {
+        return failed(reason, "no ram disk\0");
+    }
+    if (cosmofs_format(d) != 0) {
+        return failed(reason, "format failed\0");
+    }
+    let mk = vfs_mkdir(0 as *mut vnode, eng(), 493);
+    if (mk != 0 && mk != -EEXIST) {
+        return failed(reason, "mkdir failed\0");
+    }
+    if (vfs_mount(eng(), "cosmofs\0".ptr as *CChar, d, 0) != 0) {
+        return failed(reason, "mount failed\0");
+    }
+    cosmofs_test_set_writeback(mountOf(eng()), false);
+    if (!writeFile("/mnt/eng/file\0".ptr as *CChar, "bytes".ptr as *void, 5) ||
+        vfs_mkdir(0 as *mut vnode, "/mnt/eng/sub\0".ptr as *CChar, 493) != 0 || vfs_sync() != 0) {
+        return failed(reason, "populate failed\0");
+    }
+    return true;
+}
+
+static mut g_why: [u8; 224] = [0; 224];
+
+/// Which classes of `r` were not empty, for a failure message.
+///
+/// A report that is not clean says nothing else; the class has to be recovered from the serial log, which is exactly
+/// what happened when CI failed `cosmofs-orphan-reserved` while this unit's report was in review
+/// (docs/audit/next-subsystem-fsck-unchecked.md). The buffer is static because the reason outlives the call.
+/// Safety: `r` a report; the self-tests run one at a time.
+@export("cfst_check_why")
+unsafe fn checkWhy(r: *cosmofs_check_report) -> *CChar {
+    let rep = Ptr.toBorrow(r);
+    let buf = SliceMut.fromRaw(borrow mut g_why as *mut [u8; 224] as *mut u8, 224);
+    var line = TextWriter.create(buf);
+    let names: [StringView; 13] = [
+        "leaked", "free-in-use", "cross-linked", "nlink", "orphan", "dangling", "dir-bad",
+        "counter", "chain-cycle", "extent-order", "extent-overlap", "dup-name", "unreadable",
+    ];
+    for (i in 0usize..13) {
+        let cl = match (i) {
+            0 => borrow rep.alloc_not_seen,
+            1 => borrow rep.seen_not_alloc,
+            2 => borrow rep.dup,
+            3 => borrow rep.nlink_wrong,
+            4 => borrow rep.orphan,
+            5 => borrow rep.dangling_entry,
+            6 => borrow rep.dir_bad,
+            7 => borrow rep.counter_wrong,
+            8 => borrow rep.chain_cycle,
+            9 => borrow rep.extent_order,
+            10 => borrow rep.extent_overlap,
+            11 => borrow rep.dir_dup_name,
+            _ => borrow rep.unreadable,
+        };
+        if (cl.count == 0) {
+            continue;
+        }
+        line.text(if (line.length() != 0) ", " else "report not clean: ");
+        line.text(names[i]);
+        line.text("=");
+        line.decimal(cl.count);
+        line.text(" first 0x");
+        line.hex(if (cl.named != 0) cl.name[0] else 0, 0);
+        if (line.wanted() >= 224 - 40) {
+            break;
+        }
+    }
+    if (line.length() == 0) {
+        line.text("report not clean, but every class is empty (partial=");
+        line.decimal(if (rep.partial) 1 else 0);
+        line.text(")");
+    }
+    return line.cText();
+}
+
+/// The number of the fixture's file, or 0: the corruption hook takes an inode and not a path, so the test does the
+/// one name resolution.
+/// Safety: none beyond the VFS's own.
+@export("cfst_check_file_ino")
+unsafe fn checkFileIno() -> u64 {
+    var slot = [0u64; 8];
+    let st = borrow mut slot as *mut [u64; 8] as *mut cosmo_stat;
+    if (vfs_stat(0 as *mut vnode, "/mnt/eng/file\0".ptr as *CChar, st) != 0) {
+        return 0;
+    }
+    return Ptr.toBorrow(st as *cosmo_stat).ino;
+}
+
+/// The fixture unmounted and removed, and its device destroyed (when there is one).
+/// Safety: `bd` null or the fixture's device.
+@export("cfst_check_teardown")
+unsafe fn checkTeardown(bd: *mut blkdev) {
+    let _ = vfs_umount2(eng(), VFS_UMOUNT_FORCE);
+    let _ = vfs_rmdir(0 as *mut vnode, eng());
+    if (!bd.isNull()) {
+        ramblk_destroy(bd);
+    }
+}
+
+// ---- Snapshots ----
+
+/// One snapshot operation on /mnt/eng through the interface /dev/fsctl uses; `count`, when not null, gets the
+/// request's count.
+/// Safety: `name` null or a terminated string; `out` null or `max` records; `count` null or writable.
+@export("cfst_snapctl")
+unsafe fn snapctl(op: u32, name: *CChar, out: *mut cosmofs_snap_info, max: u32, count: *mut u32) -> i32 {
+    var slot = [0u64; 12];
+    let req = borrow mut slot as *mut [u64; 12] as *mut cosmofs_snap_req;
+    let r = Ptr.toBorrowMut(req);
+    r.op = op;
+    r.name = name;
+    r.out = out;
+    r.max = max;
+    let rc = cosmofs_snapctl(mountOf(eng()), req);
+    if (!count.isNull()) {
+        count.write(Ptr.toBorrow(req as *cosmofs_snap_req).count);
+    }
+    return rc;
+}
+
+/// The record of `v` (`n` of them) named `name`, or null.
+/// Safety: `v` `n` records; `name` a terminated string.
+@export("cfst_info_named")
+unsafe fn infoNamed(v: *cosmofs_snap_info, n: u32, name: *CChar) -> *cosmofs_snap_info {
+    for (i in 0u32..n) {
+        let rec = (v as *u8).add(i as usize * SNAP_INFO) as *cosmofs_snap_info;
+        if (strcmp(borrow Ptr.toBorrow(rec).name as *[u8; 32] as *CChar, name) == 0) {
+            return rec;
+        }
+    }
+    return 0 as *cosmofs_snap_info;
+}
+
+/// /mnt/eng unmounted and mounted again from `bd`, write-back off.
+/// Safety: `bd` the engine mount's device; `reason` writable.
+@export("cfst_remount_eng")
+unsafe fn remountEng(bd: *mut blkdev, reason: *mut *CChar) -> bool {
+    if (vfs_umount2(eng(), 0) != 0) {
+        return failed(reason, "check failed: vfs_umount(ENG) == 0 at line 476\0");
+    }
+    if (vfs_mount(eng(), "cosmofs\0".ptr as *CChar, bd, 0) != 0) {
+        return failed(reason, "check failed: vfs_mount(ENG, \"cosmofs\", bd, 0) == 0 at line 479\0");
+    }
+    cosmofs_test_set_writeback(mountOf(eng()), false);
+    return true;
+}
