@@ -69,7 +69,7 @@ Install the pinned compiler, the version in `scripts/cee-gen.py`
 (`python3 scripts/cee-gen.py --pinned`); `make cee` refuses any other:
 
 ```sh
-curl -fsSL https://ceesafe.github.io/CeeSafe/install.sh | CEESAFE_VERSION=v0.22.0 sh   # into ~/.ceesafe/bin
+curl -fsSL https://ceesafe.github.io/CeeSafe/install.sh | CEESAFE_VERSION=v0.23.0 sh   # into ~/.ceesafe/bin
 export PATH="$HOME/.ceesafe/bin:$PATH"     # or: export CEESAFEC=~/.ceesafe/bin/ceesafec
 ```
 
