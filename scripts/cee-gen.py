@@ -186,6 +186,9 @@ PORTS = [
     ("kernel-services/vfs/vfs_vnode.cee", "kernel-services/vfs/vfs_vnode.c",
      "The VFS's vnodes: allocation, the hash, the last put and its release, stat, and the held-walk seam (vfs.h)",
      None, True),
+    ("kernel-services/vfs/vfs_mount.cee", "kernel-services/vfs/vfs_mount.c",
+     "The VFS's mounts: the registry, mount and unmount, the root switched, sync, the device claims, init, formats "
+     "and passes (vfs.h, vfs_internal.h)", None, True),
     ("kernel-services/vfs/fsctl.cee", "kernel-services/vfs/fsctl.c",
      "/dev/fsctl: mount listing, checks, scrubs, snapshots, pools and keys, and /proc/mounts (vfs.h, fsctl.h)", None,
      True),

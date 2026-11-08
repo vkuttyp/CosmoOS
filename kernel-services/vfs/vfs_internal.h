@@ -52,4 +52,12 @@ void vfs_mount_detach(struct mount *mnt);
  * `start` is a relative walk's directory, read and not yet referenced. */
 int vfs_cwd_hold_walk(struct vnode *start);
 
+/* The mount covering `dir` in any namespace, or in `ns`; whether `vn`,
+ * which may be one of the two directories a rename holds, is a mountpoint
+ * (vfs_mount.cee). The caller holds dir->lock for the first two. */
+struct mount_ns;
+struct mount *vfs_covering_mount(const struct vnode *dir);
+struct mount *vfs_covering_mount_ns(const struct vnode *dir, const struct mount_ns *ns);
+bool vfs_entry_is_mountpoint(struct vnode *vn, struct vnode *held1, struct vnode *held2);
+
 #endif /* VFS_INTERNAL_H */
