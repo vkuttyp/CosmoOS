@@ -86,21 +86,21 @@ HOST_PROCNET_SRCS := $(HOST_COMMON_SRCS) kernel-services/network/procnet.c kerne
 	tests/host/ceesafe_panic.c tests/host/test_procnet.c
 HOST_MEMDEV_SRCS := $(HOST_COMMON_SRCS) kernel-services/vfs/memdev.c \
 	kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_memdev.c
-HOST_MOUNTNS_SRCS := $(HOST_COMMON_SRCS) kernel-services/vfs/mountns.c kernel-services/vfs/mountns_floor.c \
+HOST_MOUNTNS_SRCS := $(HOST_COMMON_SRCS) kernel-services/vfs/mountns.c \
 	kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_mountns.c
-HOST_BLKCTL_SRCS := $(HOST_COMMON_SRCS) kernel-services/vfs/blkctl.c kernel-services/vfs/blkctl_floor.c \
+HOST_BLKCTL_SRCS := $(HOST_COMMON_SRCS) kernel-services/vfs/blkctl.c \
 	kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_blkctl.c
 HOST_PAGECACHE_SRCS := $(HOST_COMMON_SRCS) kernel-services/vfs/pagecache.c kernel-services/vfs/pagecache_floor.c \
 	kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_pagecache.c
 HOST_RAMFS_SRCS := $(HOST_COMMON_SRCS) kernel-services/vfs/ramfs.c kernel-services/vfs/ramfs_floor.c \
 	kernel/core/printf.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_ramfs.c
-HOST_FSCTL_SRCS := $(HOST_COMMON_SRCS) kernel-services/vfs/fsctl.c kernel-services/vfs/fsctl_floor.c \
-	kernel-services/vfs/mountns_floor.c kernel/core/printf.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c \
+HOST_FSCTL_SRCS := $(HOST_COMMON_SRCS) kernel-services/vfs/fsctl.c \
+	kernel/core/printf.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c \
 	tests/host/test_fsctl.c
 # The VFS core over a filesystem of the test's own: mount namespaces are the kernel's, the page cache, objects,
 # credentials, processes, devices and waits the test's.
 HOST_VFS_SRCS := $(HOST_COMMON_SRCS) kernel-services/vfs/vfs_dir.c kernel-services/vfs/vfs_vnode.c kernel-services/vfs/vfs_mount.c \
-	kernel-services/vfs/vfs_walk.c kernel-services/vfs/vfs_file.c kernel-services/vfs/vfs_floor.c kernel-services/vfs/mountns.c kernel-services/vfs/mountns_floor.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_vfs.c
+	kernel-services/vfs/vfs_walk.c kernel-services/vfs/vfs_file.c kernel-services/vfs/vfs_floor.c kernel-services/vfs/mountns.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_vfs.c
 # /proc: the process table, terminals, handles, scheduler, clocks, memory figures, mounts, the network stack's
 # tables and the vnode cache are the test's.
 HOST_PROCFS_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/procfs/procfs.c \

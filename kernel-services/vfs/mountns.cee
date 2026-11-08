@@ -8,12 +8,12 @@
 // Two lists hold the same refs from both ends, because both directions are walked: a walker asks a mount who can see
 // it, and a dying namespace asks itself what it can see.
 //
-// The mounts, the namespaces and their refs stay C (vfs.h, mountns.h). mountns_floor.c keeps what C names as data:
-// the initial namespace, a static whose list head points into itself, and the VFS's mount table, its lock and the
-// root mount (vfs_internal.h), which it hands over by address.
+// The mounts, the namespaces and their refs stay C (vfs.h, mountns.h). The initial namespace is a static whose list
+// head points into itself, and the VFS's mount table, its lock and the root mount (vfs_internal.h) are imported
+// statics (ADR 0080 §3.2).
 
-@header("kernel/errno.h", "kernel/kmalloc.h", "kernel/log.h", "kernel/mountns.h", "kernel/panic.h",
-    "kernel/string.h", "kernel/process.h", "kernel/vfs.h")
+@header("kernel/errno.h", "kernel/kmalloc.h", "kernel/log.h", "kernel/mountns.h", "kernel/panic.h", "kernel/string.h",
+    "kernel/process.h", "kernel/vfs.h", "vfs_internal.h")
 extern "C" {
     struct vnode {
         lock: mutex;
@@ -44,17 +44,29 @@ extern "C" {
     fn vfs_mount_detach(mnt: *mut mount);
     fn vfs_mount_orphaned(mnt: *mut mount);
 
-    // mountns_floor.c
-    fn mountns_floor_init_ns() -> *mut mount_ns;
-    fn mountns_floor_mounts() -> *mut list_node;
-    fn mountns_floor_mounts_lock() -> *mut mutex;
-    fn mountns_floor_root() -> *mut mount;
+    // vfs_internal.h's mount table, its lock and the root mount.
+    static mut g_mounts: list_node;
+    static mut g_mounts_lock: mutex;
+    static mut g_root_mount: *mut mount;
+
+    // The values and layout the C compiler checks (ADR 0080 §3.1), which the floor asserted.
+    const ENOMEM: i32 = 12;
+    const KMEM_ZERO: u32 = 1;
+    const VFS_PATH_MAX: usize = 1024;
+    /// mountns.cee's errno.h, kmalloc.h and vfs.h values
+    @cvalue("sizeof(((struct mount_ns_ref *)0)->path) == VFS_PATH_MAX && sizeof(((struct mount_ns *)0)->refs) == 4")
+    const MOUNTNS_FACT_0: bool = true;
 }
 
-// errno.h, kmalloc.h and vfs.h, which mountns_floor.c checks.
-const ENOMEM: i32 = 12;
-const KMEM_ZERO: u32 = 1;
-const VFS_PATH_MAX: usize = 1024;
+/// The namespace the system boots in. Static: it predates kmalloc being worth using and outlives every process, so it
+/// is never freed and its reference count is only ever a formality.
+static mut INIT_NS: mount_ns = mount_ns {
+    id: 0,
+    refs: 1,
+    mounts: list_node { next: borrow mut INIT_NS.mounts as *mut list_node, prev: borrow mut INIT_NS.mounts as *mut list_node },
+};
+
+// errno.h, kmalloc.h and vfs.h's.
 
 /// Identifiers for the log, from 1: 0 is the initial namespace and belongs to nobody else. Under g_mounts_lock.
 static mut NEXT_NS_ID: u64 = 1;
@@ -97,7 +109,7 @@ unsafe fn pathOf(r: *mut mount_ns_ref) -> *mut CChar =>
 /// The namespace the system boots in. Never freed.
 /// Safety: none; the namespace is the floor's static.
 @export("mountns_initial")
-unsafe fn initial() -> *mut mount_ns => mountns_floor_init_ns();
+unsafe fn initial() -> *mut mount_ns => borrow mut INIT_NS as *mut mount_ns;
 
 /// The caller's namespace: its process's, or the initial one for a kernel thread and for everything before init.
 /// Safety: called from a thread, which its process outlives.
@@ -117,7 +129,7 @@ unsafe fn current() -> *mut mount_ns {
 /// Safety: `mnt` is a live mount; the caller holds its mountpoint's lock unless it is the root.
 @export("mountns_sees")
 unsafe fn sees(ns: *mount_ns, mnt: *mount) -> bool {
-    if (mnt == mountns_floor_root() as *mount) {
+    if (mnt == g_root_mount as *mount) {
         return true;
     }
     let head = refsOf(mnt as *mut mount);
@@ -177,14 +189,14 @@ unsafe fn create(parent: *mut mount_ns, out: *mut *mut mount_ns) -> i32 {
     fresh.refs = 1;
     List.init(mountsOf(ns));
 
-    let tableLock = mountns_floor_mounts_lock();
+    let tableLock = borrow mut g_mounts_lock as *mut mutex;
     mutex_lock(tableLock);
     let id = NEXT_NS_ID;
     NEXT_NS_ID = id + 1;
     let named = Ptr.toBorrowMut(ns);
     named.id = id;
     var rc = 0;
-    let table = mountns_floor_mounts();
+    let table = borrow mut g_mounts as *mut list_node;
     var node = List.first(table as *list_node);
     while (!node.isNull()) {
         let mnt = containerOf(node, offsetOf<mount>(link)) as *mut mount;
@@ -193,7 +205,7 @@ unsafe fn create(parent: *mut mount_ns, out: *mut *mut mount_ns) -> i32 {
         // and a child that skipped it would then be permanently short a mount its parent has, which is the one thing
         // a copied view may not be. vfs_umount2 re-counts the references after its drain for exactly this reason
         // (docs/audit/next-subsystem-fsctl.md).
-        if (mnt != mountns_floor_root() && sees(parent as *mount_ns, mnt as *mount)) {
+        if (mnt != g_root_mount && sees(parent as *mount_ns, mnt as *mount)) {
             // The child holds it where the parent did: a copied view is the same mounts at the same places, and the
             // path travels with the reference because nothing can work it out later.
             var at = 0 as *CChar;
@@ -275,7 +287,7 @@ unsafe fn put(ns: *mut mount_ns) {
     var todo: [u64; 2] = [0; 2]; // a struct list_node: next, prev
     let head = borrow mut todo as *mut [u64; 2] as *mut list_node;
     List.init(head);
-    let tableLock = mountns_floor_mounts_lock();
+    let tableLock = borrow mut g_mounts_lock as *mut mutex;
     mutex_lock(tableLock);
     list_move_all(mountsOf(ns), head);
     mutex_unlock(tableLock);

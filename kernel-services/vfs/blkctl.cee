@@ -11,9 +11,9 @@
 // kernel can see and the operator cannot undo. Everything about *what* is written is the caller's.
 //
 // The devices, the files and the commands' structs stay C (blk.h, vfs.h, blkctl.h). A file's state -- its lock and
-// the result of its last command -- is a C struct round a struct mutex, whose size the build's lock debugging decides:
-// blkctl_floor.c defines it and says where its fields are, and keeps the operation table, C data naming the
-// operations by address.
+// the result of its last command -- is a struct round a struct mutex, whose size the build's lock debugging decides, so
+// the C compiler lays it out (a C-laid-out struct, type-system.md §33.1); the operation table is C data this file
+// defines (ADR 0080 §3.2).
 
 @header("kernel/blk.h", "kernel/bootinfo.h", "kernel/cred.h", "kernel/errno.h", "kernel/kmalloc.h", "kernel/log.h",
     "kernel/mutex.h", "kernel/part.h", "kernel/string.h", "kernel/vfs.h", "uapi/cosmo/blkctl.h")
@@ -37,7 +37,13 @@ extern "C" {
     struct file {
         priv: *mut void;
     }
-    struct chrdev_ops;
+    /// vfs.h's character device operations, the members this device sets.
+    struct chrdev_ops {
+        open: extern "C" fn(*mut vnode, *mut file) -> i32;
+        release: extern "C" fn(*mut vnode, *mut file);
+        read_file: extern "C" fn(*mut vnode, *mut file, u64, *mut void, usize) -> i64;
+        write_file: extern "C" fn(*mut vnode, *mut file, u64, *void, usize) -> i64;
+    }
     struct cosmo_keyslot;
     struct cosmo_blkctl {
         version: u16;
@@ -97,20 +103,25 @@ extern "C" {
     ) -> i32;
     fn ramfs_mkchr(path: *CChar, mode: u32, ops: *chrdev_ops, priv: *mut void, out: *mut *mut vnode) -> i32;
 
-    // blkctl_floor.c
-    fn blkctl_floor_ops() -> *chrdev_ops;
-    fn blkctl_floor_open_layout(which: u32) -> usize;
+
+    // The values and layout the C compiler checks (ADR 0080 §3.1), which the floor asserted.
+    const EPERM: i64 = 1;
+    const ENOMEM: i64 = 12;
+    const EBUSY: i64 = 16;
+    const ENODEV: i64 = 19;
+    const EINVAL: i64 = 22;
+    const ERANGE: i64 = 34;
+    const KMEM_ZERO: u32 = 1;
+    const PRIV_SYS_ADMIN: u32 = 2;
+    /// blkctl.cee's blkctl.h values
+    @cvalue("COSMO_BLKCTL_VERSION == 1 && COSMO_BLKCTL_LIST == 1 && COSMO_BLKCTL_READ == 2 && COSMO_BLKCTL_WRITE == 3 && COSMO_BLKCTL_FLUSH == 4 && COSMO_BLKCTL_RESCAN == 5 && COSMO_BLKCTL_FORMAT == 6 && COSMO_BLKCTL_FORMAT_MIRROR == 7 && COSMO_BLKCTL_FORMAT_KEYED == 8 && COSMO_BLKCTL_IO_MAX == 32768 && COSMO_BLKCTL_NAME == 16 && COSMO_BLKCTL_LABEL == 16 && COSMO_BLKCTL_PART == 1 && COSMO_BLKCTL_RDONLY == 2 && COSMO_BLKCTL_BOOT == 4 && COSMO_BLKCTL_MOUNTED == 8 && COSMO_BLKCTL_TEST == 16 && BLKDEV_NAME_MAX == 16")
+    const BLKCTL_FACT_0: bool = true;
+    /// blkctl.cee's struct sizes and slots
+    @cvalue("sizeof(struct cosmo_blkctl) == 48 && sizeof(struct cosmo_blkctl_keyed) == 848 && offsetof(struct cosmo_blkctl_keyed, slot) == 80 && sizeof(struct cosmo_blkctl_dev) == 96 && sizeof(struct cosmo_blkctl_list) == 8 && sizeof(struct cosmo_blkctl_rescan) == 8 && sizeof(struct blk_part_info) <= 8 * 8")
+    const BLKCTL_FACT_1: bool = true;
 }
 
-// errno.h, kmalloc.h, cred.h and blkctl.h, which blkctl_floor.c checks.
-const EPERM: i64 = 1;
-const ENOMEM: i64 = 12;
-const EBUSY: i64 = 16;
-const ENODEV: i64 = 19;
-const EINVAL: i64 = 22;
-const ERANGE: i64 = 34;
-const KMEM_ZERO: u32 = 1;
-const PRIV_SYS_ADMIN: u32 = 2;
+// errno.h, kmalloc.h, cred.h and blkctl.h's.
 const VERSION: u16 = 1;
 const OP_LIST: u16 = 1;
 const OP_READ: u16 = 2;
@@ -135,10 +146,20 @@ const KEYED_SLOTS_AT: usize = 80;
 const DEV_SIZE: usize = 96;
 const LIST_SIZE: usize = 8;
 const RESCAN_SIZE: usize = 8;
-// blkctl_floor_open_layout's questions about struct blkctl_open; its lock is at 0.
-const OPEN_SIZE: u32 = 0;
-const OPEN_RESULT: u32 = 1;
-const OPEN_LEN: u32 = 2;
+/// A file's state: the result of its last command, read back until the next one, under its lock.
+struct BlkctlOpen {
+    lock: mutex;
+    result: *mut void;
+    len: usize;
+}
+
+/// /dev/blkctl's operations.
+static mut BLKCTL_OPS: chrdev_ops = chrdev_ops {
+    open: openFile,
+    release: release,
+    read_file: readFile,
+    write_file: writeFile,
+};
 // rw-------: root's alone, besides the privilege.
 const MODE: u32 = 0x180;
 
@@ -152,10 +173,10 @@ unsafe fn lockOf(o: *mut void) -> *mut mutex => o as *mut mutex;
 
 /// Safety: `o` is a file's struct blkctl_open.
 unsafe fn resultOf(o: *mut void) -> *mut *mut void =>
-    (o as *mut u8).add(blkctl_floor_open_layout(OPEN_RESULT)) as *mut *mut void;
+    (o as *mut u8).add(offsetOf<BlkctlOpen>(result)) as *mut *mut void;
 
 /// Safety: `o` is a file's struct blkctl_open.
-unsafe fn lenOf(o: *mut void) -> *mut usize => (o as *mut u8).add(blkctl_floor_open_layout(OPEN_LEN)) as *mut usize;
+unsafe fn lenOf(o: *mut void) -> *mut usize => (o as *mut u8).add(offsetOf<BlkctlOpen>(len)) as *mut usize;
 
 /// Replace this file's result. Takes ownership of `buf`.
 /// Safety: `o` is a file's struct blkctl_open; `buf` is null or kmalloc'd, `len` bytes.
@@ -178,7 +199,7 @@ unsafe fn openFile(vn: *mut vnode, f: *mut file) -> i32 {
         // The mode is 0600 as well; this is the check that cannot be chmod'ed away.
         return truncate<i32>(-EPERM);
     }
-    let o = kmalloc(blkctl_floor_open_layout(OPEN_SIZE), KMEM_ZERO);
+    let o = kmalloc(layoutOf<BlkctlOpen>().size, KMEM_ZERO);
     if (o.isNull()) {
         return truncate<i32>(-ENOMEM);
     }
@@ -607,7 +628,7 @@ unsafe fn readFile(vn: *mut vnode, f: *mut file, off: u64, buf: *mut void, len: 
 /// Safety: called once the ramfs root exists.
 @export("blkctl_dev_init")
 unsafe fn devInit() {
-    let rc = ramfs_mkchr("/dev/blkctl\0".ptr as *CChar, MODE, blkctl_floor_ops(), 0 as *mut void,
+    let rc = ramfs_mkchr("/dev/blkctl\0".ptr as *CChar, MODE, borrow mut BLKCTL_OPS as *mut chrdev_ops as *chrdev_ops, 0 as *mut void,
         borrow mut NODE as *mut *mut vnode);
     if (rc != 0) {
         var buffer: [u8; 64] = [0; 64];

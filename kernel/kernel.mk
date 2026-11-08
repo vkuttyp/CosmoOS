@@ -175,11 +175,8 @@ KERNEL_GENERIC_SRCS := \
 	kernel-services/vfs/vfs_dir.c \
 	kernel-services/vfs/vfs_floor.c \
 	kernel-services/vfs/fsctl.c \
-	kernel-services/vfs/fsctl_floor.c \
 	kernel-services/vfs/blkctl.c \
-	kernel-services/vfs/blkctl_floor.c \
 	kernel-services/vfs/mountns.c \
-	kernel-services/vfs/mountns_floor.c \
 	kernel-services/filesystem/procfs/procfs.c \
 	kernel-services/vfs/pagecache.c \
 	kernel-services/vfs/pagecache_floor.c \
@@ -390,6 +387,11 @@ $(OUT)/kernel-services/network/nettest_nicbench.o $(OUT)/kernel-services/network
 $(OUT)/kernel-services/network/nettest_bench.o $(OUT)/kernel-services/network/nettest_bench.analyzed: EXTRA_CFLAGS += -I$(ROOT)/kernel-services/network
 $(OUT)/kernel-services/network/nettest_harness.o $(OUT)/kernel-services/network/nettest_harness.analyzed: EXTRA_CFLAGS += -I$(ROOT)/kernel-services/network
 $(OUT)/kernel-services/network/nettest_frame.o $(OUT)/kernel-services/network/nettest_frame.analyzed: EXTRA_CFLAGS += -I$(ROOT)/kernel-services/network
+
+# kernel-services/vfs/mountns.c and fsctl.c, generated into out/cee, name the VFS's globals vfs_internal.h declares: their
+# objects, and their analyses, look in the vfs directory too.
+$(OUT)/kernel-services/vfs/mountns.o $(OUT)/kernel-services/vfs/mountns.analyzed: EXTRA_CFLAGS += -I$(ROOT)/kernel-services/vfs
+$(OUT)/kernel-services/vfs/fsctl.o $(OUT)/kernel-services/vfs/fsctl.analyzed: EXTRA_CFLAGS += -I$(ROOT)/kernel-services/vfs
 
 # kernel-services/filesystem/cosmofs/cfsparse.c, cosmofs_reach.c, cosmofs_clone.c, cosmofs_rollback.c, cosmofs_scrub.c, cosmofs_crypt.c, cosmofs_resilver.c, cosmofs_member.c, cosmofs_check.c, cosmofs_snap.c, cosmofs_buf.c, cosmofs_alloc.c, cosmofs_commit.c, cosmofs_format.c, cosmofs_corrupt.c, cosmofs_hooks.c, cosmofs_core.c, cosmofs_snapctl.c, cosmofs_csum.c, cosmofs_data.c, cosmofs_file.c, cosmofs_vnode.c, cosmofs.c, cosmofs_dir.c, cosmofs_keytest.c, cosmofscrash.c, cosmofstest_lib.c, cosmofstest_media.c, cosmofstest_extent.c, cosmofstest_rollback.c, cosmofstest_b2.c, cosmofstest_basic.c, cosmofstest_copies.c, cosmofstest_freelog.c, cosmofstest_names.c, cosmofstest_check.c and cosmofstest_orphan.c are generated from their .cee into out/cee (scripts/cee-gen.py), away
 # from the cosmofs_internal.h they include by name: their objects, and their analyses, look in the cosmofs directory too.

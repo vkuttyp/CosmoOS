@@ -13,13 +13,14 @@
 // that has none leaves it null and a command against it is refused before anything is locked. That is what keeps the
 // VFS from depending on one of its filesystems.
 //
-// The mounts, the commands and the records stay C (vfs.h, cosmofs.h, fsctl.h). fsctl_floor.c keeps a file's state, a
-// struct round a struct mutex whose size the build's lock debugging decides, the operation table, and the spinlock
-// /proc/mounts is rendered under; the VFS's mount table lock and root mount come from mountns_floor.c.
+// The mounts, the commands and the records stay C (vfs.h, cosmofs.h, fsctl.h). A file's state is a struct round a
+// struct mutex whose size the build's lock debugging decides, which the C compiler lays out (type-system.md §33.1);
+// the operation table is C data this file defines, and the spinlock /proc/mounts is rendered under the VFS's
+// (vfs_internal.h), an imported static (ADR 0080 §3.2).
 
 @header("kernel/blk.h", "kernel/cosmofs.h", "kernel/cred.h", "kernel/errno.h", "kernel/kmalloc.h", "kernel/log.h",
-    "kernel/mountns.h", "kernel/mutex.h", "kernel/spinlock.h", "kernel/string.h", "kernel/vfs.h",
-    "uapi/cosmo/fsctl.h")
+    "kernel/mountns.h", "kernel/mutex.h", "kernel/spinlock.h", "kernel/string.h", "kernel/vfs.h", "uapi/cosmo/fsctl.h",
+    "vfs_internal.h")
 extern "C" {
     struct credentials {
         euid: u32;
@@ -308,7 +309,13 @@ extern "C" {
         dev: [u8; 16];
     }
     struct vnode;
-    struct chrdev_ops;
+    /// vfs.h's character device operations, the members this device sets.
+    struct chrdev_ops {
+        open: extern "C" fn(*mut vnode, *mut file) -> i32;
+        release: extern "C" fn(*mut vnode, *mut file);
+        read_file: extern "C" fn(*mut vnode, *mut file, u64, *mut void, usize) -> i64;
+        write_file: extern "C" fn(*mut vnode, *mut file, u64, *void, usize) -> i64;
+    }
 
     fn kzalloc(size: usize) -> *mut void;
     fn memcpy(dst: *mut void, src: *void, n: usize) -> *mut void;
@@ -326,42 +333,57 @@ extern "C" {
     fn blk_find(name: *CChar) -> *mut blkdev;
     fn ramfs_mkchr(path: *CChar, mode: u32, ops: *chrdev_ops, priv: *mut void, out: *mut *mut vnode) -> i32;
 
-    // mountns_floor.c: the VFS's mount table lock and root mount (vfs_internal.h).
-    fn mountns_floor_mounts_lock() -> *mut mutex;
-    fn mountns_floor_root() -> *mut mount;
+    // vfs_internal.h's mount table lock and root mount.
+    static mut g_mounts_lock: mutex;
+    static mut g_root_mount: *mut mount;
 
-    // fsctl_floor.c
-    fn fsctl_floor_ops() -> *chrdev_ops;
-    fn fsctl_floor_open_layout(which: u32) -> usize;
-    fn fsctl_floor_list_lock() -> *mut spinlock_t;
+    /// vfs_internal.h's lock of the mounts' list, which /proc/mounts is rendered under.
+    static mut g_mount_list_lock: spinlock_t;
+
+    // The values and layout the C compiler checks (ADR 0080 §3.1), which the floor asserted.
+    const EPERM: i32 = 1;
+    const ENOENT: i32 = 2;
+    const ENOMEM: i32 = 12;
+    const EBUSY: i32 = 16;
+    const ENODEV: i32 = 19;
+    const EINVAL: i32 = 22;
+    const ERANGE: i32 = 34;
+    const EOPNOTSUPP: i32 = 95;
+    const KMEM_ZERO: u32 = 1;
+    const PRIV_SYS_ADMIN: u32 = 2;
+    const CRED_ROOT_UID: u32 = 0;
+    const MOUNT_RDONLY: u32 = 1;
+    const MOUNT_STATE_DEGRADED: u32 = 1;
+    const COSMOFS_CHECK_REPAIR: u32 = 1;
+    const COSMOFS_CHECK_BOOT: u32 = 4;
+    const COSMOFS_SCRUB_REPAIR: u32 = 1;
+    const COSMOFS_SNAP_I_CLONE: u32 = 1;
+    const COSMOFS_SNAP_I_TARGET: u32 = 2;
+    const COSMOFS_SNAP_I_SAFETY: u32 = 4;
+    const COSMOFS_SNAP_I_HELD: u32 = 8;
+    const COSMOFS_SNAP_I_LIVE: u32 = 16;
+    const COSMOFS_POOL_PENDING: u32 = 1;
+    const COSMOFS_POOL_HELD: u32 = 2;
+    const COSMOFS_COPY_I_WHOLE: u32 = 1;
+    const COSMOFS_COPY_I_DETACH: u32 = 2;
+    /// fsctl.cee's cosmofs.h values
+    @cvalue("CFS_CHECK_NAMES == COSMO_FSCTL_NAMES && COSMOFS_SNAP_NAME_MAX + 1 == 32")
+    const FSCTL_FACT_0: bool = true;
+    /// fsctl.cee's fsctl.h values
+    @cvalue("COSMO_FSCTL_VERSION == 3 && COSMO_FSCTL_LIST == 1 && COSMO_FSCTL_CHECK == 2 && COSMO_FSCTL_SCRUB == 3 && COSMO_FSCTL_SNAP_CREATE == 4 && COSMO_FSCTL_SNAP_LIST == 5 && COSMO_FSCTL_SNAP_ROLLBACK == 7 && COSMO_FSCTL_SNAP_CLONE == 9 && COSMO_FSCTL_BOOT_OK == 10 && COSMO_FSCTL_CHECK_DEV == 11 && COSMO_FSCTL_SCRUB_EX == 12 && COSMO_FSCTL_POOL_STATUS == 13 && COSMO_FSCTL_POOL_SPARE_REMOVE == 20 && COSMO_FSCTL_KEY_INFO == 21 && COSMO_FSCTL_KEY_SLOT == 24 && COSMO_FSCTL_F_REPAIR == 1 && COSMO_FSCTL_F_SAFETY_NAME == 2 && COSMO_FSCTL_F_NO_SIZES == 4 && COSMO_FSCTL_F_BOOT == 8 && COSMO_FSCTL_CAP_CHECK == 1 && COSMO_FSCTL_CAP_SCRUB == 2 && COSMO_FSCTL_CAP_SNAP == 4 && COSMO_FSCTL_CAP_POOL == 8 && COSMO_FSCTL_R_PARTIAL == 1 && COSMO_FSCTL_R_CLEAN == 2 && COSMO_FSCTL_R_REPAIR_REFUSED == 4 && COSMO_FSCTL_DEV_F_CHECKED == 1 && COSMO_FSCTL_POOL_F_PENDING == 1 && COSMO_FSCTL_POOL_F_HELD == 2 && COSMO_FSCTL_SNAP_F_CLONE == 1 && COSMO_FSCTL_SNAP_F_TARGET == 2 && COSMO_FSCTL_SNAP_F_SAFETY == 4 && COSMO_FSCTL_SNAP_F_HELD == 8 && COSMO_FSCTL_SNAP_F_LIVE == 16 && COSMO_FSCTL_POOL_DEGRADED == 1 && COSMO_FSCTL_POOL_RESILVER == 2 && COSMO_FSCTL_COPY_F_WHOLE == 1 && COSMO_FSCTL_COPY_F_DETACH == 2 && COSMO_FSCTL_CLASSES == 16 && COSMO_FSCTL_NAMES == 8 && COSMO_FSCTL_SNAP_PAGE == 1024 && COSMO_FSCTL_NAME_MAX + 1 == 32")
+    const FSCTL_FACT_1: bool = true;
+    /// fsctl.cee's snapshot ops
+    @cvalue("COSMOFS_SNAP_CREATE == COSMO_FSCTL_SNAP_CREATE - 3 && COSMOFS_SNAP_LIST == COSMO_FSCTL_SNAP_LIST - 3 && COSMOFS_SNAP_DELETE == COSMO_FSCTL_SNAP_DELETE - 3 && COSMOFS_SNAP_ROLLBACK == COSMO_FSCTL_SNAP_ROLLBACK - 3 && COSMOFS_SNAP_CANCEL == COSMO_FSCTL_SNAP_CANCEL - 3 && COSMOFS_SNAP_CLONE == COSMO_FSCTL_SNAP_CLONE - 3 && COSMOFS_SNAP_BOOT_OK == COSMO_FSCTL_BOOT_OK - 3")
+    const FSCTL_FACT_2: bool = true;
+    /// fsctl.cee's pool and key ops
+    @cvalue("(int)COSMOFS_POOL_STATUS == COSMO_FSCTL_POOL_STATUS - 13 && (int)COSMOFS_POOL_OFFLINE == COSMO_FSCTL_POOL_OFFLINE - 13 && (int)COSMOFS_POOL_ONLINE == COSMO_FSCTL_POOL_ONLINE - 13 && (int)COSMOFS_POOL_REPLACE == COSMO_FSCTL_POOL_REPLACE - 13 && (int)COSMOFS_POOL_ATTACH == COSMO_FSCTL_POOL_ATTACH - 13 && (int)COSMOFS_POOL_DETACH == COSMO_FSCTL_POOL_DETACH - 13 && (int)COSMOFS_POOL_SPARE_ADD == COSMO_FSCTL_POOL_SPARE_ADD - 13 && (int)COSMOFS_POOL_SPARE_REMOVE == COSMO_FSCTL_POOL_SPARE_REMOVE - 13 && (int)COSMOFS_KEY_INFO == COSMO_FSCTL_KEY_INFO - 21 && (int)COSMOFS_KEY_LOAD == COSMO_FSCTL_KEY_LOAD - 21 && (int)COSMOFS_KEY_UNLOAD == COSMO_FSCTL_KEY_UNLOAD - 21 && (int)COSMOFS_KEY_SLOT == COSMO_FSCTL_KEY_SLOT - 21")
+    const FSCTL_FACT_3: bool = true;
+    /// fsctl.cee's stack slots
+    @cvalue("sizeof(struct cosmofs_check_report) == 186 * 8 && sizeof(struct cosmofs_scrub_stats) == 8 * 8 && sizeof(struct cosmofs_snap_req) == 11 * 8 && sizeof(struct cosmofs_pool_req) == 11 * 8 && sizeof(struct cosmofs_key_req) == 4 * 8 && sizeof(struct cosmo_fsctl) == 11 * 8")
+    const FSCTL_FACT_4: bool = true;
 }
 
-// errno.h, kmalloc.h, cred.h, vfs.h, cosmofs.h and fsctl.h, which fsctl_floor.c checks.
-const EPERM: i32 = 1;
-const ENOENT: i32 = 2;
-const ENOMEM: i32 = 12;
-const EBUSY: i32 = 16;
-const ENODEV: i32 = 19;
-const EINVAL: i32 = 22;
-const ERANGE: i32 = 34;
-const EOPNOTSUPP: i32 = 95;
-const KMEM_ZERO: u32 = 1;
-const PRIV_SYS_ADMIN: u32 = 2;
-const CRED_ROOT_UID: u32 = 0;
-const MOUNT_RDONLY: u32 = 1;
-const MOUNT_STATE_DEGRADED: u32 = 1;
-const COSMOFS_CHECK_REPAIR: u32 = 1;
-const COSMOFS_CHECK_BOOT: u32 = 4;
-const COSMOFS_SCRUB_REPAIR: u32 = 1;
-const COSMOFS_SNAP_I_CLONE: u32 = 1;
-const COSMOFS_SNAP_I_TARGET: u32 = 2;
-const COSMOFS_SNAP_I_SAFETY: u32 = 4;
-const COSMOFS_SNAP_I_HELD: u32 = 8;
-const COSMOFS_SNAP_I_LIVE: u32 = 16;
-const COSMOFS_POOL_PENDING: u32 = 1;
-const COSMOFS_POOL_HELD: u32 = 2;
-const COSMOFS_COPY_I_WHOLE: u32 = 1;
-const COSMOFS_COPY_I_DETACH: u32 = 2;
+// errno.h, kmalloc.h, cred.h, vfs.h, cosmofs.h and fsctl.h's.
 const VERSION: u16 = 3;
 const LIST: u16 = 1;
 const CHECK: u16 = 2;
@@ -410,16 +432,31 @@ const MODE: u32 = 0x180; // 0600
 /// (Codex on #440: 64 cut a big pool's listing short). `total` says how many there were regardless.
 const POOL_MAX: u32 = 255 * 4 + 4;
 
-// ---- a file's result: fsctl_floor.c's struct fsctl_open, its lock at offset 0 ----
+// ---- a file's result, its lock at offset 0 ----
+
+/// A file's state: the result of its last command, replaced by a write and copied by a read, under its lock.
+struct FsctlOpen {
+    lock: mutex;
+    result: *mut void;
+    len: usize;
+}
+
+/// /dev/fsctl's operations.
+static mut FSCTL_OPS: chrdev_ops = chrdev_ops {
+    open: openFile,
+    release: release,
+    read_file: readFile,
+    write_file: writeFile,
+};
 
 /// Safety: `o` is a file's state.
 unsafe fn lockOf(o: *mut u8) -> *mut mutex => o as *mut mutex;
 
 /// Safety: `o` is a file's state.
-unsafe fn resultOf(o: *mut u8) -> *mut *mut u8 => o.add(fsctl_floor_open_layout(1)) as *mut *mut u8;
+unsafe fn resultOf(o: *mut u8) -> *mut *mut u8 => o.add(offsetOf<FsctlOpen>(result)) as *mut *mut u8;
 
 /// Safety: `o` is a file's state.
-unsafe fn lenOf(o: *mut u8) -> *mut usize => o.add(fsctl_floor_open_layout(2)) as *mut usize;
+unsafe fn lenOf(o: *mut u8) -> *mut usize => o.add(offsetOf<FsctlOpen>(len)) as *mut usize;
 
 /// Safety: as cred.h's cred_has.
 unsafe fn admin() -> bool {
@@ -435,7 +472,7 @@ unsafe fn openFile(vn: *mut vnode, f: *mut file) -> i32 {
     if (!admin()) {
         return -EPERM;
     }
-    let o = kmalloc(fsctl_floor_open_layout(0), KMEM_ZERO) as *mut u8;
+    let o = kmalloc(layoutOf<FsctlOpen>().size, KMEM_ZERO) as *mut u8;
     if (o.isNull()) {
         return -ENOMEM;
     }
@@ -545,11 +582,11 @@ unsafe fn list(o: *mut u8) -> i64 {
     let rec = buf.add(headerSize());
     var n: u32 = 0;
     var total: u32 = 0;
-    let table = mountns_floor_mounts_lock();
+    let table = borrow mut g_mounts_lock as *mut mutex;
     mutex_lock(table);
     let ns = mountns_current();
     let nsId = Ptr.toBorrow(ns as *mount_ns).id;
-    let root = mountns_floor_root();
+    let root = g_root_mount;
     if (!root.isNull()) {
         total += 1;
         if (n < want) {
@@ -656,10 +693,10 @@ unsafe fn mountsLine(o: borrow mut MountsOut, mnt: *mount, path: *CChar) {
 @export("vfs_mounts_render")
 unsafe fn mountsRender(out: *mut CChar, n: usize) -> i32 {
     var o = MountsOut { buf: out as *mut u8, n: n, len: 0, over: n == 0 };
-    let lock = fsctl_floor_list_lock();
+    let lock = borrow mut g_mount_list_lock as *mut spinlock_t;
     spin_lock(lock);
     let ns = mountns_current();
-    let root = mountns_floor_root();
+    let root = g_root_mount;
     if (!root.isNull()) {
         mountsLine(mut o, root as *mount, "/\0".ptr as *CChar);
     }
@@ -1282,7 +1319,7 @@ static mut NODE: *mut vnode = 0 as *mut vnode;
 /// Safety: at boot, once /dev exists.
 @export("fsctl_dev_init")
 unsafe fn devInit() {
-    let rc = ramfs_mkchr("/dev/fsctl\0".ptr as *CChar, MODE, fsctl_floor_ops(), 0 as *mut void,
+    let rc = ramfs_mkchr("/dev/fsctl\0".ptr as *CChar, MODE, borrow mut FSCTL_OPS as *mut chrdev_ops as *chrdev_ops, 0 as *mut void,
         borrow mut NODE as *mut *mut vnode);
     if (rc != 0) {
         var buffer: [u8; 64] = [0; 64];
