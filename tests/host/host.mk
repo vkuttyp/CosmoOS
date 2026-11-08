@@ -201,7 +201,6 @@ HOST_CFSALLOC_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/cos
 	tests/host/ceesafe_panic.c tests/host/test_cfsalloc.c
 # cosmofs's commit with the real buffer cache, allocator, inode map and decoders: the disk, the pool and every other hook are the test's.
 HOST_CFSCOMMIT_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/cosmofs_commit.c \
-	kernel-services/filesystem/cosmofs/cosmofs_commit_floor.c \
 	kernel-services/filesystem/cosmofs/cosmofs_buf.c kernel-services/filesystem/cosmofs/cosmofs_buf_floor.c \
 	kernel-services/filesystem/cosmofs/cosmofs_alloc.c kernel-services/filesystem/cosmofs/cfsparse.c kernel/core/crc32c.c \
 	kernel/security/blake2b.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_cfscommit.c
@@ -215,7 +214,6 @@ HOST_CFSCORRUPT_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/c
 	tests/host/ceesafe_panic.c tests/host/test_cfscorrupt.c
 # cosmofs's stats, key operations and test hooks: the filesystem and everything it calls are the test's.
 HOST_CFSHOOKS_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/cosmofs_hooks.c \
-	kernel-services/filesystem/cosmofs/cosmofs_hooks_floor.c \
 	kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_cfshooks.c
 # cosmofs's mount and unmount: the pool, the buffers, the members, the key table, the replays, threads and the VFS are the test's.
 HOST_CFSCORE_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/cosmofs_core.c \
@@ -229,12 +227,10 @@ HOST_CFSCSUM_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/cosm
 	kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_cfscsum.c
 # a cosmofs file's blocks with the real DVA and run checks and CRC32C: the cache, allocator, entries, cipher and codec are the test's.
 HOST_CFSDATA_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/cosmofs_data.c \
-	kernel-services/filesystem/cosmofs/cosmofs_data_floor.c \
 	kernel-services/filesystem/cosmofs/cfsparse.c kernel/core/crc32c.c kernel/ceesafe/ceesafe_rt_core.c \
 	tests/host/ceesafe_panic.c tests/host/test_cfsdata.c
 # a cosmofs regular file's vnode operations: the map, reads, writes, inode, locks and commit are the test's.
 HOST_CFSFILE_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/cosmofs_file.c \
-	kernel-services/filesystem/cosmofs/cosmofs_file_floor.c \
 	kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_cfsfile.c
 # cosmofs's vnodes: the cache, the inodes and the operation tables are the test's.
 HOST_CFSVNODE_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/cosmofs_vnode.c \

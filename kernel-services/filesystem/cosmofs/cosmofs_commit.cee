@@ -10,8 +10,8 @@
 // only after that transaction's root is on disk.
 //
 // struct cfs, the buffers, the reservation and the inodes stay C (cosmofs_internal.h, cosmofs_format.h). An inode the C
-// kept on the stack is kept in a zeroed slot of words. cosmofs_commit_floor.c keeps the two test seams a build
-// configuration decides.
+// kept on the stack is kept in a zeroed slot of words. The two test seams a build configuration decides are `cfg`
+// blocks (ADR 0080 §3.3).
 
 @header("kernel/blk.h", "kernel/storage.h", "kernel/kmalloc.h", "kernel/string.h", "cosmofs_internal.h")
 extern "C" {
@@ -72,6 +72,11 @@ extern "C" {
         copystate_seq: u64;
         snap_count: u32;
         first_dirty_ns: u64;
+        switching: bool;
+        @cfg("CONFIG_DEBUG")
+        test_commit_armed: bool;
+        @cfg("CONFIG_DEBUG")
+        test_commits_left: u32;
     }
     struct cfs_buf {
         link: list_node;
@@ -131,9 +136,37 @@ extern "C" {
     fn kzalloc(size: usize) -> *mut void;
     fn memcpy(dst: *mut void, src: *void, n: usize) -> *mut void;
     fn memset(p: *mut void, c: i32, n: usize) -> *mut void;
-    /// cosmofs_commit_floor.c: the debug build's "the machine stops at this commit"; test-snapshot's crash point.
-    fn cfs_commit_floor_stopped(fs: *mut cfs) -> bool;
-    fn cfs_commit_floor_switch_stop(fs: *mut cfs);
+    fn thread_sleep_ns(ns: u64);
+}
+
+/// Test hook: the machine "stops" at this commit. True when this is the commit it stops at; otherwise one fewer commit
+/// to go. Only a debug build has it.
+/// Safety: `fs` is a live filesystem whose lock is held.
+unsafe fn commitStopped(fs: *mut cfs) -> bool {
+    if (cfg("CONFIG_DEBUG")) {
+        let f = Ptr.toBorrowMut(fs);
+        if (f.test_commit_armed) {
+            if (f.test_commits_left == 0) {
+                return true;
+            }
+            f.test_commits_left -= 1;
+        }
+    }
+    return false;
+}
+
+/// test-snapshot's crash point "during the switch": every block of the rollback's transaction is written and flushed,
+/// its root is not. A build with COSMOFS_STOP=1 only; the harness kills the machine here.
+/// Safety: `fs` is a live filesystem.
+unsafe fn switchStop(fs: *mut cfs) {
+    if (cfg("CONFIG_COSMOFS_STOP")) {
+        if (Ptr.toBorrow(fs as *cfs).switching) {
+            KernelLog.write(LogLevel.Info, "cosmofs: test stop: the rollback switch's blocks are written and its root is not");
+            while (true) {
+                thread_sleep_ns(1000000000);
+            }
+        }
+    }
 }
 
 // ---- errno.h, blk.h, storage.h, cosmofs_internal.h and cosmofs_format.h values (asserted in
@@ -1047,7 +1080,7 @@ unsafe fn commitEx(fs: *mut cfs, published: *mut bool) -> i32 {
         }
     }
     // Test hook: the machine "stops" at this commit.
-    if (cfs_commit_floor_stopped(fs)) {
+    if (commitStopped(fs)) {
         fail(fs, -EIO);
         return -EIO;
     }
@@ -1243,7 +1276,7 @@ unsafe fn commitEx(fs: *mut cfs, published: *mut bool) -> i32 {
         round += 1;
     }
     // test-snapshot's crash point "during the switch".
-    cfs_commit_floor_switch_stop(fs);
+    switchStop(fs);
     let slot = if (fsOf(fs).sb_slot == CFS_SUPER_A) CFS_SUPER_B else CFS_SUPER_A;
     rc = superWrite(fs, slot, BIO_PREFLUSH | BIO_FUA);
     if (rc != 0) {

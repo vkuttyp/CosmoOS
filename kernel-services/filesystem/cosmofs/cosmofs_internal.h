@@ -722,7 +722,7 @@ int cfs_names_allow(struct cfs *fs, size_t len);
  * with its checksum or seal; and `n` blocks from `lblk0` written as plain
  * runs or, with `compress`, as compressed records where they shrink. */
 int cfs_extents_count(struct cfs *fs, const struct cfs_inode *in, unsigned *out);
-int cfs_set_extent(struct cfs *fs, struct cfs_inode *in, struct cfs_extent ne, uint64_t *old);
+int cfs_set_extent(struct cfs *fs, struct cfs_inode *in, const struct cfs_extent *ne, uint64_t *old);
 int cfs_data_write_block(struct cfs *fs, struct cfs_inode *in, uint64_t lblk, const void *buf,
                          enum cfs_alloc_class cls);
 int cfs_record_write(struct cfs *fs, struct cfs_inode *in, uint64_t lblk0, const uint8_t *data, unsigned n,

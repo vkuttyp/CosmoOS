@@ -201,19 +201,15 @@ KERNEL_GENERIC_SRCS := \
 	kernel-services/filesystem/cosmofs/cosmofs_buf.c \
 	kernel-services/filesystem/cosmofs/cosmofs_alloc.c \
 	kernel-services/filesystem/cosmofs/cosmofs_commit.c \
-	kernel-services/filesystem/cosmofs/cosmofs_commit_floor.c \
 	kernel-services/filesystem/cosmofs/cosmofs_format.c \
 	kernel-services/filesystem/cosmofs/cosmofs_corrupt.c \
 	kernel-services/filesystem/cosmofs/cosmofs_hooks.c \
-	kernel-services/filesystem/cosmofs/cosmofs_hooks_floor.c \
 	kernel-services/filesystem/cosmofs/cosmofs_buf_floor.c \
 	kernel-services/filesystem/cosmofs/cosmofs_snap.c \
 	kernel-services/filesystem/cosmofs/cosmofs_snapctl.c \
 	kernel-services/filesystem/cosmofs/cosmofs_csum.c \
 	kernel-services/filesystem/cosmofs/cosmofs_data.c \
-	kernel-services/filesystem/cosmofs/cosmofs_data_floor.c \
 	kernel-services/filesystem/cosmofs/cosmofs_file.c \
-	kernel-services/filesystem/cosmofs/cosmofs_file_floor.c \
 	kernel-services/filesystem/cosmofs/cosmofs_vnode.c \
 	kernel-services/filesystem/cosmofs/cosmofs_dir.c \
 	kernel-services/filesystem/cosmofs/cosmofs_reach.c \

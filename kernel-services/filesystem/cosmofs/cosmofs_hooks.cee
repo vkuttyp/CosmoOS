@@ -2,8 +2,7 @@
 // 2.0 SA7. tests/host/test_cfshooks.c holds it to the digest of the C it replaced.
 //
 // struct cfs, the mount and the figures stay C (cosmofs_internal.h, kernel/vfs.h, kernel/cosmofs.h). The three hooks
-// whose fields a build configuration decides are in cosmofs_hooks_floor.c: CeeSafe cannot name a field that only some
-// builds have.
+// whose fields a build configuration decides use them in `cfg` blocks (ADR 0080 §3.3).
 
 @header("kernel/vfs.h", "kernel/mutex.h", "kernel/storage.h", "kernel/cosmofs.h", "cosmofs_internal.h")
 extern "C" {
@@ -58,6 +57,14 @@ extern "C" {
         wb_commits: u64;
         mount_dirty_notes: u64;
         wb_early: u64;
+        @cfg("CONFIG_DEBUG")
+        test_commit_armed: bool;
+        @cfg("CONFIG_DEBUG")
+        test_commits_left: u32;
+        @cfg("CONFIG_DEBUG")
+        test_no_raise: bool;
+        @cfg("CONFIG_SELFTEST")
+        test_max_extents: u32;
     }
     struct cfs_inode {
         ino: u64;
@@ -152,6 +159,52 @@ unsafe fn stats(mnt: *mut mount, out: *mut cosmofs_stats) -> i32 {
     o.degraded = cfs_copies_out(fs) as u64;
     mutex_unlock(lockOf(fs));
     return 0;
+}
+
+/// Test hook: `left` more commits are published, the next is abandoned as if the machine stopped (armed false: off).
+/// A debug build's only (cosmofs.h).
+/// Safety: `mnt` is a mount.
+@export("cosmofs_test_commit_budget")
+@cfg("CONFIG_DEBUG")
+unsafe fn testCommitBudget(mnt: *mut mount, armed: bool, left: u32) {
+    let fs = fsOf(mnt);
+    if (fs.isNull()) {
+        return;
+    }
+    mutex_lock(lockOf(fs));
+    if (cfg("CONFIG_DEBUG")) {
+        let f = Ptr.toBorrowMut(fs);
+        f.test_commit_armed = armed;
+        f.test_commits_left = left;
+    }
+    mutex_unlock(lockOf(fs));
+}
+
+/// Test hook: a snapshot with identity does not raise a version-11 pool. A debug build's only.
+/// Safety: `mnt` is a mount.
+@export("cosmofs_test_snap_no_raise")
+@cfg("CONFIG_DEBUG")
+unsafe fn testSnapNoRaise(mnt: *mut mount, on: bool) {
+    let fs = fsOf(mnt);
+    if (cfg("CONFIG_DEBUG")) {
+        if (!fs.isNull()) {
+            let f = Ptr.toBorrowMut(fs);
+            f.test_no_raise = on;
+        }
+    }
+}
+
+/// Test seam: the run bound on this mount (0 restores CFS_MAX_EXTENTS). Nothing in a build without self-tests.
+/// Safety: `mnt` is a mount.
+@export("cosmofs_test_set_max_extents")
+unsafe fn testSetMaxExtents(mnt: *mut mount, n: u32) {
+    let fs = fsOf(mnt);
+    if (cfg("CONFIG_SELFTEST")) {
+        if (!fs.isNull()) {
+            let f = Ptr.toBorrowMut(fs);
+            f.test_max_extents = n;
+        }
+    }
 }
 
 /// Safety: `mnt` is a mount.

@@ -655,7 +655,7 @@ static void op(void)
         ne.start = start;
         uint64_t old = 0xEE;
         bool want = pick(2);
-        rc = cfs_set_extent(&g_fs, &g_in, ne, want ? &old : NULL);
+        rc = cfs_set_extent(&g_fs, &g_in, &ne, want ? &old : NULL);
         note(44, old);
         break;
     }

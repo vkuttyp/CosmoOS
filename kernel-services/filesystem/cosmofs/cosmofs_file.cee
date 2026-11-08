@@ -7,8 +7,8 @@
 // struct cfs, the mount, the vnode and its state stay C (cosmofs_internal.h, kernel/vfs.h). The run and the inode the
 // C kept on the stack are kept in zeroed slots of words, checked against their C sizes (tests/host/test_cfsfile.c):
 // a CeeSafe local cannot hold C state. A vnode's type, a field whose name CeeSafe reserves, is read at its offset,
-// which the test checks. cosmofs_file_floor.c keeps what a build configuration decides: the debug build's stuck-page
-// check, the run bound a self-test lowers, and the self-test hook that counts runs.
+// which the test checks. What a build configuration decides -- the debug build's stuck-page check and the self-test
+// hook that counts runs -- is in `cfg` blocks (ADR 0080 §3.3); the run bound is cosmofs_internal.h's cfs_max_extents.
 
 @header("kernel/vfs.h", "kernel/kmalloc.h", "kernel/mutex.h", "kernel/pagecache.h", "kernel/string.h",
     "kernel/cosmofs.h", "cosmofs_internal.h")
@@ -41,6 +41,8 @@ extern "C" {
         map_stores: u64;
         last_store_in: *cfs_inode;
         last_store_n: u32;
+        @cfg("CONFIG_DEBUG")
+        fbig_injected: bool;
     }
     struct cfs_extent {
         start: u64;
@@ -84,9 +86,8 @@ extern "C" {
     fn vfs_now_ns() -> u64;
     fn memset(p: *mut void, c: i32, n: usize) -> *mut void;
     fn memcpy(dst: *mut void, src: *void, n: usize) -> *mut void;
-    /// cosmofs_file_floor.c: the debug build's stuck-page check, and the run bound.
-    fn cfs_file_floor_stuck_page(fs: *mut cfs, vn: *mut vnode, index: u64, rc: i32);
-    fn cfs_file_floor_max_extents(fs: *cfs) -> u32;
+    /// The runs an inode may have: CFS_MAX_EXTENTS, or a self-test's lower bound (an inline function).
+    fn cfs_max_extents(fs: *cfs) -> u32;
 }
 
 // ---- errno.h, vfs.h, cosmofs_format.h and cosmofs_internal.h values (asserted in tests/host/test_cfsfile.c) ----
@@ -97,6 +98,7 @@ const EINVAL: i32 = 22;
 const EFBIG: i32 = 27;
 const ENOSPC: i32 = 28;
 const EROFS: i32 = 30;
+const ENOTSUP: i32 = 95;
 const VNODE_REG: u32 = 1;
 /// Where a struct vnode's `type` is.
 const VN_TYPE: usize = 56;
@@ -272,6 +274,45 @@ unsafe fn syncAfterWrite(fs: *mut cfs, vn: *mut vnode, rc: i32) -> i32 {
     return if (rc != 0) rc else src;
 }
 
+/// A page cfs_dirty_check let be dirtied that write-back cannot store is this file's bug, not the writer's: named, in a
+/// debug build, where it happens (CFS-32). The extent-fail seam's -EFBIG is the one expected.
+/// Safety: `fs` is a live filesystem; `vn` a vnode of it.
+unsafe fn stuckPage(fs: *mut cfs, vn: *mut vnode, index: u64, rc: i32) {
+    if (cfg("CONFIG_DEBUG")) {
+        let f = Ptr.toBorrowMut(fs);
+        if ((rc == -EFBIG && !f.fbig_injected) || rc == -EROFS) {
+            var buffer: [u8; 192] = [0; 192];
+            var line = TextWriter.create(mut buffer[..]);
+            line.text("cosmofs: inode ");
+            line.decimal(Ptr.toBorrow(inodeOf(vn) as *cfs_inode).ino);
+            line.text(" page ");
+            line.decimal(index);
+            line.text(" is dirty and write-back cannot store it (");
+            line.signed(rc as i64);
+            line.text("): cfs_dirty_check admitted it (CFS-32)");
+            KernelLog.panic(line);
+        }
+        f.fbig_injected = false;
+    }
+}
+
+/// The self-tests' count of a file's runs (cosmofs.h): -ENOTSUP in a build without self-tests.
+/// Safety: `vn` is a cosmofs vnode, its tree lock not held; `n` writable.
+@export("cosmofs_test_runs")
+unsafe fn testRuns(vn: *mut vnode, n: *mut u32) -> i32 {
+    if (cfg("CONFIG_SELFTEST")) {
+        let fs = fsOf(vn);
+        var rc = cfs_lock_tree_w(fs, vn);
+        if (rc != 0) {
+            return rc;
+        }
+        rc = cfs_extents_count(fs, inodeOf(vn) as *cfs_inode, n);
+        cfs_unlock_tree(fs);
+        return rc;
+    }
+    return -ENOTSUP;
+}
+
 /// The inode's runs, as last counted while no map has been stored since, or counted now.
 /// Safety: `fs` is a mounted filesystem's state, its lock not held; `vn` a vnode of it; `out` writable.
 unsafe fn inodeRuns(fs: *mut cfs, vn: *mut vnode, out: *mut u32) -> i32 {
@@ -299,7 +340,7 @@ unsafe fn inodeRuns(fs: *mut cfs, vn: *mut vnode, out: *mut u32) -> i32 {
 
 /// Safety: `fs` is a filesystem's state.
 unsafe fn runsFit(fs: *mut cfs, runs: u32, dirty: u32) -> bool =>
-    runs as u64 + 2 * dirty as u64 + CFS_TRUNC_ADDS as u64 <= cfs_file_floor_max_extents(fs as *cfs) as u64;
+    runs as u64 + 2 * dirty as u64 + CFS_TRUNC_ADDS as u64 <= cfs_max_extents(fs as *cfs) as u64;
 
 /// After a write-back or a truncate under fs->lock: when the last map stored is this vnode's, its length is the inode's
 /// runs now, so the next page asked about needs no count.
@@ -326,7 +367,7 @@ unsafe fn recordCompresses(fs: *mut cfs, vn: *mut vnode, index: u64) -> bool {
     } else if (cfs_extents_count(fs, inodeOf(vn) as *cfs_inode, borrow mut runs as *mut u32) != 0) {
         return true; // the write itself will meet what the count did
     }
-    if (runs as u64 * 100 < cfs_file_floor_max_extents(fs as *cfs) as u64 * CFS_RAW_AT_PERCENT) {
+    if (runs as u64 * 100 < cfs_max_extents(fs as *cfs) as u64 * CFS_RAW_AT_PERCENT) {
         return true;
     }
     var eslot = [0u64; 2];
@@ -415,7 +456,7 @@ unsafe fn writepage(vn: *mut vnode, index: u64, buf: *void) -> i32 {
     rc = writeOnePage(fs, inodeOf(vn), index, buf);
     rc = syncAfterWrite(fs, vn, rc);
     noteRuns(fs, vn);
-    cfs_file_floor_stuck_page(fs, vn, index, rc);
+    stuckPage(fs, vn, index, rc);
     cfs_unlock_tree(fs);
     return rc;
 }
@@ -464,7 +505,7 @@ unsafe fn writepages(vn: *mut vnode, index: u64, pages: **mut void, n: u32, done
     }
     rc = syncAfterWrite(fs, vn, rc);
     noteRuns(fs, vn);
-    cfs_file_floor_stuck_page(fs, vn, index, rc);
+    stuckPage(fs, vn, index, rc);
     cfs_unlock_tree(fs);
     return rc;
 }

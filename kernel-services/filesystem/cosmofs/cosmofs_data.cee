@@ -10,10 +10,11 @@
 // struct cfs, the inodes, the runs, the buffers and the set-asides stay C (cosmofs_internal.h, cosmofs_format.h). The
 // runs are handled through pointers to C arrays, the inode, entry and saved entries the C kept on the stack in zeroed
 // slots of words, checked against their C sizes (tests/host/test_cfsdata.c): a CeeSafe local cannot hold C state.
-// cosmofs_data_floor.c keeps what a build configuration decides -- the fault seams, the debug build's note, and the run
-// bound a self-test may lower -- and cfs_set_extent, whose run comes by value, as CeeSafe cannot take a C struct.
+// What a build configuration decides -- the fault seams, the debug build's note -- is faultinject.h's seams and a `cfg`
+// block (ADR 0080 §3.3), and the run bound a self-test may lower is cosmofs_internal.h's cfs_max_extents.
 
-@header("kernel/kmalloc.h", "kernel/string.h", "kernel/chacha20.h", "kernel/lz4.h", "kernel/crc32c.h",
+@header("kernel/faultinject.h", "kernel/kmalloc.h", "kernel/string.h", "kernel/chacha20.h", "kernel/lz4.h",
+    "kernel/crc32c.h",
     "cosmofs_internal.h")
 extern "C" {
     struct cfs_mhdr {
@@ -29,6 +30,8 @@ extern "C" {
         map_stores: u64;
         last_store_in: *cfs_inode;
         last_store_n: u32;
+        @cfg("CONFIG_DEBUG")
+        fbig_injected: bool;
     }
     struct cfs_buf {
         blkno: u64;
@@ -87,11 +90,33 @@ extern "C" {
     fn crc32c(data: *void, len: usize) -> u32;
     fn memset(p: *mut void, c: i32, n: usize) -> *mut void;
     fn memcpy(dst: *mut void, src: *void, n: usize) -> *mut void;
-    /// cosmofs_data_floor.c: the map change's fault seam (and, in a debug build, its note); the map store's; and the
-    /// run bound.
-    fn cfs_data_floor_set_extent_fault(fs: *mut cfs) -> i32;
-    fn cfs_data_floor_chain_nomem() -> bool;
-    fn cfs_data_floor_max_extents(fs: *cfs) -> u32;
+    /// The runs an inode may have: CFS_MAX_EXTENTS, or a self-test's lower bound (an inline function).
+    fn cfs_max_extents(fs: *cfs) -> u32;
+    /// faultinject.h's seams: functions in a fault-injection build, inline `false` otherwise.
+    enum fi_kind: u32;
+    const FI_COSMOFS_EXTENT_NOMEM: fi_kind = 20;
+    const FI_COSMOFS_EXTENT_FBIG: fi_kind = 21;
+    const FI_COSMOFS_CHAIN_NOMEM: fi_kind = 22;
+    fn faultinject_should_fail(kind: fi_kind) -> bool;
+}
+
+/// The test seam at the top of cfs_set_extent (cosmofs-extent-fail): an armed rule makes it fail as it can before it
+/// changes anything, -ENOMEM (an allocation) or -EFBIG (a map that would not fit); a debug build notes which.
+/// Safety: `fs` is a live filesystem.
+unsafe fn setExtentFault(fs: *mut cfs) -> i32 {
+    var rc: i32 = 0;
+    if (faultinject_should_fail(FI_COSMOFS_EXTENT_NOMEM)) {
+        rc = -ENOMEM;
+    } else if (faultinject_should_fail(FI_COSMOFS_EXTENT_FBIG)) {
+        rc = -EFBIG;
+    }
+    if (cfg("CONFIG_DEBUG")) {
+        if (rc != 0) {
+            let f = Ptr.toBorrowMut(fs);
+            f.fbig_injected = rc == -EFBIG;
+        }
+    }
+    return rc;
 }
 
 // ---- errno.h, kmalloc.h, lz4.h, cosmofs_format.h and cosmofs_internal.h values (asserted in
@@ -233,13 +258,13 @@ unsafe fn extentsLoad(fs: *mut cfs, inp: *cfs_inode, out: *mut *mut cfs_extent, 
         i = 0;
         while (i < CFS_EXTENTS_PER_BLOCK && extCount(run(eb, i).count) != 0) {
             if (k == cap) {
-                let max = cfs_data_floor_max_extents(fs as *cfs);
+                let max = cfs_max_extents(fs as *cfs);
                 if (cap >= max) {
                     cfs_buf_put(fs, b);
                     kfree(ext as *mut void);
                     return -EFBIG;
                 }
-                let ncap = if (cap * 2 > cfs_data_floor_max_extents(fs as *cfs)) cfs_data_floor_max_extents(fs as
+                let ncap = if (cap * 2 > cfs_max_extents(fs as *cfs)) cfs_max_extents(fs as
                     *cfs) else cap * 2;
                 let grown = krealloc(ext as *mut void, ncap as usize * EXT, 0) as *mut cfs_extent;
                 if (grown.isNull()) {
@@ -276,7 +301,7 @@ unsafe fn extentsLoad(fs: *mut cfs, inp: *cfs_inode, out: *mut *mut cfs_extent, 
 /// the chain's next block could not be had, half the map new and half old.
 /// Safety: as extentsLoad; `inp` writable; `ext` holds `n` runs.
 unsafe fn extentsStore(fs: *mut cfs, inp: *mut cfs_inode, ext: *mut cfs_extent, n: u32) -> i32 {
-    if (n > cfs_data_floor_max_extents(fs as *cfs)) {
+    if (n > cfs_max_extents(fs as *cfs)) {
         return -EFBIG;
     }
     var left = if (n > CFS_DIRECT) n - CFS_DIRECT else 0;
@@ -325,7 +350,7 @@ unsafe fn extentsStore(fs: *mut cfs, inp: *mut cfs_inode, ext: *mut cfs_extent, 
         cur = after;
     }
     // The test seam (cosmofs-nomem): the chain block cannot be had.
-    if (rc == 0 && (cows != 0 || need > nkeep) && cfs_data_floor_chain_nomem()) {
+    if (rc == 0 && (cows != 0 || need > nkeep) && faultinject_should_fail(FI_COSMOFS_CHAIN_NOMEM)) {
         rc = -ENOMEM;
     }
     if (rc == 0) {
@@ -544,9 +569,9 @@ unsafe fn noteFreed(f: borrow mut Freed, blk: u64) -> bool {
 /// Blocks that stop being referenced are freed here, except for the one block a single-block write replaces, which the
 /// caller frees after its own bookkeeping (that is what `old` is for).
 /// Safety: as extentsLoad; `inp` writable; `nep` a run; `old` null or writable.
-@export("cfs_data_set_extent")
+@export("cfs_set_extent")
 unsafe fn setExtent(fs: *mut cfs, inp: *mut cfs_inode, nep: *cfs_extent, old: *mut u64) -> i32 {
-    var rc = cfs_data_floor_set_extent_fault(fs);
+    var rc = setExtentFault(fs);
     if (rc != 0) {
         return rc;
     }
