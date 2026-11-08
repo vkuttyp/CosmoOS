@@ -90,12 +90,12 @@ the name in `/etc/hostname` to keep it.
 
 BusyBox `wget` fetches over HTTP and HTTPS. Serve this directory from your computer
 on port 8000 (QEMU's user network reaches your computer's `127.0.0.1` as
-`10.0.2.2`):
+`10.0.2.2`), and wait until it is listening:
 
 <!-- test: host -->
 ```sh
 python3 -m http.server 8000 --bind 127.0.0.1 >/dev/null 2>&1 &
-sleep 1
+until python3 -c 'import socket; socket.create_connection(("127.0.0.1", 8000))' 2>/dev/null; do sleep 0.1; done
 ```
 
 and fetch the checksum file from CosmoOS:

@@ -20,7 +20,7 @@ previous page:
 ```sh
 ssh-keygen -q -t ed25519 -N "" -f cosmo_key
 python3 -m http.server 8000 --bind 127.0.0.1 >/dev/null 2>&1 &
-sleep 1
+until python3 -c 'import socket; socket.create_connection(("127.0.0.1", 8000))' 2>/dev/null; do sleep 0.1; done
 ```
 
 Boot the installed system (the `hostfwd` option in these commands is
