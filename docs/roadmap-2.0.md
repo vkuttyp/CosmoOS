@@ -1500,10 +1500,10 @@ snapshots, creation given back halfway, symlinks, hard links, unlink,
 rmdir (a snapshot's too), rename and its rollback, readdir.
 `tests/host/test_cfsdir.c` runs them with the real directory helpers and
 entry decoders (0x00fc036656d8ef7b, clang and gcc; every line but a
-link's rollback failing twice over). `cosmofs_dir_floor.c` keeps
+link's rollback failing twice over). `cosmofs_dir_floor.c` kept
 `cfs_readdir`'s entry point and the call through its callback, whose
-type takes an enum. With it no C of cosmofs's VFS side is left but the
-floors.
+type takes an enum, until ceesafec 0.23.0 imported the enum (below); it
+is gone. No C of cosmofs's VFS side is left but the floors.
 `cosmofs_keytest.cee`, the first of the self-tests, cosmofs-encrypted-root:
 a self-test has no host digest, so its evidence is the boot test, which
 passes with every line the C printed (x86_64 debug, 2026-11-07).
@@ -1561,7 +1561,7 @@ as arguments of one call, in an order the compiler chose. The port
 writes each text as `ksnprintf` did, a piece at a time from where the
 last ended, cut at the buffer's end and counted whole, so every text
 and length is the C's. `procfs_floor.c` keeps the operation tables and
-the file system type, the readdir callback's call, the compiler's name
+the file system type, the compiler's name
 for /proc/version and the debug build's count of live texts, the
 threads' `container_of`, `sched_loadavg`'s unsigned longs, and
 `procnet_names`, a C array. `kernel-services/filesystem/` has no C left
@@ -1632,9 +1632,8 @@ target, which no symlink makes). A directory entry and a node's private
 state are CeeSafe structs, laid out by C's rules: the digest records
 every allocation's size, and the port's are the C's. `ramfs_floor.c`
 keeps the six operation tables and `ramfs_fs_type`, C data naming the
-operations, readdir's entry point and the call through its callback,
-whose type takes an enum, and `bootarchive_entry`, a function CeeSafe
-cannot name beside its struct.
+operations, and `bootarchive_entry`, a function CeeSafe cannot name
+beside its struct.
 
 `fsctl.cee`, `/dev/fsctl` and /proc/mounts: `tests/host/test_fsctl.c`
 runs random sessions -- opens with and without the privilege, commands
@@ -1680,8 +1679,7 @@ an open's walk), `vfs_file.cee` (open files) and `vfs_dir.cee` (the
 namespace operations). `vfs_floor.c` keeps the mount table and its
 locks, the registry's and claims' lists, the kobject types (the file's
 io type among them), the seam's lock, queues and record, the waits the
-C wrote as macros, the call into readdir with its enum-typed callback,
-a debug build's poisoning of a freed vnode, the release builds'
+C wrote as macros, a debug build's poisoning of a freed vnode, the release builds'
 stand-ins for the seam, and the asserted constants. The test found two
 kernel bugs, fixed after the port (the digest moved once, to
 0x45371c2423e2e476): `vfs_umount_at` locked the mountpoint of an old
@@ -1689,6 +1687,18 @@ root that has none (now -EINVAL), and the last holder of a mount
 namespace unmounted a mount only it saw with files open on it or
 mounts nested on it (now the mount waits as an orphan, reaped when its
 last user goes).
+
+The C enum: `vfs_dirent_cb` and `vnode_ops.mknod` take an `enum
+vnode_type`, which a CeeSafe function type could not spell, so every
+readdir and mknod went through a C trampoline -- CI's UBSan
+(`-fsanitize=function`) refuses a call through a pointer whose type
+names the enum to a function whose type names `uint32_t`. ceesafec
+0.23.0 imports C enums (its ADR 0079: `enum vnode_type: u32;`), so the
+readdirs of ramfs, procfs and cosmofs are their tables' entries and call
+the reader's callback directly, `ramfs_mknod` is its table's entry, and
+`vfs_mknod` and `file_readdir` call through the operation table; the
+trampolines in `ramfs_floor.c`, `procfs_floor.c` and `vfs_floor.c`, and
+`cosmofs_dir_floor.c` whole, are gone (8bbd5bd2).
 
 Size: about 4.5x.
 

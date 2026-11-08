@@ -9,7 +9,7 @@
 // cosmofs_format.h, kernel/vfs.h). The inodes and snapshot entries the C kept on the stack are kept in zeroed slots
 // of words, checked against their C sizes (tests/host/test_cfsdir.c): a CeeSafe local cannot hold C state. A vnode's
 // type, a field whose name CeeSafe reserves, is read and written at its offset, which the test checks.
-// cosmofs_dir_floor.c keeps readdir's entry point and the call through its callback, whose type takes an enum.
+// readdir is the operation table's entry, its callback's type spelled with the imported enum vnode_type.
 
 @header("kernel/vfs.h", "kernel/kmalloc.h", "kernel/mutex.h", "kernel/string.h", "kernel/cred.h", "cosmofs_internal.h")
 extern "C" {
