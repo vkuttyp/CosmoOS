@@ -82,8 +82,9 @@ extern "C" {
     fn cosmofs_test_fail_orphan(mnt: *mut mount, on: bool);
     fn cosmofs_test_orphan_add(mnt: *mut mount, ino: u64);
     fn cosmofs_test_mount_writeback(mnt: *mut mount, dirtyNotes: *mut u64, early: *mut u64);
-    /// cosmofstest_lib_floor.c: cosmofs_stats into `out`, a struct cosmofs_stats (a name a struct has too).
-    fn cfst_stats(mnt: *mut mount, out: *mut void) -> i32;
+    /// cosmofs.h's cosmofs_stats, whose name its struct has too (ADR 0080 §3.5).
+    @cname("cosmofs_stats")
+    fn cfst_stats(mnt: *mut mount, out: *mut cosmofs_stats) -> i32;
     // cosmofstest_lib.cee's (cosmofstest.h)
     fn cfst_write_file(path: *CChar, data: *void, len: usize) -> bool;
     fn cfst_read_matches(path: *CChar, data: *void, len: usize) -> bool;
@@ -243,7 +244,7 @@ unsafe fn notClean(rp: *mut cosmofs_check_report, reason: *mut *CChar) -> bool {
 /// Safety: none beyond the filesystem's own.
 unsafe fn stats(slot: borrow mut [u64; 24]) -> *mut cosmofs_stats {
     let st = slot as *mut [u64; 24] as *mut cosmofs_stats;
-    if (cfst_stats(mnt(), st as *mut void) != 0) {
+    if (cfst_stats(mnt(), st as *mut cosmofs_stats) != 0) {
         return 0 as *mut cosmofs_stats;
     }
     return st;

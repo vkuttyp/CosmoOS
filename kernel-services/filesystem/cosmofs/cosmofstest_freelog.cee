@@ -5,11 +5,11 @@
 // superseded, replayed, replayed twice, reused, kept off a snapshot's deadlist, given back when its commit fails,
 // refused when malformed, chained past one block; and the deadlists: copied in one commit, written by an unmount's
 // own commit, not growing, reserved past one block, rolled back, judged once per block. Debug builds only; the
-// shared helpers are cosmofstest_lib.cee's. cosmofstest_freelog_floor.c asserts the values this file writes as its
-// own constants.
+// shared helpers are cosmofstest_lib.cee's. The values this file writes as its own constants are the headers', which
+// the C compiler checks (ADR 0080).
 
 @header("kernel/blk.h", "kernel/vfs.h", "kernel/kmalloc.h", "kernel/ramblk.h", "kernel/string.h", "kernel/cosmofs.h",
-    "uapi/cosmo/syscall.h")
+    "uapi/cosmo/syscall.h", "kernel/errno.h", "cosmofs_format.h")
 extern "C" {
     struct blkdev;
     struct mount;
@@ -42,9 +42,18 @@ extern "C" {
     fn vfs_mount(path: *CChar, fsname: *CChar, bd: *mut blkdev, flags: u32) -> i32;
     fn vfs_umount2(path: *CChar, flags: u32) -> i32;
     fn vfs_sync() -> i32;
-    /// cosmofstest_freelog_floor.c: cosmofs_stats of `mnt` as six numbers (generation, free_blocks, total_blocks,
-    /// members, version, free_root) -- a function whose name its struct's takes in CeeSafe.
-    fn cfst_fl_stats(mnt: *mut mount, out: *mut u64) -> i32;
+    /// cosmofs.h's statistics of a mount: the numbers these tests read.
+    struct cosmofs_stats {
+        generation: u64;
+        free_blocks: u64;
+        total_blocks: u64;
+        members: u32;
+        version: u32;
+        free_root: u64;
+    }
+    /// cosmofs_stats, whose name its struct has too (ADR 0080 §3.5).
+    @cname("cosmofs_stats")
+    fn readStats(mnt: *mut mount, out: *mut cosmofs_stats) -> i32;
     fn cosmofs_check(mnt: *mut mount, out: *mut cosmofs_check_report, flags: u32) -> i32;
     fn cosmofs_test_set_writeback(mnt: *mut mount, on: bool);
     fn cosmofs_test_discard_on_unmount(mnt: *mut mount, discard: bool);
@@ -67,17 +76,44 @@ extern "C" {
     fn cfst_write_wide_file(path: *CChar, pages: u32) -> bool;
     fn cfst_engine_mount(bdp: *mut *mut blkdev, nblocks: u64, reason: *mut *CChar) -> bool;
     fn cfst_engine_unmount(bd: *mut blkdev, reason: *mut *CChar) -> bool;
+
+    // The values and layout the C compiler checks (ADR 0080 §3.1), which the floor asserted.
+    const ENOENT: i32 = 2;
+    const EEXIST: i32 = 17;
+    const EOPNOTSUPP: i32 = 95;
+    const VFS_UMOUNT_FORCE: u32 = 1;
+    const CFS_FORMAT_VERSION: u32 = 11;
+    /// cosmofstest_freelog.cee's errno.h, vfs.h, syscall.h and cosmofs_format.h values
+    @cvalue("COSMO_DT_REG == 1 && COSMO_DT_LNK == 6 && CFS_DEAD_PER_BLOCK == 506")
+    const COSMOFSTEST_FREELOG_FACT_0: bool = true;
+    /// cosmofstest_freelog.cee's cosmo_stat offsets and the check report's slot
+    @cvalue("sizeof(struct cosmo_stat) <= 64 && offsetof(struct cosmo_stat, type) == 8 && offsetof(struct cosmo_stat, nlink) == 16 && sizeof(struct cosmofs_check_report) <= 2048")
+    const COSMOFSTEST_FREELOG_FACT_1: bool = true;
 }
 
-// ---- Values (asserted in cosmofstest_freelog_floor.c) ----
+/// cosmofs_stats of `mnt` into out[6]: generation, free_blocks, total_blocks, members, version, free_root;
+/// cosmofs_stats's result. cosmofstest_names.cee reads the statistics through this too.
+/// Safety: `mnt` is a live cosmofs mount; `out` holds six numbers.
+@export("cfst_fl_stats")
+unsafe fn flStats(mnt: *mut mount, out: *mut u64) -> i32 {
+    var st: cosmofs_stats;
+    let rc = readStats(mnt, borrow mut st as *mut cosmofs_stats);
+    if (rc != 0) {
+        return rc;
+    }
+    out.write(st.generation);
+    out.add(1).write(st.free_blocks);
+    out.add(2).write(st.total_blocks);
+    out.add(3).write(st.members as u64);
+    out.add(4).write(st.version as u64);
+    out.add(5).write(st.free_root);
+    return 0;
+}
 
-const ENOENT: i32 = 2;
-const EEXIST: i32 = 17;
-const EOPNOTSUPP: i32 = 95;
-const VFS_UMOUNT_FORCE: u32 = 1;
+// ---- Values ----
+
 const DT_REG: u32 = 1;
 const DT_LNK: u32 = 6;
-const CFS_FORMAT_VERSION: u32 = 11;
 /// CFS_DEAD_PER_BLOCK: the block numbers a deadlist or a free record block holds.
 const DEAD_PER_BLOCK: u64 = 506;
 /// u64 words of a cosmo_stat's slot and of a check report's (at least their sizes).
@@ -125,7 +161,7 @@ fn noStats() -> Stats => Stats { generation: 0, freeBlocks: 0, version: 0, freeR
 /// Safety: none beyond the VFS's own.
 unsafe fn stats(s: borrow mut Stats) -> bool {
     var v = [0u64; 6];
-    if (cfst_fl_stats(mnt(), borrow mut v as *mut [u64; 6] as *mut u64) != 0) {
+    if (flStats(mnt(), borrow mut v as *mut [u64; 6] as *mut u64) != 0) {
         return false;
     }
     s.generation = v[0];

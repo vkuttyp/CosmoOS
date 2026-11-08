@@ -130,8 +130,9 @@ extern "C" {
     fn memset(p: *mut void, c: i32, n: usize) -> *mut void;
     fn strchr(s: *CChar, c: i32) -> *mut CChar;
     fn strstr(s: *CChar, needle: *CChar) -> *mut CChar;
-    /// cosmofstest_lib_floor.c: cosmofs_stats into `out`, a struct cosmofs_stats (a name a struct has too).
-    fn cfst_stats(mnt: *mut mount, out: *mut void) -> i32;
+    /// cosmofs.h's cosmofs_stats, whose name its struct has too (ADR 0080 §3.5).
+    @cname("cosmofs_stats")
+    fn cfst_stats(mnt: *mut mount, out: *mut cosmofs_stats) -> i32;
     /// cosmofstest_copies_floor.c: the sysctl fs.fault_errors, g_pool_fault_errors.
     fn cfst_copies_floor_fault_errors() -> u32;
     fn cfst_copies_floor_set_fault_errors(n: u32);
@@ -214,7 +215,7 @@ unsafe fn devName(bd: *mut blkdev) -> *CChar => borrow Ptr.toBorrow(bd as *blkde
 
 /// The statistics of the mount at /mnt/eng into `st`.
 /// Safety: `st` a slot of the record's size.
-unsafe fn stats(st: *mut cosmofs_stats) -> i32 => cfst_stats(cfst_mount_of(eng()), st as *mut void);
+unsafe fn stats(st: *mut cosmofs_stats) -> i32 => cfst_stats(cfst_mount_of(eng()), st as *mut cosmofs_stats);
 
 /// The pool of the mount at /mnt/eng.
 /// Safety: none beyond the VFS's own.

@@ -11,6 +11,7 @@
 @header("kernel/blk.h", "kernel/vfs.h", "kernel/kmalloc.h", "kernel/string.h", "kernel/crc32c.h", "kernel/cosmofs.h",
     "uapi/cosmo/syscall.h", "cosmofs_internal.h", "kernel/errno.h", "kernel/selftest.h", "cosmofs_format.h")
 extern "C" {
+    struct cosmofs_stats;
     struct blkdev;
     struct mount;
     struct vnode;
@@ -57,8 +58,9 @@ extern "C" {
     fn vfs_mount(path: *CChar, fsname: *CChar, bd: *mut blkdev, flags: u32) -> i32;
     fn vfs_umount2(path: *CChar, flags: u32) -> i32;
     fn vfs_sync() -> i32;
-    /// cosmofstest_lib_floor.c: cosmofs_stats into `out`, a struct cosmofs_stats (a name a struct has too).
-    fn cfst_stats(mnt: *mut mount, out: *mut void) -> i32;
+    /// cosmofs.h's cosmofs_stats, whose name its struct has too (ADR 0080 §3.5).
+    @cname("cosmofs_stats")
+    fn cfst_stats(mnt: *mut mount, out: *mut cosmofs_stats) -> i32;
     fn cosmofs_check(mnt: *mut mount, out: *mut cosmofs_check_report, flags: u32) -> i32;
     fn cosmofs_snapctl(mnt: *mut mount, req: *mut cosmofs_snap_req) -> i32;
     fn cosmofs_test_corrupt(mnt: *mut mount, kind: u32, ino: u64, what: *mut u64) -> i32;
@@ -298,7 +300,7 @@ unsafe fn absent(p: *CChar) -> bool {
 /// Safety: `out` writable.
 unsafe fn freeBlocks(out: *mut u64) -> bool {
     var slot = [0u64; 32];
-    if (cfst_stats(mnt(), borrow mut slot as *mut [u64; 32] as *mut void) != 0) {
+    if (cfst_stats(mnt(), borrow mut slot as *mut [u64; 32] as *mut cosmofs_stats) != 0) {
         return false;
     }
     out.write(slot[STATS_FREE_BLOCKS]);

@@ -10,6 +10,7 @@
     "kernel/log.h", "kernel/cosmofs.h", "uapi/cosmo/syscall.h", "kernel/errno.h", "kernel/selftest.h",
     "cosmofs_format.h")
 extern "C" {
+    struct cosmofs_stats;
     struct blkdev;
     struct mount;
     struct cosmofs_scrub_stats;
@@ -46,8 +47,9 @@ extern "C" {
     fn pool_flush(p: *mut spool) -> i32;
     fn crc32c(data: *void, len: usize) -> u32;
     fn crc32c_update(crc: u32, data: *void, len: usize) -> u32;
-    /// cosmofstest_lib_floor.c: cosmofs_stats into `out`, a struct cosmofs_stats (a name a struct has too).
-    fn cfst_stats(mnt: *mut mount, out: *mut void) -> i32;
+    /// cosmofs.h's cosmofs_stats, whose name its struct has too (ADR 0080 §3.5).
+    @cname("cosmofs_stats")
+    fn cfst_stats(mnt: *mut mount, out: *mut cosmofs_stats) -> i32;
     fn cosmofs_scrub(mnt: *mut mount, out: *mut cosmofs_scrub_stats, flags: u32) -> i32;
     fn cosmofs_format_mirror(bd: *mut *mut blkdev, n: u32, copies: u32) -> i32;
     fn cosmofs_test_set_writeback(mnt: *mut mount, on: bool);
@@ -146,7 +148,7 @@ unsafe fn failed(reason: *mut *CChar, why: StringView) -> bool {
 unsafe fn filePut(f: *mut file) { kobject_put(f as *mut kobject); }
 
 /// Safety: none beyond the filesystem's own.
-unsafe fn engStats(st: *mut [u64; 16]) -> bool => cfst_stats(cfst_mount_of(eng()), st as *mut void) == 0;
+unsafe fn engStats(st: *mut [u64; 16]) -> bool => cfst_stats(cfst_mount_of(eng()), st as *mut cosmofs_stats) == 0;
 
 /// Safety: none beyond the filesystem's own.
 unsafe fn engScrub(sc: *mut [u64; 16]) -> bool =>

@@ -3,13 +3,16 @@
 // The scratch disk, files written and read back whole, the mount a path is on, pages nothing can compress, the RAM
 // device every engine test mounts at /mnt/eng, a byte flipped or a block rotted behind the filesystem's back, the
 // structural check's fixture and its failure message, and a snapshot request. The tests call these by their C names
-// (cosmofstest.h). cosmofstest_lib_floor.c holds the fault-injection seams of the engine mount, which only a build
-// with CONFIG_SELFTEST and CONFIG_FAULTINJECT has, and the self-test of those seams.
+// (cosmofstest.h). The fault-injection seams of the engine mount, which only a build with CONFIG_SELFTEST and
+// CONFIG_FAULTINJECT has, and the self-test of those seams are `cfg` blocks (ADR 0080 §3.3).
 
 @header("kernel/blk.h", "kernel/vfs.h", "kernel/kmalloc.h", "kernel/ramblk.h", "kernel/string.h", "kernel/storage.h",
-    "kernel/crc32c.h", "kernel/cosmofs.h", "uapi/cosmo/syscall.h")
+    "kernel/crc32c.h", "kernel/cosmofs.h", "uapi/cosmo/syscall.h", "kernel/faultinject.h", "kernel/thread.h",
+    "kernel/errno.h", "kernel/log.h", "kernel/selftest.h", "cosmofs_format.h", "cosmofstest.h")
 extern "C" {
-    struct blkdev;
+    struct blkdev {
+        gone: AtomicU32; // unregistered (blk.h), set atomically
+    }
     struct mount;
     struct vnode {
         mnt: *mut mount;
@@ -80,21 +83,134 @@ extern "C" {
     fn strcmp(a: *CChar, b: *CChar) -> i32;
     fn memcmp(a: *void, b: *void, n: usize) -> i32;
     fn memset(p: *mut void, c: i32, n: usize) -> *mut void;
-    /// cosmofstest_lib_floor.c: arm (begin) and disarm (end) the fault the fixture's self-test injects at `stage`, in
-    /// a build with CONFIG_SELFTEST and CONFIG_FAULTINJECT; nothing elsewhere.
-    fn cfst_floor_fail_begin(stage: u32, bd: *mut blkdev);
-    fn cfst_floor_fail_end(stage: u32);
+    // The fixture's fault seams (CONFIG_SELFTEST and CONFIG_FAULTINJECT builds; ADR 0080 §3.3).
+    struct thread;
+    struct fi_stats {
+        hits: u64;
+    }
+    enum fi_kind: u32;
+    const FI_KMALLOC: fi_kind = 0;
+    const FI_BLK_SUBMIT: fi_kind = 1;
+    @cfg("CONFIG_FAULTINJECT")
+    fn faultinject_set(kind: fi_kind, every: u32, budget: u32, only: *mut thread);
+    @cfg("CONFIG_FAULTINJECT")
+    fn faultinject_clear(kind: fi_kind);
+    @cfg("CONFIG_FAULTINJECT")
+    fn faultinject_stats(kind: fi_kind, out: *mut fi_stats);
+    fn thread_current() -> *mut thread;
+    fn blkdev_get(bd: *mut blkdev);
+    fn blkdev_put(bd: *mut blkdev);
+
+    // The values and layout the C compiler checks (ADR 0080 §3.1), which the floor asserted.
+    const VFS_UMOUNT_FORCE: u32 = 1;
+    const EEXIST: i32 = 17;
+    const CFS_BLOCK: usize = 4096;
+    /// cosmofstest_lib.cee's syscall.h, vfs.h, errno.h and cosmofs_format.h values
+    @cvalue("COSMO_O_RDONLY == 0 && COSMO_O_WRONLY == 1 && COSMO_O_CREAT == 0x40 && COSMO_O_TRUNC == 0x200 && offsetof(struct cfs_mhdr, crc) == 24 && CFS_DVA(0, 12345) == 12345")
+    const COSMOFSTEST_LIB_FACT_0: bool = true;
+    /// cosmofstest_lib.cee's cosmofs.h and syscall.h sizes
+    @cvalue("sizeof(struct cosmofs_snap_info) == 104 && sizeof(struct cosmofs_snap_req) <= 96 && COSMOFS_SNAP_NAME_MAX + 1 == 32 && sizeof(struct cosmo_stat) <= 64")
+    const COSMOFSTEST_LIB_FACT_1: bool = true;
 }
 
-// ---- Values (asserted in cosmofstest_lib_floor.c) ----
+// ---- The engine mount's fault seams, and their self-test ----
 
-const EEXIST: i32 = 17;
+/// The stage the fixture's self-test fails (0: none), the device the mount published there, and the fault's hits. Only
+/// the serial self-test runner arms these.
+static mut ENGINE_FAIL_STAGE: u32 = 0;
+static mut ENGINE_OBSERVED: *mut blkdev = 0 as *mut blkdev;
+static mut ENGINE_FAIL_HITS: u64 = 0;
+
+/// Arms the fault the fixture's self-test injects at `stage`: a refused submit at 1, a failed allocation after.
+/// Safety: the serial self-test runner; `bd` is a live device.
+unsafe fn failBegin(stage: u32, bd: *mut blkdev) {
+    if (cfg("CONFIG_SELFTEST")) {
+        if (cfg("CONFIG_FAULTINJECT")) {
+            if (ENGINE_FAIL_STAGE != stage) {
+                return;
+            }
+            ENGINE_OBSERVED = bd;
+            blkdev_get(bd); // an inspection reference, independent of the fixture's
+            faultinject_set(if (stage == 1) FI_BLK_SUBMIT else FI_KMALLOC, 1, 1, thread_current());
+        }
+    }
+}
+
+/// Disarms it, keeping how often it fired.
+/// Safety: as failBegin.
+unsafe fn failEnd(stage: u32) {
+    if (cfg("CONFIG_SELFTEST")) {
+        if (cfg("CONFIG_FAULTINJECT")) {
+            if (ENGINE_FAIL_STAGE != stage) {
+                return;
+            }
+            let kind = if (stage == 1) FI_BLK_SUBMIT else FI_KMALLOC;
+            var st: fi_stats;
+            faultinject_stats(kind, borrow mut st as *mut fi_stats);
+            ENGINE_FAIL_HITS = st.hits;
+            faultinject_clear(kind);
+        }
+    }
+}
+
+/// cosmofs-fixture-cleanup: a mount that fails at each stage of its setup releases the RAM device it registered.
+/// Safety: the serial self-test runner; `reason` writable.
+@export("selftest_cosmofs_fixture_cleanup")
+@cfg("CONFIG_DEBUG")
+unsafe fn selftestFixtureCleanup(reason: *mut *CChar) -> bool {
+    if (cfg("CONFIG_SELFTEST")) {
+        if (cfg("CONFIG_FAULTINJECT")) {
+            var ok = true;
+            for (stage in 1u32..4) {
+                let _ = vfs_rmdir(0 as *mut vnode, eng());
+                ENGINE_FAIL_STAGE = stage;
+                ENGINE_OBSERVED = 0 as *mut blkdev;
+                ENGINE_FAIL_HITS = 0;
+                var published = 0 as *mut blkdev;
+                var why = 0 as *CChar;
+                let mounted = engineMount(borrow mut published as *mut *mut blkdev, 64, borrow mut why as *mut *CChar);
+                ENGINE_FAIL_STAGE = 0;
+                let bd = ENGINE_OBSERVED;
+                let released = !bd.isNull() && Ptr.toBorrow(bd as *blkdev).gone.load() != 0 &&
+                    kobject_refcount(bd as *kobject) == 1;
+                let injected = !mounted && published.isNull() && !why.isNull() && ENGINE_FAIL_HITS == 1;
+                var buffer: [u8; 128] = [0; 128];
+                var line = TextWriter.create(mut buffer[..]);
+                line.text("selftest: cosmofs-fixture-cleanup: stage=");
+                line.decimal(stage as u64);
+                line.text(" hits=");
+                line.decimal(ENGINE_FAIL_HITS);
+                line.text(" released=");
+                line.decimal(if (released) 1 else 0);
+                KernelLog.send(LogLevel.Info, line);
+                // Reclaim old behaviour's leaks after observing them, so later tests stay independent.
+                if (mounted) {
+                    let _ = vfs_umount2(eng(), VFS_UMOUNT_FORCE);
+                }
+                if (!bd.isNull()) {
+                    if (Ptr.toBorrow(bd as *blkdev).gone.load() == 0) {
+                        ramblk_destroy(bd);
+                    }
+                    blkdev_put(bd);
+                }
+                ENGINE_OBSERVED = 0 as *mut blkdev;
+                let _ = vfs_rmdir(0 as *mut vnode, eng());
+                ok = ok && injected && released;
+            }
+            if (!ok) {
+                return failed(reason, "fixture cleanup: registered RAM device retained after setup failure\0");
+            }
+        }
+    }
+    return true;
+}
+
+// ---- Values ----
+
 const O_RDONLY: u32 = 0;
 const O_WRONLY: u32 = 1;
 const O_CREAT: u32 = 0x40;
 const O_TRUNC: u32 = 0x200;
-const VFS_UMOUNT_FORCE: u32 = 1;
-const CFS_BLOCK: usize = 4096;
 const MHDR_CRC: usize = 24;
 const SNAP_INFO: usize = 104;
 
@@ -213,25 +329,25 @@ unsafe fn engineMount(bdp: *mut *mut blkdev, nblocks: u64, reason: *mut *CChar) 
         return failed(reason, "check failed: bd != NULL at line 213\0");
     }
     var createdDir = false;
-    cfst_floor_fail_begin(1, bd);
+    failBegin(1, bd);
     let fmt = cosmofs_format(bd);
-    cfst_floor_fail_end(1);
+    failEnd(1);
     var why = 0 as *CChar;
     if (fmt != 0) {
         why = "check failed: fmt == 0 at line 221\0".ptr as *CChar;
     } else {
-        cfst_floor_fail_begin(2, bd);
+        failBegin(2, bd);
         let mk = vfs_mkdir(0 as *mut vnode, eng(), 493);
-        cfst_floor_fail_end(2);
+        failEnd(2);
         if (mk == 0) {
             createdDir = true;
         }
         if (!(mk == 0 || mk == -EEXIST)) {
             why = "check failed: mk == 0 || mk == -EEXIST at line 230\0".ptr as *CChar;
         } else {
-            cfst_floor_fail_begin(3, bd);
+            failBegin(3, bd);
             let mrc = vfs_mount(eng(), "cosmofs\0".ptr as *CChar, bd, 0);
-            cfst_floor_fail_end(3);
+            failEnd(3);
             if (mrc != 0) {
                 why = "check failed: mrc == 0 at line 236\0".ptr as *CChar;
             } else {

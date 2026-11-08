@@ -54,12 +54,6 @@ const struct cosmofs_snap_info *cfst_info_named(const struct cosmofs_snap_info *
 /* /mnt/eng unmounted and mounted again, write-back off. */
 bool cfst_remount_eng(struct blkdev *bd, const char **reason);
 
-/* cosmofstest_lib_floor.c: the engine mount's fault seams. */
-void cfst_floor_fail_begin(uint32_t stage, struct blkdev *bd);
-void cfst_floor_fail_end(uint32_t stage);
-/* cosmofstest_lib_floor.c: cosmofs_stats of `mnt` into `out`, a struct cosmofs_stats. */
-int cfst_stats(struct mount *mnt, void *out);
-
 /* `CHECK_CLEAN(r)`: a report that is not clean fails the test, its classes the reason. */
 #define CHECK_CLEAN(r)                                                         \
     do {                                                                       \
