@@ -22,7 +22,9 @@ sources and nothing else, in a throwaway worktree, so the check fails. A
 source that has since become CeeSafe has no C for the diff to apply to:
 freecount's mount is cosmofs_core.cee (roadmap 2.0 SA7), so where the tree
 has it, --old instead moves the comparison back after the replay, which is
-what the fix's diff undoes.
+what the fix's diff undoes; zero's VFS is vfs_file.cee, so --old takes the
+filled read out of a file's io type (vfs_floor.c), and the system call
+reads one call at a time, as it did before the fix.
 Each commit is found by its subject, which --grep matches anywhere in a
 message (a squashed merge's body lists them); failing that, --tree's own
 commit when it changes the sources; or name them with --fix (repeatable,
@@ -49,7 +51,11 @@ DEFECTS = {
         sources=["kernel/syscall/native.c", "kernel/include/kernel/object.h", "kernel/include/kernel/vfs.h",
                  "kernel-services/vfs/vfs.c", "kernel-services/vfs/memdev.c", "kernel-services/vfs/vfstest.c",
                  "kernel/core/selftest.c", "kernel/include/kernel/selftest.h"],
-        target="test-busybox", ok="BBTEST: ok dd-zero-1m", failed="BBTEST: FAIL dd-zero-1m: want [4+0 4+0 4194304]"),
+        target="test-busybox", ok="BBTEST: ok dd-zero-1m", failed="BBTEST: FAIL dd-zero-1m: want [4+0 4+0 4194304]",
+        # The VFS and /dev/zero are CeeSafe (vfs_file.cee, memdev.cee): where they are, a file's io type loses its
+        # filled read, so the system call reads one call at a time (object.h) -- what it did before the fix.
+        cee="kernel-services/vfs/vfs_file.cee",
+        edit=("kernel-services/vfs/vfs_floor.c", "    .read_filled = vfs_file_obj_read_filled,\n", "")),
     "wget": dict(
         subjects=["wget: a refused certificate ends on ssl_client's reason", REVIEW],
         sources=["ports/busybox/wget-ssl-client.patch"],
@@ -110,7 +116,13 @@ def main():
     subprocess.run(["git", "-C", str(ROOT), "worktree", "add", "--detach", str(tree), a.tree], check=True,
                    stdout=subprocess.DEVNULL)
     try:
-        if a.old and (tree / d.get("cee", "-")).is_file():
+        if a.old and (tree / d.get("cee", "-")).is_file() and "edit" in d:
+            path, text, old = d["edit"]
+            body = (tree / path).read_text()
+            if body.count(text) != 1:
+                sys.exit(f"{path}: the fixed text is not there exactly once; the probe is stale")
+            (tree / path).write_text(body.replace(text, old))
+        elif a.old and (tree / d.get("cee", "-")).is_file():
             freecount_old(tree / d["cee"])
         elif a.old:
             shas = a.fix

@@ -39,12 +39,26 @@ CASES = {
                 "    fn vfs_bdev_mounted_except(bd: *blkdev, other: *mount) -> bool;\n"
                 "    fn vfs_bdev_mounted(bd: *blkdev) -> bool;\n")],
               r"test-mirror: FAIL: replace: the boot's check of the root"),
-    "gone": ([("kernel-services/vfs/vfs.c",
-               "    return blk_part_disk(a) == b || blk_part_disk(b) == a;\n",
-               "    struct blk_part_info pi;\n"
-               "    if (blk_part_info(a, &pi) && strcmp(pi.disk, b->name) == 0)\n"
-               "        return true;\n"
-               "    return blk_part_info(b, &pi) && strcmp(pi.disk, a->name) == 0;\n")],
+    # bdev_related is CeeSafe too (vfs_mount.cee's related): the comparison by name, and the import it needs.
+    "gone": ([("kernel-services/vfs/vfs_mount.cee",
+               "unsafe fn related(a: *blkdev, b: *blkdev) -> bool =>\n"
+               "    a == b || blk_part_disk(a) == b || blk_part_disk(b) == a;\n",
+               "unsafe fn related(a: *blkdev, b: *blkdev) -> bool {\n"
+               "    if (a == b) {\n        return true;\n    }\n"
+               "    var slot: [u64; 8] = [0; 8]; // a blk_part_info_t\n"
+               "    let pi = borrow mut slot as *mut [u64; 8] as *mut PartInfo;\n"
+               "    if (blk_part_info(a, pi) && strcmp(borrow Ptr.toBorrow(pi as *PartInfo).disk as *[u8; 16] as *CChar,\n"
+               "        borrow Ptr.toBorrow(b).name as *[u8; 16] as *CChar) == 0) {\n        return true;\n    }\n"
+               "    return blk_part_info(b, pi) && strcmp(borrow Ptr.toBorrow(pi as *PartInfo).disk as *[u8; 16] as\n"
+               "        *CChar, borrow Ptr.toBorrow(a).name as *[u8; 16] as *CChar) == 0;\n}\n"),
+              ("kernel-services/vfs/vfs_mount.cee",
+               "    fn blk_part_disk(bd: *blkdev) -> *blkdev;\n",
+               "    fn blk_part_disk(bd: *blkdev) -> *blkdev;\n"
+               "    fn blk_part_info(bd: *blkdev, out: *mut PartInfo) -> bool;\n"),
+              ("kernel-services/vfs/vfs_mount.cee",
+               "    struct cosmo_keyslot;\n",
+               "    struct cosmo_keyslot;\n"
+               "    @ctype(\"blk_part_info_t\")\n    struct PartInfo {\n        disk: [u8; 16];\n    }\n")],
              r"test-mirror: FAIL: cosmo-pool replace: no line matching '\^replace-status=0\$'"),
 }
 

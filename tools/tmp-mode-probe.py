@@ -10,13 +10,12 @@ ramfs on /tmp after switching to the disk root and left that ramfs's root
 at mode 0755, so no uid but 0 could write in /tmp (inventory section 18,
 found in P6's review).
 
---old reverse-applies the fix commit's kernel and init changes (the
-COSMO_MOUNT_SCRATCH flag and init's use of it, and nothing else) in a
-throwaway worktree, so the write is refused and the reboot stage fails.
-The fix commit is found by its subject, or named with --fix; when the
-subject is not in --tree's history (a squashed merge), --tree's own
-commit is used if it changes those files. The check runs in a release test-install on
-either architecture.
+--old makes a ramfs's root 0755 whatever the mount's flags, in a throwaway
+worktree: what the kernel did before the fix, which init's SCRATCH mount
+of /tmp then cannot change, so the write is refused and the reboot stage
+fails. (The fix commit's diff no longer reverse-applies: ramfs is CeeSafe,
+ramfs.cee, roadmap 2.0 SA7, and init.c has moved on.) The check runs in a
+release test-install on either architecture.
 
 Logs stay under out/tmp-mode-probe/<arch>-<mode>. Exit 0 when the mode
 shows what it should (fixed: test-install PASS; old: the reboot stage
@@ -29,9 +28,10 @@ import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-SUBJECT = "init: /tmp on a disk root is a scratch ramfs, 01777 from its mount"
-SOURCES = ["kernel/include/uapi/cosmo/syscall.h", "kernel/include/kernel/vfs.h", "kernel/syscall/native.c",
-           "kernel-services/vfs/ramfs.c", "userland/init/init.c"]
+# ramfs's root mode at mount, and the one before the fix.
+RAMFS = "kernel-services/vfs/ramfs.cee"
+FIXED = "    let mode = if ((flags & MOUNT_SCRATCH) != 0) MODE_TMP else MODE_EXEC;\n"
+OLD = "    let mode = if ((flags & MOUNT_SCRATCH) != 0) MODE_EXEC else MODE_EXEC; // TMP MODE PROBE (not for merge)\n"
 OK = "test-install: PASS"
 FAILED = "test-install: FAIL: uid 1000 writing in the installed system's /tmp: no line matching '^tmp=0$'"
 
@@ -41,7 +41,6 @@ def main():
     ap.add_argument("--old", action="store_true")
     ap.add_argument("--arch", choices=("x86_64", "aarch64"), default="x86_64")
     ap.add_argument("--tree", default="HEAD")
-    ap.add_argument("--fix", help="the commit that made /tmp 01777 (default: found by its subject)")
     a = ap.parse_args()
     mode = "old" if a.old else "fixed"
     work = ROOT / "out" / "tmp-mode-probe" / f"{a.arch}-{mode}"
@@ -56,17 +55,11 @@ def main():
                    stdout=subprocess.DEVNULL)
     try:
         if a.old:
-            sha = a.fix or subprocess.check_output(
-                ["git", "-C", str(ROOT), "log", "-1", "--format=%H", "--fixed-strings", f"--grep={SUBJECT}", a.tree],
-                text=True).strip()
-            if not sha and subprocess.check_output(["git", "-C", str(ROOT), "show", "--format=", a.tree, "--"] + SOURCES):
-                sha = a.tree   # a squashed merge: the tree's own commit is the fix
-            if not sha:
-                sys.exit(f"no commit '{SUBJECT}' reachable from {a.tree}; name it with --fix")
-            patch = subprocess.check_output(["git", "-C", str(ROOT), "show", "--format=", sha, "--"] + SOURCES)
-            if not patch:
-                sys.exit(f"commit {sha[:8]} does not change {SOURCES}")
-            subprocess.run(["git", "-C", str(tree), "apply", "-R"], input=patch, check=True)
+            src = tree / RAMFS
+            body = src.read_text()
+            if body.count(FIXED) != 1:
+                sys.exit(f"{RAMFS}: the root's mode is not there exactly once; the probe is stale")
+            src.write_text(body.replace(FIXED, OLD))
         make = "gmake" if sys.platform == "darwin" else "make"
         out = tree / "out" / "rel"
         args = [make, "-C", str(tree), "-j8", f"ARCH={a.arch}", "BUILD=release", f"OUT={out}",

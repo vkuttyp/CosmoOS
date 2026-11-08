@@ -9,10 +9,10 @@ mount refused ("Resource busy") with the first still there. Before the fix
 nothing claimed a device: both mounts succeeded, two cosmofs instances
 writing one disk (found in shell completeness S6's review).
 
---old reverse-applies the fix commit's kernel-services/vfs/vfs.c and
-kernel/include/kernel/vfs.h (the claim, and nothing else) in a throwaway
-worktree, so the second mount succeeds and mount-twice fails. The fix
-commit is found by its subject, or named with --fix. The check runs in a
+--old takes the claim out of a mount in a throwaway worktree: the VFS is
+CeeSafe (vfs_mount.cee, roadmap 2.0 SA7), so where the fix commit's diff
+of vfs.c no longer applies, do_mount claims nothing, as before the fix.
+The second mount then succeeds and mount-twice fails. The check runs in a
 release test-busybox on either architecture.
 
 Logs stay under out/mount-claim-probe/<arch>-<mode>. Exit 0 when the mode
@@ -26,8 +26,10 @@ import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-SUBJECT = "vfs: a block device is one mount's at a time"
-SOURCES = ["kernel-services/vfs/vfs.c", "kernel/include/kernel/vfs.h"]
+# do_mount's claim, and the mount without one.
+MOUNT = "kernel-services/vfs/vfs_mount.cee"
+CLAIM = "    var rc = if (bdev.isNull()) 0 else claim(mnt);\n"
+NO_CLAIM = "    var rc: i32 = 0; // MOUNT CLAIM PROBE: no claim, as before the fix (not for merge)\n"
 OK = "BBTEST: ok mount-twice"
 FAILED = "BBTEST: FAIL mount-twice: want [1 0 1] got [0 1 1]"
 
@@ -37,7 +39,6 @@ def main():
     ap.add_argument("--old", action="store_true")
     ap.add_argument("--arch", choices=("x86_64", "aarch64"), default="x86_64")
     ap.add_argument("--tree", default="HEAD")
-    ap.add_argument("--fix", help="the commit that added the claim (default: found by its subject)")
     a = ap.parse_args()
     mode = "old" if a.old else "fixed"
     work = ROOT / "out" / "mount-claim-probe" / f"{a.arch}-{mode}"
@@ -52,15 +53,11 @@ def main():
                    stdout=subprocess.DEVNULL)
     try:
         if a.old:
-            sha = a.fix or subprocess.check_output(
-                ["git", "-C", str(ROOT), "log", "-1", "--format=%H", "--fixed-strings", f"--grep={SUBJECT}", a.tree],
-                text=True).strip()
-            if not sha:
-                sys.exit(f"no commit '{SUBJECT}' reachable from {a.tree}; name it with --fix")
-            patch = subprocess.check_output(["git", "-C", str(ROOT), "show", "--format=", sha, "--"] + SOURCES)
-            if not patch:
-                sys.exit(f"commit {sha[:8]} does not change {SOURCES}")
-            subprocess.run(["git", "-C", str(tree), "apply", "-R"], input=patch, check=True)
+            src = tree / MOUNT
+            body = src.read_text()
+            if body.count(CLAIM) != 1:
+                sys.exit(f"{MOUNT}: the claim is not there exactly once; the probe is stale")
+            src.write_text(body.replace(CLAIM, NO_CLAIM))
         make = "gmake" if sys.platform == "darwin" else "make"
         out = tree / "out" / "rel"
         args = [make, "-C", str(tree), "-j8", f"ARCH={a.arch}", "BUILD=release", f"OUT={out}",

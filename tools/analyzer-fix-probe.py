@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check a diagnostic repair, or restore its source from main in a worktree.
+"""Check a diagnostic repair, or show the defect in the baseline's own tree (--old).
 
 The analyzer itself is the deterministic check. Only the named function's
 diagnostic is the verdict; a compiler failure is never a successful proof.
@@ -50,6 +50,8 @@ MOVED = {
     "cosmofs-mirror": "kernel-services/filesystem/cosmofs/cosmofstest_media.c",
     "cosmofs-compress": "kernel-services/filesystem/cosmofs/cosmofstest_media.c",
     "fsctl-check": "kernel-services/filesystem/cosmofs/cosmofstest_orphan.c",
+    # vfstest.c's are CeeSafe too (vfstest_dev.cee has the per-open fsctl result).
+    "vfs-result": "kernel-services/vfs/vfstest_dev.c",
 }
 
 
@@ -65,20 +67,36 @@ def main():
     fixed_function = case[4] if len(case) > 4 else function
     work = ROOT / "out/analyzer-fix-probe" / (args.arch + ("-old" if args.old else "-fixed")) / args.case
     work.mkdir(parents=True, exist_ok=True)
+    # The old mode analyzes the baseline's own tree, where the defect was. It used to overlay the baseline's file on
+    # --tree, which stops working once the file is CeeSafe or taken apart (nothing builds it) or today's headers have
+    # moved on (kill-current's native.c, 2026-11-08): the baseline built its file, and needs no CeeSafe compiler.
+    revision = BASELINE if args.old else args.tree
+    gone = args.old
     with tempfile.TemporaryDirectory(prefix="tree-", dir=work) as directory:
         tree = Path(directory) / "tree"
-        subprocess.run(["git", "-C", str(ROOT), "worktree", "add", "--detach", str(tree), args.tree], check=True)
+        subprocess.run(["git", "-C", str(ROOT), "worktree", "add", "--detach", str(tree), revision], check=True)
         try:
-            if args.old:
-                old = subprocess.check_output(["git", "-C", str(ROOT), "show", BASELINE + ":" + source])
-                (tree / source).write_bytes(old)
             out = tree / "out/probe"
             analyzed = source if args.old else MOVED.get(args.case, source)
             report = out / Path(analyzed).with_suffix(".analyzed")
             make = "gmake" if sys.platform == "darwin" else "make"
+            command = [make, "-C", str(tree), "ARCH=" + args.arch, "OUT=" + str(out), str(report)]
             with (work / "build.log").open("w") as log:
-                rc = subprocess.run([make, "-C", str(tree), "ARCH=" + args.arch,
-                                     "OUT=" + str(out), str(report)], stdout=log, stderr=subprocess.STDOUT).returncode
+                if args.old and gone:
+                    # The baseline's rule prints text and touches the report; its command, run with plist output into
+                    # the report, gives the findings with their functions as today's rule does.
+                    dry = subprocess.run(command[:3] + ["-n", "-B"] + command[3:], capture_output=True, text=True)
+                    lines = [ln for ln in dry.stdout.splitlines() if "--analyze" in ln and source in ln]
+                    if len(lines) != 1:
+                        print("PROBE: FAIL: the baseline's analyzer command is not one line; see " + str(work))
+                        (work / "build.log").write_text(dry.stdout + dry.stderr)
+                        return 1
+                    report.parent.mkdir(parents=True, exist_ok=True)
+                    run = lines[0].replace("-analyzer-output=text", "-analyzer-output=plist").replace(
+                        "-o /dev/null", "-o " + str(report))
+                    rc = subprocess.run(run, shell=True, cwd=tree, stdout=log, stderr=subprocess.STDOUT).returncode
+                else:
+                    rc = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT).returncode
             if rc:
                 print("PROBE: FAIL: analyzer command failed; see " + str(work / "build.log"))
                 return 1

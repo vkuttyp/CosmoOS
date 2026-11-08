@@ -17,9 +17,10 @@ three AArch64, on 2026-09-23) -- a rate, which is what this probe
 measures and what a proof replaces.
 
 This measures that. It puts the bug back at ONE site -- the native
-`open`, which is what the walker in step 4 calls -- and poisons every
-freed vnode, so a walk that resumes inside one meets 0x5a5a... instead of
-memory that still looks like a directory. Then boot, as many times as
+`open`, which is what the walker in step 4 calls. A debug build poisons
+every freed vnode itself (vfs_floor.c, since the held-walk unit), so a
+walk that resumes inside one meets 0x5a5a... instead of memory that still
+looks like a directory. Then boot, as many times as
 patience allows, and count:
 
     boot-test: PASS ...                       the test did not see the bug
@@ -54,8 +55,7 @@ import subprocess
 import sys
 
 NATIVE = 'kernel/syscall/native.c'
-VFS = 'kernel-services/vfs/vfs.c'
-FILES = [NATIVE, VFS]
+FILES = [NATIVE]
 BACKUP = '.cwd-race-probe.orig'
 STAMP = '.cwd-race-probe.applied'
 
@@ -74,16 +74,6 @@ EDITS = {
         "    vnode_put(cwd);\n",
         "    struct vnode *cwd = process_current()->cwd_locked;   /* CWD RACE PROBE: the unowned read (not for merge) */\n"
         "    rc = vfs_open(cwd, path, flags, mode, &f);\n",
-    )],
-    # A freed vnode that still looks like a directory hides the bug; one
-    # full of 0x5a does not. The pmm poisons freed frames for the same
-    # reason (kernel/memory/pmm.c); the slab does not poison objects.
-    VFS: [(
-        "        vn->ops->evict(vn);\n"
-        "    kfree(vn);\n",
-        "        vn->ops->evict(vn);\n"
-        "    memset(vn, 0x5a, sizeof(*vn));   /* CWD RACE PROBE: poison the freed vnode (not for merge) */\n"
-        "    kfree(vn);\n",
     )],
 }
 
@@ -108,7 +98,7 @@ def apply_():
         shutil.copyfile(path, path + BACKUP)
         open(path, 'w').write(text)
         open(path + STAMP, 'w').write(_digest(text))
-    print("applied: the native open reads the cwd unowned and freed vnodes are poisoned.")
+    print("applied: the native open reads the cwd unowned (a debug build poisons freed vnodes).")
     print("Build and boot; a PASS is the measurement. Then: %s revert" % sys.argv[0])
 
 

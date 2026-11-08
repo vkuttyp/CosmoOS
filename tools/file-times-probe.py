@@ -7,9 +7,10 @@ Over ssh on Parallels Desktop, `touch now.txt; ls -l now.txt` showed Jan 1
 1970 while `date` showed 2026: vfs_now_ns returned the monotonic clock. The
 fix commit makes it the wall clock, and lxtest (the Linux ABI user test,
 every debug boot) checks a new file's mtime against CLOCK_REALTIME. --old
-reverse-applies the fix commit's kernel-services/vfs/vfs.c in a throwaway
-worktree: the boot's Linux ABI test then fails on that check, the mtime
-being the uptime in seconds. Logs stay under out/file-times-probe/<arch>-<mode>.
+makes vfs_now_ns the monotonic clock again in a throwaway worktree (it is
+vfs_vnode.cee's since roadmap 2.0 SA7, where the fix's diff of vfs.c no
+longer applies): the boot's Linux ABI test then fails on that check, the
+mtime being the uptime in seconds. Logs stay under out/file-times-probe/<arch>-<mode>.
 Exit 0 when the mode shows what it should (fixed: LINUXTEST: PASS; old: the
 check's FAIL line), else 1.
 """
@@ -21,8 +22,9 @@ import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-SUBJECT = "vfs: stamp files with the wall clock, not the time since boot"
-SOURCE = "kernel-services/vfs/vfs.c"
+SOURCE = "kernel-services/vfs/vfs_vnode.cee"
+FIXED = "fn nowNs() -> u64 => unsafe { clock_realtime_ns() };"
+OLD = "fn nowNs() -> u64 => unsafe { clock_now_ns() }; // FILE TIMES PROBE: the monotonic clock (not for merge)"
 OLD_LINE = "LINUXTEST: FAIL later.st_mtime >= rt0.tv_sec - 1"
 
 
@@ -43,12 +45,11 @@ def main():
                    stdout=subprocess.DEVNULL)
     try:
         if a.old:
-            sha = subprocess.check_output(["git", "-C", str(ROOT), "log", "-1", "--format=%H", "--fixed-strings",
-                                           f"--grep={SUBJECT}", a.tree], text=True).strip()
-            if not sha:
-                sys.exit(f"no commit '{SUBJECT}' reachable from {a.tree}")
-            patch = subprocess.check_output(["git", "-C", str(ROOT), "show", "--format=", sha, "--", SOURCE])
-            subprocess.run(["git", "-C", str(tree), "apply", "-R"], input=patch, check=True)
+            src = tree / SOURCE
+            body = src.read_text()
+            if body.count(FIXED) != 1:
+                sys.exit(f"{SOURCE}: vfs_now_ns is not there exactly once; the probe is stale")
+            src.write_text(body.replace(FIXED, OLD))
         make = "gmake" if sys.platform == "darwin" else "make"
         serial = work / "boot.serial"
         with (work / "boot.result").open("w") as out:
