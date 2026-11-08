@@ -8,8 +8,8 @@
 //
 // struct cfs, the pool and its copies, the pacing state and the /dev/fsctl records stay C (cosmofs_internal.h,
 // kernel/storage.h, kernel/cosmofs.h). The pacing state the C kept on the stack is a zeroed slot of words, checked
-// against its C size (tests/host/test_cfsresilver.c). cosmofs_resilver_floor.c keeps the sysctl's variable,
-// g_cosmofs_resilver_rate, and makes the call to cfs_pace, whose name is the pacing state's too.
+// against its C size (tests/host/test_cfsresilver.c). The sysctl's variable, g_cosmofs_resilver_rate, is this file's,
+// C data the sysctl reads and writes atomically (ADR 0080 §3.2).
 
 @header("kernel/blk.h", "kernel/vfs.h", "kernel/storage.h", "kernel/thread.h", "kernel/timer.h", "kernel/wait.h",
     "kernel/random.h", "kernel/cosmofs.h", "cosmofs_internal.h")
@@ -162,8 +162,9 @@ extern "C" {
     fn cfs_dva_lin(fs: *cfs, dva: u64) -> u64;
     fn cfs_bitmap_test(fs: *cfs, lin: u64) -> bool;
     fn cfs_pace_init(p: *mut cfs_pace, rate: u32);
-    /// cosmofs_resilver_floor.c: cfs_pace, whose name is the pacing state's too.
-    fn cfs_resilver_floor_pace(fs: *mut cfs, p: *mut cfs_pace) -> bool;
+    /// cfs_pace, whose name is the pacing state's too (ADR 0080 §3.5).
+    @cname("cfs_pace")
+    fn cfsPace(fs: *mut cfs, p: *mut cfs_pace) -> bool;
     fn cosmofs_commit_mount(mnt: *mut mount) -> i32;
     fn blk_flush(bd: *mut blkdev) -> i32;
     fn blk_find(name: *CChar) -> *mut blkdev;
@@ -174,8 +175,8 @@ extern "C" {
     fn random_u64() -> u64;
     fn clock_now_ns() -> u64;
     fn clock_since_ns(stamp: u64) -> u64;
-    /// cosmofs_resilver_floor.c: the address of g_cosmofs_resilver_rate, the sysctl's variable (fs.resilver_rate).
-    fn cfs_resilver_floor_rate() -> *mut u32;
+    /// cosmofs.h's default for the sysctl fs.resilver_rate.
+    const COSMOFS_RESILVER_RATE_DEFAULT: u32 = 8192;
     fn memcmp(a: *void, b: *void, n: usize) -> i32;
     fn memcpy(dst: *mut void, src: *void, n: usize) -> *mut void;
     fn memset(p: *mut void, c: i32, n: usize) -> *mut void;
@@ -287,9 +288,12 @@ unsafe fn notify(p: *mut spool) {
     }
 }
 
+/// g_cosmofs_resilver_rate (cosmofs.h), the sysctl's variable (fs.resilver_rate): blocks a resilver copies a second.
+@export("g_cosmofs_resilver_rate")
+static RESILVER_RATE: AtomicU32 = AtomicU32.constant(COSMOFS_RESILVER_RATE_DEFAULT);
+
 /// Safety: `fs` is a filesystem's state.
-unsafe fn resilverRate() -> u32 =>
-    Ptr.toBorrow(cfs_resilver_floor_rate() as *AtomicU32).loadWith(LoadOrdering.Relaxed);
+unsafe fn resilverRate() -> u32 => RESILVER_RATE.loadWith(LoadOrdering.Relaxed);
 
 /// Safety: `fs` is a filesystem's state.
 unsafe fn stopOf(fs: *mut cfs) -> borrow(static) AtomicU32 =>
@@ -798,7 +802,7 @@ unsafe fn rsStep(fs: *mut cfs, buf: *mut u8, pace: *mut cfs_pace, budget: *mut u
             q.state_seq += 1;
             notify(p);
         }
-        if (cfs_resilver_floor_pace(fs, pace)) {
+        if (cfsPace(fs, pace)) {
             return true; // the lock was let go: start again from the state as it is
         }
     }

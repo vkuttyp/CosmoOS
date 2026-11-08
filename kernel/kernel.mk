@@ -229,7 +229,6 @@ KERNEL_GENERIC_SRCS := \
 	kernel-services/filesystem/cosmofs/cfsparse.c \
 	kernel-services/filesystem/cosmofs/cosmofs_scrub.c \
 	kernel-services/filesystem/cosmofs/cosmofs_resilver.c \
-	kernel-services/filesystem/cosmofs/cosmofs_resilver_floor.c \
 	kernel-services/filesystem/cosmofs/cosmofs_check.c \
 	kernel-services/filesystem/cosmofs/cosmofs_check_floor.c \
 	kernel-services/filesystem/cosmofs/cosmofs_crypt.c \
