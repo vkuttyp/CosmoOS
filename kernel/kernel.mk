@@ -204,7 +204,6 @@ KERNEL_GENERIC_SRCS := \
 	kernel-services/filesystem/cosmofs/cosmofs_format.c \
 	kernel-services/filesystem/cosmofs/cosmofs_corrupt.c \
 	kernel-services/filesystem/cosmofs/cosmofs_hooks.c \
-	kernel-services/filesystem/cosmofs/cosmofs_buf_floor.c \
 	kernel-services/filesystem/cosmofs/cosmofs_snap.c \
 	kernel-services/filesystem/cosmofs/cosmofs_snapctl.c \
 	kernel-services/filesystem/cosmofs/cosmofs_csum.c \
@@ -216,13 +215,11 @@ KERNEL_GENERIC_SRCS := \
 	kernel-services/filesystem/cosmofs/cosmofs_rollback.c \
 	kernel-services/filesystem/cosmofs/cosmofs_clone.c \
 	kernel-services/filesystem/cosmofs/cosmofs_member.c \
-	kernel-services/filesystem/cosmofs/cosmofs_member_floor.c \
 	kernel-services/filesystem/cosmofs/cfsparse.c \
 	kernel-services/filesystem/cosmofs/cosmofs_scrub.c \
 	kernel-services/filesystem/cosmofs/cosmofs_resilver.c \
 	kernel-services/filesystem/cosmofs/cosmofs_check.c \
 	kernel-services/filesystem/cosmofs/cosmofs_crypt.c \
-	kernel-services/filesystem/cosmofs/cosmofs_crypt_floor.c \
 	kernel-services/filesystem/cosmofs/cosmofs.c \
 	kernel-services/filesystem/cosmofs/cosmofstest_lib.c \
 	kernel-services/filesystem/cosmofs/cosmofstest_lib_floor.c \

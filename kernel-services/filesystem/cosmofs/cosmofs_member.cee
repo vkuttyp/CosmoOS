@@ -8,8 +8,8 @@
 //
 // struct cfs, the pool and its copies, the labels, the superblocks, the member table and the copy-state records stay
 // C (cosmofs_internal.h, cosmofs_format.h, kernel/storage.h). What the C kept on the stack is kept in zeroed slots of
-// words, checked against their C sizes (tests/host/test_cfsmember.c). cosmofs_member_floor.c makes the two calls whose
-// prototypes CeeSafe cannot write (cfs_mac_seal and cfs_mac_ok, whose domain is a C char).
+// words, checked against their C sizes (tests/host/test_cfsmember.c). cfs_mac_seal's and cfs_mac_ok's domain is a C
+// char (ADR 0080 §3.5); the copy record's layout and states are the pool's, which the C compiler checks.
 
 @header("kernel/blk.h", "kernel/vfs.h", "kernel/storage.h", "cosmofs_internal.h")
 extern "C" {
@@ -165,10 +165,15 @@ extern "C" {
     fn cfs_free_block_deferred(fs: *mut cfs, blk: u64);
     fn cfs_snap_raise(fs: *mut cfs) -> i32;
     fn vfs_mount_set_held(mnt: *mut mount, bd: **mut blkdev, n: u32) -> i32;
-    /// cosmofs_member_floor.c: cfs_mac_seal and cfs_mac_ok over a label (CFS_MAC_LABEL, at its crc), whose domain is
-    /// a C char.
-    fn cfs_member_floor_seal(mac: *cfs_mac, block: *mut u8);
-    fn cfs_member_floor_sealed(mac: *cfs_mac, block: *u8) -> bool;
+    /// cosmofs_buf.cee's MAC: a label's seal and check (CFS_MAC_LABEL, at its crc).
+    fn cfs_mac_seal(m: *cfs_mac, domain: CChar, block: *mut u8, off: usize);
+    fn cfs_mac_ok(m: *cfs_mac, domain: CChar, block: *u8, off: usize) -> bool;
+    const CFS_MAC_LABEL: u8 = 76;
+    @cvalue("offsetof(struct cfs_label, crc)")
+    const LABEL_CRC_AT: usize = 72;
+    /// The copy record holds the pool's dirty bitmap and four copies in their states, and fits one block.
+    @cvalue("CFS_COPY_DIRTY_BYTES == POOL_DIRTY_BYTES && sizeof(struct cfs_copy_rec) == 1000 && sizeof(struct cfs_copystate) <= CFS_BLOCK - CFS_MHDR_SIZE && CFS_MAX_COPIES == 4 && POOL_MAX_COPIES == 4 && CFS_COPY_ONLINE == POOL_COPY_ONLINE && CFS_COPY_MISSING == POOL_COPY_MISSING && CFS_COPY_OFFLINE == POOL_COPY_OFFLINE && CFS_COPY_FAULTED == POOL_COPY_FAULTED && CFS_COPY_RESILVERING == POOL_COPY_RESILVERING")
+    const COPY_RECORD_IS_POOLS: bool = true;
     fn memcpy(dst: *mut void, src: *void, n: usize) -> *mut void;
     fn memset(p: *mut void, c: i32, n: usize) -> *mut void;
     fn memcmp(a: *void, b: *void, n: usize) -> i32;
@@ -335,7 +340,7 @@ unsafe fn linDva(fs: *cfs, lin: u64) -> u64 {
 /// Safety: `mac` null or a MAC key, `block` a label block.
 unsafe fn labelSeal(mac: *cfs_mac, block: *mut u8) {
     if (!mac.isNull() && Ptr.toBorrow(mac).on) {
-        cfs_member_floor_seal(mac, block);
+        cfs_mac_seal(mac, CFS_MAC_LABEL as CChar, block, LABEL_CRC_AT);
         return;
     }
     let crc = cfs_label_crc(block as *u8);
@@ -348,7 +353,7 @@ const LABEL_CRC: usize = 72;
 /// Safety: as labelSeal.
 unsafe fn labelSealed(mac: *cfs_mac, block: *u8) -> bool {
     if (!mac.isNull() && Ptr.toBorrow(mac).on) {
-        return cfs_member_floor_sealed(mac, block);
+        return cfs_mac_ok(mac, CFS_MAC_LABEL as CChar, block, LABEL_CRC_AT);
     }
     return cfs_label_crc_ok(block);
 }

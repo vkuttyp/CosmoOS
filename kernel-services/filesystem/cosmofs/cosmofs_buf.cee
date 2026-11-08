@@ -8,10 +8,10 @@
 // Rules (docs/kernel-services/vfs/design.md): a metadata block from a committed generation is never modified in place:
 // it is copied first, and the copy is sealed with the open transaction's generation.
 //
-// struct cfs, the buffers and the set-aside stay C (cosmofs_internal.h). cosmofs_buf_floor.c keeps the metadata MAC,
-// whose domain is a C char, and its seal and check of a header and a superblock.
+// struct cfs, the buffers and the set-aside stay C (cosmofs_internal.h). The metadata MAC is this file's too: its
+// domain is a C char (ADR 0080 §3.5), and its BLAKE2b state a C local (§3.4).
 
-@header("kernel/kmalloc.h", "kernel/string.h", "cosmofs_internal.h")
+@header("kernel/blake2b.h", "kernel/kmalloc.h", "kernel/string.h", "cosmofs_internal.h")
 extern "C" {
     struct spool {
         nmembers: u32;
@@ -89,11 +89,68 @@ extern "C" {
     fn kzalloc(size: usize) -> *mut void;
     fn memcpy(dst: *mut void, src: *void, n: usize) -> *mut void;
     fn memset(p: *mut void, c: i32, n: usize) -> *mut void;
-    /// cosmofs_buf_floor.c: the MAC's seal and check of a header (domain 'H') and of a superblock (domain 'S').
-    fn cfs_buf_floor_seal_hdr(m: *cfs_mac, block: *mut u8);
-    fn cfs_buf_floor_hdr_ok(m: *cfs_mac, block: *u8) -> bool;
-    fn cfs_buf_floor_seal_super(m: *cfs_mac, block: *mut u8);
-    fn cfs_buf_floor_super_ok(m: *cfs_mac, block: *u8) -> bool;
+    /// kernel/blake2b.h: a keyed BLAKE2b, its state a C struct.
+    struct blake2b;
+    fn blake2b_init_key(s: *mut blake2b, outlen: usize, key: *void, keylen: usize);
+    fn blake2b_update(s: *mut blake2b, input: *void, n: usize);
+    fn blake2b_final(s: *mut blake2b, out: *mut u8);
+    // cosmofs_format.h's MAC: its size, and the domains of a header, a superblock and a label.
+    const CFS_MAC_SIZE: u32 = 8;
+    const CFS_MAC_HDR: u8 = 72;
+    const CFS_MAC_SUPER: u8 = 83;
+    const CFS_MAC_LABEL: u8 = 76;
+    /// Where the CRC is, which the MAC takes as zero.
+    @cvalue("offsetof(struct cfs_mhdr, crc)")
+    const MHDR_CRC_AT: usize = 24;
+    @cvalue("offsetof(struct cfs_super, crc)")
+    const SUPER_CRC_AT: usize = 160;
+}
+
+/// Eight zero bytes, which the MAC reads in place of the CRC and the word after it.
+const ZERO8: [u8; 8] = [0; 8];
+
+/// The version-14 tag (design.md, "The metadata MAC"): a 64-bit keyed BLAKE2b over the domain byte and the block, with
+/// the eight bytes at `off` -- where the CRC and the word after it were -- taken as zero.
+/// Safety: `m` is a MAC with its key; `block` holds CFS_BLOCK bytes; `tag` holds CFS_MAC_SIZE.
+@export("cfs_mac_tag")
+unsafe fn macTag(m: *cfs_mac, domain: CChar, block: *u8, off: usize, tag: *mut u8) {
+    let size = CFS_MAC_SIZE as usize;
+    let d = [domain as u8];
+    let zero = ZERO8;
+    var s: blake2b;
+    let state = borrow mut s as *mut blake2b;
+    let key = borrow Ptr.toBorrow(m).key;
+    blake2b_init_key(state, size, borrow key[0] as *u8 as *void, 32);
+    blake2b_update(state, borrow d[0] as *u8 as *void, 1);
+    blake2b_update(state, block as *void, off);
+    blake2b_update(state, borrow zero[0] as *u8 as *void, size);
+    blake2b_update(state, block.add(off + size) as *void, CFS_BLOCK as usize - off - size);
+    blake2b_final(state, tag);
+}
+
+/// The tag at `off` is the block's. Constant time: a comparison that stops early says how much of a forgery was right.
+/// Safety: as macTag.
+@export("cfs_mac_ok")
+unsafe fn macOk(m: *cfs_mac, domain: CChar, block: *u8, off: usize) -> bool {
+    var want = [0u8; 8];
+    macTag(m, domain, block, off, borrow mut want[0] as *mut u8);
+    var diff: u8 = 0;
+    for (i in 0..want.length) {
+        diff |= want[i] ^ block.add(off + i).read();
+    }
+    want = [0u8; 8];
+    return diff == 0;
+}
+
+/// The block's tag, written at `off`.
+/// Safety: as macTag; `block` writable.
+@export("cfs_mac_seal")
+unsafe fn macSeal(m: *cfs_mac, domain: CChar, block: *mut u8, off: usize) {
+    var tag = [0u8; 8];
+    macTag(m, domain, block as *u8, off, borrow mut tag[0] as *mut u8);
+    for (i in 0..tag.length) {
+        block.add(off + i).write(tag[i]);
+    }
 }
 
 // ---- errno.h, cosmofs_internal.h and cosmofs_format.h values (asserted in tests/host/test_cfsbuf.c) ----
@@ -183,7 +240,7 @@ unsafe fn mhdrSealMac(mac: *cfs_mac, block: *mut u8, kind: u32, blkno: u64, gen:
     ByteOrder.writeU64LE(b, MHDR_GENERATION, gen);
     ByteOrder.writeU64LE(b, MHDR_BLKNO, blkno);
     if (!mac.isNull() && Ptr.toBorrow(mac).on) {
-        cfs_buf_floor_seal_hdr(mac, block);
+        macSeal(mac, CFS_MAC_HDR as CChar, block, MHDR_CRC_AT);
         return;
     }
     ByteOrder.writeU32LE(b, MHDR_ALGO, CFS_CSUM_CRC32C); // the algorithm `crc` is computed with
@@ -214,7 +271,7 @@ unsafe fn mhdrFaultOf(mac: *cfs_mac, block: *void, blkno: u64, kind: u32) -> u32
     let macOn = !mac.isNull() && Ptr.toBorrow(mac).on;
     let f = cfs_mhdr_decode(block, blkno, kind, macOn);
     if (f == MHDR_OK && macOn) {
-        return if (cfs_buf_floor_hdr_ok(mac, block as *u8)) MHDR_OK else MHDR_MAC;
+        return if (macOk(mac, CFS_MAC_HDR as CChar, block as *u8, MHDR_CRC_AT)) MHDR_OK else MHDR_MAC;
     }
     return f;
 }
@@ -253,7 +310,7 @@ unsafe fn superIsMac(block: *u8) -> bool {
 @export("cfs_super_seal")
 unsafe fn superSeal(mac: *cfs_mac, block: *mut u8) {
     if (superIsMac(block as *u8)) {
-        cfs_buf_floor_seal_super(mac, block);
+        macSeal(mac, CFS_MAC_SUPER as CChar, block, SUPER_CRC_AT);
         return;
     }
     let b = blockMut(block);
@@ -279,7 +336,7 @@ unsafe fn superVerify(block: *void, mac: *mut cfs_mac) -> i32 {
         if (rc != 0) {
             return -ENOKEY;
         }
-        rc = if (cfs_buf_floor_super_ok(m as *cfs_mac, block as *u8)) 0 else -EIO;
+        rc = if (macOk(m as *cfs_mac, CFS_MAC_SUPER as CChar, block as *u8, SUPER_CRC_AT)) 0 else -EIO;
     } else {
         rc = if (rc == 0) -EIO else if (cfs_super_crc_ok(block)) 0 else -EIO;
         let k = Ptr.toBorrowMut(m);

@@ -8,8 +8,8 @@
 //
 // struct cfs, the key blocks, the superblock, the hash states and the /dev/fsctl records stay C (cosmofs_internal.h,
 // cosmofs_format.h, uapi/cosmo/fsctl.h). What the C kept on the stack is kept in zeroed slots of words, checked against
-// their C sizes (tests/host/test_cfscrypt.c): a CeeSafe local cannot hold C state. cosmofs_crypt_floor.c makes the one
-// call whose prototype CeeSafe cannot write (cfs_mac_ok, whose domain is a C char).
+// their C sizes (tests/host/test_cfscrypt.c): a CeeSafe local cannot hold C state. cfs_mac_ok's domain is a C char
+// (ADR 0080 §3.5), and the uapi key slot's layout is the on-disk one's, which the C compiler checks.
 
 @header("kernel/blk.h", "kernel/vfs.h", "kernel/storage.h", "kernel/random.h", "kernel/chacha20.h", "kernel/crypto.h",
     "kernel/blake2b.h", "kernel/cosmofs.h", "uapi/cosmo/fsctl.h", "cosmofs_internal.h")
@@ -110,9 +110,14 @@ extern "C" {
     fn cfs_buf_mark_dirty(fs: *mut cfs, b: *mut cfs_buf);
     fn cfs_buf_put(fs: *mut cfs, b: *mut cfs_buf);
     fn cfs_commit(fs: *mut cfs) -> i32;
-    /// cosmofs_crypt_floor.c: cfs_mac_ok(m, CFS_MAC_SUPER, block, offsetof(struct cfs_super, crc)), whose domain is a
-    /// C char.
-    fn cfs_crypt_floor_super_ok(m: *cfs_mac, block: *u8) -> bool;
+    /// cosmofs_buf.cee's MAC check of a block at `off` in domain `domain`.
+    fn cfs_mac_ok(m: *cfs_mac, domain: CChar, block: *u8, off: usize) -> bool;
+    const CFS_MAC_SUPER: u8 = 83;
+    @cvalue("offsetof(struct cfs_super, crc)")
+    const SUPER_CRC_AT: usize = 160;
+    /// A /dev/fsctl key slot is an on-disk one: its size, its members' places, the slot count and the key size.
+    @cvalue("sizeof(struct cosmo_keyslot) == sizeof(struct cfs_keyslot) && offsetof(struct cosmo_keyslot, wrapped) == offsetof(struct cfs_keyslot, wrapped) && offsetof(struct cosmo_keyslot, created_ns) == offsetof(struct cfs_keyslot, created_ns) && COSMO_KEY_SLOTS == CFS_KEY_SLOTS && COSMO_KEY_SIZE == CHACHA20_KEY_SIZE")
+    const SLOT_IS_ON_DISK: bool = true;
     fn memcpy(dst: *mut void, src: *void, n: usize) -> *mut void;
     fn memset(p: *mut void, c: i32, n: usize) -> *mut void;
     fn memcmp(a: *void, b: *void, n: usize) -> i32;
@@ -738,7 +743,7 @@ unsafe fn keyctlDev(bd: *mut blkdev, req: *mut cosmofs_key_req) -> i32 {
             let s = superOf(block as *cfs_super);
             if (memcmp(borrow s.magic as *[u8; 8] as *void, "COSMOFS1".ptr as *void, 8) == 0 && isMac(s) &&
                 memcmp(borrow s.uuid as *[u8; 16] as *void, uuid as *void, 16) == 0 &&
-                cfs_crypt_floor_super_ok(m as *cfs_mac, block as *u8) && (!superOk || s.generation == generation)) {
+                cfs_mac_ok(m as *cfs_mac, CFS_MAC_SUPER as CChar, block as *u8, SUPER_CRC_AT) && (!superOk || s.generation == generation)) {
                 superOk = true;
                 keyRoot = s.key_root;
             }

@@ -56,7 +56,7 @@ FUZZ_COSMOFS_SRCS := tests/fuzz/fuzz_cosmofs.c tests/fuzz/shim_fs.c \
 	kernel-services/filesystem/cosmofs/cosmofs_file.c \
 	kernel-services/filesystem/cosmofs/cosmofs_vnode.c \
 	kernel-services/filesystem/cosmofs/cosmofs_dir.c \
-	kernel-services/filesystem/cosmofs/cosmofs_buf.c kernel-services/filesystem/cosmofs/cosmofs_buf_floor.c \
+	kernel-services/filesystem/cosmofs/cosmofs_buf.c \
 	kernel-services/filesystem/cosmofs/cosmofs_alloc.c kernel-services/filesystem/cosmofs/cosmofs_commit.c \
 	kernel-services/filesystem/cosmofs/cosmofs_format.c kernel-services/filesystem/cosmofs/cosmofs_corrupt.c \
 	kernel-services/filesystem/cosmofs/cosmofs_hooks.c \
@@ -64,13 +64,13 @@ FUZZ_COSMOFS_SRCS := tests/fuzz/fuzz_cosmofs.c tests/fuzz/shim_fs.c \
 	kernel-services/filesystem/cosmofs/cosmofs_reach.c \
 	kernel-services/filesystem/cosmofs/cosmofs_rollback.c \
 	kernel-services/filesystem/cosmofs/cosmofs_clone.c \
-	kernel-services/filesystem/cosmofs/cosmofs_member.c kernel-services/filesystem/cosmofs/cosmofs_member_floor.c \
+	kernel-services/filesystem/cosmofs/cosmofs_member.c \
 	kernel-services/filesystem/cosmofs/cfsparse.c \
 	kernel/core/lz4.c \
 	kernel/core/lz4_decode.c \
 	kernel-services/filesystem/cosmofs/cosmofs_scrub.c \
 	kernel-services/filesystem/cosmofs/cosmofs_check.c \
-	kernel-services/filesystem/cosmofs/cosmofs_crypt.c kernel-services/filesystem/cosmofs/cosmofs_crypt_floor.c \
+	kernel-services/filesystem/cosmofs/cosmofs_crypt.c \
 	kernel/security/chacha20.c \
 	kernel/security/sha512.c \
 	kernel/security/blake2b.c \

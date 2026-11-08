@@ -171,7 +171,7 @@ HOST_CFSSCRUB_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/cos
 	tests/host/ceesafe_panic.c tests/host/test_cfsscrub.c
 # cosmofs's keys with the real ciphers and hashes: the pool, the buffers, the transaction and the random source are the test's.
 HOST_CFSCRYPT_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/cosmofs_crypt.c \
-	kernel-services/filesystem/cosmofs/cosmofs_crypt_floor.c kernel/security/chacha20.c \
+	kernel/security/chacha20.c \
 	kernel/security/sha512.c kernel/security/blake2b.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c \
 	tests/host/test_cfscrypt.c
 # cosmofs's resilver and pool commands: the pool's operations, the labels, the holds and the devices are the test's.
@@ -179,7 +179,6 @@ HOST_CFSRESILVER_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/
 	kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_cfsresilver.c
 # cosmofs's members with the real label and table checks: the devices, the pool, the buffers and the allocator are the test's.
 HOST_CFSMEMBER_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/cosmofs_member.c \
-	kernel-services/filesystem/cosmofs/cosmofs_member_floor.c \
 	kernel-services/filesystem/cosmofs/cfsparse.c kernel/core/crc32c.c kernel/core/printf.c kernel/ceesafe/ceesafe_rt_core.c \
 	tests/host/ceesafe_panic.c tests/host/test_cfsmember.c
 # cosmofs's structural check with the real entry decoders: the blocks, the trees, the lists, the mount and the device are the test's.
@@ -192,7 +191,6 @@ HOST_CFSSNAP_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/cosm
 	tests/host/ceesafe_panic.c tests/host/test_cfssnap.c
 # cosmofs's checksums, headers and buffer cache with the real BLAKE2b, CRC32C and decoders: the pool, the repair, the key table and the allocator are the test's.
 HOST_CFSBUF_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/cosmofs_buf.c \
-	kernel-services/filesystem/cosmofs/cosmofs_buf_floor.c \
 	kernel-services/filesystem/cosmofs/cfsparse.c kernel/core/crc32c.c kernel/security/blake2b.c \
 	kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_cfsbuf.c
 # cosmofs's allocation and inode map with the real address and slot checks: the buffers, the clone and the transaction are the test's.
@@ -201,7 +199,7 @@ HOST_CFSALLOC_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/cos
 	tests/host/ceesafe_panic.c tests/host/test_cfsalloc.c
 # cosmofs's commit with the real buffer cache, allocator, inode map and decoders: the disk, the pool and every other hook are the test's.
 HOST_CFSCOMMIT_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/cosmofs_commit.c \
-	kernel-services/filesystem/cosmofs/cosmofs_buf.c kernel-services/filesystem/cosmofs/cosmofs_buf_floor.c \
+	kernel-services/filesystem/cosmofs/cosmofs_buf.c \
 	kernel-services/filesystem/cosmofs/cosmofs_alloc.c kernel-services/filesystem/cosmofs/cfsparse.c kernel/core/crc32c.c \
 	kernel/security/blake2b.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_cfscommit.c
 # cosmofs's format with the real slot check and CRC32C: the devices, the pool, the seals and the key and label writers are the test's.
