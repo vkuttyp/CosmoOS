@@ -169,6 +169,8 @@ KERNEL_GENERIC_SRCS := \
 	kernel/core/cmdline.c \
 	kernel/core/bootfs.c \
 	kernel-services/vfs/vfs.c \
+	kernel-services/vfs/vfs_vnode.c \
+	kernel-services/vfs/vfs_floor.c \
 	kernel-services/vfs/fsctl.c \
 	kernel-services/vfs/fsctl_floor.c \
 	kernel-services/vfs/blkctl.c \

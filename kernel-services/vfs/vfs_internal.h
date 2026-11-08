@@ -47,4 +47,9 @@ void vfs_mount_orphaned(struct mount *mnt);
  * count right. g_mounts_lock held; takes the mountpoint's lock. */
 void vfs_mount_detach(struct mount *mnt);
 
+/* The held-walk seam's walk half (vfs_vnode.cee; a release build's stand-in
+ * in vfs_floor.c): 0 to proceed, -EINTR if the held wait was killed.
+ * `start` is a relative walk's directory, read and not yet referenced. */
+int vfs_cwd_hold_walk(struct vnode *start);
+
 #endif /* VFS_INTERNAL_H */
