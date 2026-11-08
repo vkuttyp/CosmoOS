@@ -15,7 +15,7 @@
 // struct cfs, the pacing state, the set of blocks seen, the snapshot entries, the inodes and the extents stay C
 // (cosmofs_internal.h, cosmofs_format.h). What the C kept on the stack is kept in zeroed slots of words, checked
 // against their C sizes (tests/host/test_cfsscrub.c): a CeeSafe local cannot hold C state. The sysctl's variable,
-// g_cosmofs_scrub_rate, is cosmofs_scrub_floor.c's.
+// g_cosmofs_scrub_rate, is this file's, C data the sysctl reads and writes atomically (ADR 0080 §3.2).
 
 @header("kernel/vfs.h", "kernel/storage.h", "kernel/timer.h", "kernel/sched.h", "kernel/wait.h", "kernel/cosmofs.h",
     "cosmofs_internal.h")
@@ -143,11 +143,15 @@ extern "C" {
     fn clock_since_ns(stamp: u64) -> u64;
     fn thread_sleep_ns(ns: u64);
     fn sched_yield();
-    /// cosmofs_scrub_floor.c: the address of g_cosmofs_scrub_rate, the sysctl's variable (fs.scrub_rate).
-    fn cfs_scrub_floor_rate() -> *mut u32;
+    /// cosmofs.h's default for the sysctl fs.scrub_rate.
+    const COSMOFS_SCRUB_RATE_DEFAULT: u32 = 4096;
     fn memcpy(dst: *mut void, src: *void, n: usize) -> *mut void;
     fn memset(p: *mut void, c: i32, n: usize) -> *mut void;
 }
+
+/// g_cosmofs_scrub_rate (cosmofs.h), the sysctl's variable (fs.scrub_rate): blocks a scrub reads a second.
+@export("g_cosmofs_scrub_rate")
+static SCRUB_RATE: AtomicU32 = AtomicU32.constant(COSMOFS_SCRUB_RATE_DEFAULT);
 
 // ---- errno.h, cosmofs.h, storage.h and cosmofs_format.h values (asserted in tests/host/test_cfsscrub.c) ----
 
@@ -873,7 +877,7 @@ unsafe fn scrub(mnt: *mut mount, out: *mut cosmofs_scrub_stats, flags: u32) -> i
     let p = borrow mut paceSlot as *mut [u64; 4] as *mut cfs_pace;
     var bitsSlot = [0u64; 2];
     let done = borrow mut bitsSlot as *mut [u64; 2] as *mut cfs_bits;
-    let rate = Ptr.toBorrow(cfs_scrub_floor_rate() as *AtomicU32).loadWith(LoadOrdering.Relaxed);
+    let rate = SCRUB_RATE.loadWith(LoadOrdering.Relaxed);
     paceInit(p, rate);
     var s = Scrub {
         fs: fs,

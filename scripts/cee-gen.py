@@ -61,7 +61,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
-CEESAFEC_VERSION = "0.23.0"
+CEESAFEC_VERSION = "0.24.1"
 
 # Each port: its CeeSafe source, the C it generates, what that C is, the header ceesafec generates for it (None
 # when the port's header is hand-written C, imported by the source), and whether it uses CeeSafe's kernel library

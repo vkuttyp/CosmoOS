@@ -167,7 +167,7 @@ HOST_CFSROLLBACK_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/
 	tests/host/ceesafe_panic.c tests/host/test_cfsrollback.c
 # cosmofs's scrub alone: the blocks and their copies, the lists, the trees, the lock and the clock are the test's.
 HOST_CFSSCRUB_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/cosmofs_scrub.c \
-	kernel-services/filesystem/cosmofs/cosmofs_scrub_floor.c kernel/ceesafe/ceesafe_rt_core.c \
+	kernel/ceesafe/ceesafe_rt_core.c \
 	tests/host/ceesafe_panic.c tests/host/test_cfsscrub.c
 # cosmofs's keys with the real ciphers and hashes: the pool, the buffers, the transaction and the random source are the test's.
 HOST_CFSCRYPT_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/cosmofs_crypt.c \

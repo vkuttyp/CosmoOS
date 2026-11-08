@@ -69,7 +69,7 @@ FUZZ_COSMOFS_SRCS := tests/fuzz/fuzz_cosmofs.c tests/fuzz/shim_fs.c \
 	kernel-services/filesystem/cosmofs/cfsparse.c \
 	kernel/core/lz4.c \
 	kernel/core/lz4_decode.c \
-	kernel-services/filesystem/cosmofs/cosmofs_scrub.c kernel-services/filesystem/cosmofs/cosmofs_scrub_floor.c \
+	kernel-services/filesystem/cosmofs/cosmofs_scrub.c \
 	kernel-services/filesystem/cosmofs/cosmofs_check.c kernel-services/filesystem/cosmofs/cosmofs_check_floor.c \
 	kernel-services/filesystem/cosmofs/cosmofs_crypt.c kernel-services/filesystem/cosmofs/cosmofs_crypt_floor.c \
 	kernel/security/chacha20.c \
