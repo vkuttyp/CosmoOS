@@ -14,9 +14,9 @@
 // struct cfs, the reports, the bit maps, the snapshot entries, the inodes and the rollback record stay C
 // (cosmofs_internal.h, cosmofs_format.h, kernel/cosmofs.h). What the C kept on the stack is kept in zeroed slots of
 // words, checked against their C sizes (tests/host/test_cfscheck.c): a CeeSafe local cannot hold C state. The pages
-// the maps are made of come through cosmofs_check_floor.c, because kernel/page.h's conversions are inline functions.
+// the maps are made of come from the page allocator, through kernel/page.h's direct map.
 
-@header("kernel/blk.h", "kernel/vfs.h", "kernel/storage.h", "kernel/timer.h", "kernel/kmalloc.h", "kernel/string.h",
+@header("kernel/page.h", "kernel/pmm.h", "kernel/blk.h", "kernel/vfs.h", "kernel/storage.h", "kernel/timer.h", "kernel/kmalloc.h", "kernel/string.h",
     "kernel/cosmofs.h", "cosmofs_internal.h")
 extern "C" {
     struct blkdev {
@@ -210,9 +210,20 @@ extern "C" {
     fn memcmp(a: *void, b: *void, n: usize) -> i32;
     fn strlen(s: *CChar) -> usize;
     fn strlcpy(dst: *mut CChar, src: *CChar, size: usize) -> usize;
-    /// cosmofs_check_floor.c: a zeroed page by its direct-map address, or null; and that page back.
-    fn cfs_check_floor_page() -> *mut u8;
-    fn cfs_check_floor_unpage(va: *mut u8);
+    // pmm.h and page.h's page allocation and direct map, static inline functions (ADR 0030).
+    struct page;
+    const PMM_FLAGS_ZERO: u32 = 4;
+    fn pmm_alloc_page(flags: u32) -> *mut page;
+    fn pmm_free_page(pg: *mut page);
+    fn page_to_virt(pg: *page) -> *mut void;
+    fn virt_to_page(va: *void) -> *mut page;
+}
+
+/// A zeroed page by its direct-map address, or null.
+/// Safety: the page allocator is up.
+unsafe fn zeroedPage() -> *mut u8 {
+    let pg = pmm_alloc_page(PMM_FLAGS_ZERO);
+    return if (pg.isNull()) 0 as *mut u8 else page_to_virt(pg as *page) as *mut u8;
 }
 
 // ---- errno.h, kernel/cosmofs.h, uapi/cosmo/fsctl.h, kernel/vfs.h and cosmofs_format.h values (asserted in
@@ -380,7 +391,7 @@ unsafe fn bitsFree(m: *mut cfs_bits) {
         for (i in 0u32..b.nchunks) {
             let c = b.chunk.add(i as usize).read();
             if (!c.isNull()) {
-                cfs_check_floor_unpage(c);
+                pmm_free_page(virt_to_page(c as *void));
             }
         }
         kfree(b.chunk as *mut void);
@@ -402,7 +413,7 @@ unsafe fn bitsAlloc(m: *mut cfs_bits, bits: u64) -> i32 {
         return -ENOMEM;
     }
     for (i in 0u32..b.nchunks) {
-        let pg = cfs_check_floor_page();
+        let pg = zeroedPage();
         if (pg.isNull()) {
             bitsFree(m);
             return -ENOMEM;
@@ -454,7 +465,7 @@ unsafe fn countsFree(c: borrow mut Counts) {
         for (i in 0u32..c.nchunks) {
             let p = c.chunk.add(i as usize).read();
             if (!p.isNull()) {
-                cfs_check_floor_unpage(p);
+                pmm_free_page(virt_to_page(p as *void));
             }
         }
         kfree(c.chunk as *mut void);
@@ -474,7 +485,7 @@ unsafe fn countsAlloc(c: borrow mut Counts, n: u64) -> i32 {
         return -ENOMEM;
     }
     for (i in 0u32..c.nchunks) {
-        let pg = cfs_check_floor_page();
+        let pg = zeroedPage();
         if (pg.isNull()) {
             countsFree(mut c);
             return -ENOMEM;

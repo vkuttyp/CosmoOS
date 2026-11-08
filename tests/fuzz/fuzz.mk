@@ -51,7 +51,7 @@ FUZZ_COSMOFS_SRCS := tests/fuzz/fuzz_cosmofs.c tests/fuzz/shim_fs.c \
 	kernel-services/filesystem/cosmofs/cosmofs_core.c kernel-services/filesystem/cosmofs/cosmofs_core_floor.c \
 	kernel-services/filesystem/cosmofs/cosmofs.c kernel-services/filesystem/cosmofs/cosmofs_floor.c \
 	kernel-services/filesystem/cosmofs/cosmofs_snapctl.c \
-	kernel-services/filesystem/cosmofs/cosmofs_csum.c kernel-services/filesystem/cosmofs/cosmofs_csum_floor.c \
+	kernel-services/filesystem/cosmofs/cosmofs_csum.c \
 	kernel-services/filesystem/cosmofs/cosmofs_data.c kernel-services/filesystem/cosmofs/cosmofs_data_floor.c \
 	kernel-services/filesystem/cosmofs/cosmofs_file.c kernel-services/filesystem/cosmofs/cosmofs_file_floor.c \
 	kernel-services/filesystem/cosmofs/cosmofs_vnode.c kernel-services/filesystem/cosmofs/cosmofs_vnode_floor.c \
@@ -61,16 +61,16 @@ FUZZ_COSMOFS_SRCS := tests/fuzz/fuzz_cosmofs.c tests/fuzz/shim_fs.c \
 	kernel-services/filesystem/cosmofs/cosmofs_commit_floor.c \
 	kernel-services/filesystem/cosmofs/cosmofs_format.c kernel-services/filesystem/cosmofs/cosmofs_corrupt.c \
 	kernel-services/filesystem/cosmofs/cosmofs_hooks.c kernel-services/filesystem/cosmofs/cosmofs_hooks_floor.c \
-	kernel-services/filesystem/cosmofs/cosmofs_snap.c kernel-services/filesystem/cosmofs/cosmofs_snap_floor.c \
+	kernel-services/filesystem/cosmofs/cosmofs_snap.c \
 	kernel-services/filesystem/cosmofs/cosmofs_reach.c \
-	kernel-services/filesystem/cosmofs/cosmofs_rollback.c kernel-services/filesystem/cosmofs/cosmofs_rollback_floor.c \
+	kernel-services/filesystem/cosmofs/cosmofs_rollback.c \
 	kernel-services/filesystem/cosmofs/cosmofs_clone.c \
 	kernel-services/filesystem/cosmofs/cosmofs_member.c kernel-services/filesystem/cosmofs/cosmofs_member_floor.c \
 	kernel-services/filesystem/cosmofs/cfsparse.c \
 	kernel/core/lz4.c \
 	kernel/core/lz4_decode.c \
 	kernel-services/filesystem/cosmofs/cosmofs_scrub.c \
-	kernel-services/filesystem/cosmofs/cosmofs_check.c kernel-services/filesystem/cosmofs/cosmofs_check_floor.c \
+	kernel-services/filesystem/cosmofs/cosmofs_check.c \
 	kernel-services/filesystem/cosmofs/cosmofs_crypt.c kernel-services/filesystem/cosmofs/cosmofs_crypt_floor.c \
 	kernel/security/chacha20.c \
 	kernel/security/sha512.c \

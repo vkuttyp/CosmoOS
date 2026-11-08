@@ -6,10 +6,10 @@
 //
 // struct cfs, the inodes, the buffers, the entries and the extents stay C (cosmofs_internal.h, cosmofs_format.h).
 // The authenticated entry the C kept on the stack is kept in a zeroed slot of words, checked against its C size
-// (tests/host/test_cfscsum.c): a CeeSafe local cannot hold C state. cosmofs_csum_floor.c keeps the fault-injection
-// seam, which a build without fault injection makes an inline function.
+// (tests/host/test_cfscsum.c): a CeeSafe local cannot hold C state. The fault-injection seam is faultinject.h's, an
+// inline function in a build without fault injection.
 
-@header("kernel/kmalloc.h", "kernel/string.h", "kernel/chacha20.h", "kernel/lz4.h", "kernel/crc32c.h",
+@header("kernel/faultinject.h", "kernel/kmalloc.h", "kernel/string.h", "kernel/chacha20.h", "kernel/lz4.h", "kernel/crc32c.h",
     "cosmofs_internal.h")
 extern "C" {
     struct cfs_mhdr {
@@ -66,8 +66,10 @@ extern "C" {
     fn crc32c(data: *void, len: usize) -> u32;
     fn memset(p: *mut void, c: i32, n: usize) -> *mut void;
     fn memcpy(dst: *mut void, src: *void, n: usize) -> *mut void;
-    /// cosmofs_csum_floor.c: faultinject_should_fail(FI_COSMOFS_CSUM_COW).
-    fn cfs_csum_floor_cow_fails() -> bool;
+    /// faultinject.h's seam: a function in a fault-injection build, an inline `false` otherwise.
+    enum fi_kind: u32;
+    const FI_COSMOFS_CSUM_COW: fi_kind = 24;
+    fn faultinject_should_fail(kind: fi_kind) -> bool;
 }
 
 // ---- errno.h, cosmofs_format.h and cosmofs_internal.h values (asserted in tests/host/test_cfscsum.c) ----
@@ -231,7 +233,7 @@ unsafe fn csumLevel(fs: *mut cfs, slot: *mut u64, kind: u32, writable: bool, out
     }
     if (writable) {
         // The test seam (cosmofs-encrypted-root): an index block's copy cannot be had, as when the pool is full.
-        rc = if (kind == CFS_KIND_CSUMIDX && cfs_csum_floor_cow_fails()) -ENOMEM else cfs_buf_cow(fs, out, slot);
+        rc = if (kind == CFS_KIND_CSUMIDX && faultinject_should_fail(FI_COSMOFS_CSUM_COW)) -ENOMEM else cfs_buf_cow(fs, out, slot);
         if (rc != 0) {
             cfs_buf_put(fs, out.read());
             out.write(0 as *mut cfs_buf); // a two-level walk's cleanup releases `mid` (Codex on #447)

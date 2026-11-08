@@ -80,8 +80,8 @@ extern "C" {
     fn cfs_free_block_deferred(fs: *mut cfs, blk: u64);
     fn cfs_snapshot_find(fs: *mut cfs, name: *CChar, out: *mut cfs_snapshot) -> bool;
     fn cfs_snapshot_lookup_uuid(fs: *mut cfs, uuid: *u8, out: *mut cfs_snapshot) -> i32;
-    /// cosmofs_rollback_floor.c: cfs_snapshot_new_uuid(fs, out, NULL, 0), whose `also` is a pointer to arrays.
-    fn cfs_rollback_floor_new_uuid(fs: *mut cfs, out: *mut u8);
+    /// `also`: `nalso` uuids of 16 bytes, which the rollback leaves out.
+    fn cfs_snapshot_new_uuid(fs: *mut cfs, out: *mut u8, also: *u8, nalso: u32);
     fn cfs_snapshot_create_ex(
         fs: *mut cfs,
         name: *CChar,
@@ -365,7 +365,7 @@ unsafe fn request(fs: *mut cfs, target: *CChar, safety_name: *CChar, safety: *mu
     // The safety snapshot's uuid, drawn here so the record can name it: unique against the list now, and a raise below
     // gives no converted entry the same one.
     let safetyUuid = borrow mut k.safety_uuid as *mut [u8; 16] as *mut u8;
-    cfs_rollback_floor_new_uuid(fs, safetyUuid);
+    cfs_snapshot_new_uuid(fs, safetyUuid, 0 as *u8, 0);
     k.requested_ns = clock_realtime_ns();
 
     var sslot = [0u64; 16];

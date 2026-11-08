@@ -11,8 +11,8 @@
 //
 // struct cfs, the buffers, the reservation and the snapshot entries stay C (cosmofs_internal.h, cosmofs_format.h).
 // An entry the C kept on the stack is kept in a zeroed slot of words, checked against its C size
-// (tests/host/test_cfssnap.c): a CeeSafe local cannot hold C state. cosmofs_snap_floor.c reads the one field only a
-// debug build has.
+// (tests/host/test_cfssnap.c): a CeeSafe local cannot hold C state. The one field only a debug build has is read in
+// a `cfg` block (ADR 0080 §3.3).
 
 @header("kernel/timer.h", "kernel/random.h", "kernel/string.h", "cosmofs_internal.h")
 extern "C" {
@@ -39,6 +39,9 @@ extern "C" {
         snap_max_id: u64;
         snap_walks: u64;
         snap_verdicts: u64;
+        /// A test's request that a snapshot with identity not raise a version-11 pool: a debug build's only.
+        @cfg("CONFIG_DEBUG")
+        test_no_raise: bool;
     }
     struct cfs_buf {
         blkno: u64;
@@ -92,8 +95,6 @@ extern "C" {
     fn strcmp(a: *CChar, b: *CChar) -> i32;
     fn strlen(s: *CChar) -> usize;
     fn strlcpy(dst: *mut CChar, src: *CChar, size: usize) -> usize;
-    /// cosmofs_snap_floor.c: struct cfs's test_no_raise in a debug build, false in a release one.
-    fn cfs_snap_floor_no_raise(fs: *cfs) -> bool;
 }
 
 // ---- errno.h and cosmofs_format.h values (asserted in tests/host/test_cfssnap.c) ----
@@ -1463,7 +1464,11 @@ unsafe fn createEx(fs: *mut cfs, name: *CChar, identity: bool, commit: bool, uui
     if (rc != 0) {
         return rc;
     }
-    let doRaise = fsOf(fs).sb.version == 11 && !cfs_snap_floor_no_raise(fs as *cfs);
+    var noRaise = false;
+    if (cfg("CONFIG_DEBUG")) {
+        noRaise = fsOf(fs).test_no_raise;
+    }
+    let doRaise = fsOf(fs).sb.version == 11 && !noRaise;
 
     // An id no snapshot has had on this filesystem: the tag this snapshot's vnodes carry. Before version 12 "on this
     // filesystem" means "since this mount" (the list's ids and the mount's memory); from 12 the list's head carries the
