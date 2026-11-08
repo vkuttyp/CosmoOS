@@ -1,6 +1,7 @@
 # kernel-services/vfs
 
-The VFS (`vfs.c`: path walk, files, the namespace operations;
+The VFS (`vfs.c`: files, the namespace operations; `vfs_walk.cee`:
+permissions, the path walk, lookups and an open's walk;
 `vfs_mount.cee`: the `fs_type` registry, mounts, the root switch, sync,
 device claims, init, formats and passes; `vfs_vnode.cee`: vnodes and the
 held-walk seam; `vfs_floor.c`: the C data under them), the per-vnode page cache (`pagecache.cee`),

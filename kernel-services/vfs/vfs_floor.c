@@ -13,6 +13,7 @@
  */
 
 #include <kernel/blk.h>
+#include <kernel/cred.h>
 #include <kernel/errno.h>
 #include <kernel/kmalloc.h>
 #include <kernel/lockdep.h>
@@ -46,6 +47,19 @@ _Static_assert(VNODE_PINNED == 1 && VNODE_NESTED_CHILD == 2 && MOUNT_RDONLY == 1
 _Static_assert(sizeof(((struct mount *)0)->nheld) == 4 && sizeof(((struct mount *)0)->flags) == 4 &&
                    sizeof(((struct mount *)0)->passes_running) == 8,
                "vfs_mount.cee's field widths");
+
+_Static_assert(EPERM == 1 && EIO == 5 && ENXIO == 6 && EACCES == 13 && EISDIR == 21 && ETXTBSY == 26 &&
+                   EROFS == 30 && ENAMETOOLONG == 36 && ELOOP == 40 && ENOTSUP == 95,
+               "vfs_walk.cee's errno.h values");
+_Static_assert(VNODE_SOCK == 5 && VNODE_LNK == 6 && VFS_MAX_COMPONENTS == 40 && VFS_MAX_SYMLINKS == 8 &&
+                   VFS_MAY_EXEC == 1 && VFS_MAY_WRITE == 2 && VFS_MAY_READ == 4 && VFS_SET_MODE == 1 &&
+                   VFS_SET_MTIME == 2 && VFS_SET_MTIME_NOW == 4 && VFS_ID_KEEP == 0xffffffffu &&
+                   PRIV_SYS_ADMIN == 2 && CRED_ROOT_UID == 0,
+               "vfs_walk.cee's vfs.h and cred.h values");
+_Static_assert(COSMO_O_RDONLY == 0 && COSMO_O_WRONLY == 1 && COSMO_O_ACCMODE == 3 && COSMO_O_CREAT == 0x40 &&
+                   COSMO_O_EXCL == 0x80 && COSMO_O_TRUNC == 0x200 && COSMO_O_DIRECTORY == 0x10000 &&
+                   COSMO_O_NOFOLLOW == 0x20000,
+               "vfs_walk.cee's syscall.h values");
 
 /* --- the mount table (vfs_internal.h), the registry and the claims ------- */
 

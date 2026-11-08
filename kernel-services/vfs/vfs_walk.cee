@@ -1,0 +1,1157 @@
+// vfs_walk.cee - The VFS's path walk, in CeeSafe: roadmap 2.0 SA7. tests/host/test_vfs.c holds vfs.c, which this part
+// of it was, to the digest of the C it replaced.
+//
+// Permissions; the crossing into a mount; one component at a time, with search permission on every directory entered
+// and `..` stopping at the walk's root; symbolic links expanded on the way with a budget that a chain ending in a link
+// cannot outrun; the traversed name kept for a caller that asks (P32); the lookups; and an open's own walk, which
+// creates, truncates and opens what it reaches.
+//
+// The vnodes and files stay C (vfs.h). A walk's state is this file's own struct; the rest of the VFS walks to a
+// parent through vfs_walk_parent. vfs_floor.c asserts the values this file writes as its own constants.
+
+@header("kernel/cred.h", "kernel/errno.h", "kernel/kmalloc.h", "kernel/mountns.h", "kernel/mutex.h",
+    "kernel/string.h", "kernel/vfs.h")
+extern "C" {
+    struct file;
+    struct mount_ns;
+    struct vnode_ops {
+        lookup: extern "C" fn(*mut vnode, *CChar, usize, *mut *mut vnode) -> i32;
+        create: extern "C" fn(*mut vnode, *CChar, usize, u32, *mut *mut vnode) -> i32;
+        readlink: extern "C" fn(*mut vnode, *mut CChar, usize) -> i32;
+        truncate: extern "C" fn(*mut vnode, u64) -> i32;
+        setattr: extern "C" fn(*mut vnode) -> i32;
+    }
+    struct mount {
+        root: *mut vnode;
+        mountpoint: *mut vnode;
+        flags: u32;
+        unmounting: bool;
+    }
+    struct vnode {
+        obj: kobject;
+        mnt: *mut mount;
+        @cname("type") kind: u32;
+        mode: u32;
+        uid: u32;
+        gid: u32;
+        mtime_ns: u64;
+        ctime_ns: u64;
+        ops: *vnode_ops;
+        lock: mutex;
+        flags: u32;
+    }
+    struct credentials {
+        euid: u32;
+        privs: u32;
+    }
+
+    fn memcpy(dst: *mut void, src: *void, n: usize) -> *mut void;
+    fn strlen(s: *CChar) -> usize;
+    fn strnlen(s: *CChar, max: usize) -> usize;
+    fn strlcpy(dst: *mut CChar, src: *CChar, size: usize) -> usize;
+    fn cred_current() -> *credentials;
+    fn cred_in_group(c: *credentials, gid: u32) -> bool;
+    fn mountns_current() -> *mut mount_ns;
+    fn vnode_get(vn: *mut vnode);
+    fn vnode_put(vn: *mut vnode);
+    fn vfs_now_ns() -> u64;
+    fn vfs_current_root() -> *mut vnode;
+    fn vfs_cwd_hold_walk(start: *mut vnode) -> i32;
+    fn vfs_covering_mount_ns(dir: *vnode, ns: *mount_ns) -> *mut mount;
+    // vfs.c's files, until they are this tree's
+    fn vfs_file_alloc(vn: *mut vnode, flags: u32) -> *mut file;
+    fn vfs_file_run_open(f: *mut file) -> i32;
+    fn vfs_text_busy_locked(vn: *mut vnode) -> bool;
+
+    // vfs_floor.c
+    fn vfs_floor_root_slot() -> *mut *mut mount;
+}
+
+// errno.h, vfs.h, cred.h, kmalloc.h and syscall.h, which vfs_floor.c checks.
+const EPERM: i32 = 1;
+const ENOENT: i32 = 2;
+const EIO: i32 = 5;
+const ENXIO: i32 = 6;
+const ENOMEM: i32 = 12;
+const EACCES: i32 = 13;
+const EBUSY: i32 = 16;
+const EEXIST: i32 = 17;
+const ENOTDIR: i32 = 20;
+const EISDIR: i32 = 21;
+const EINVAL: i32 = 22;
+const ETXTBSY: i32 = 26;
+const EROFS: i32 = 30;
+const ENAMETOOLONG: i32 = 36;
+const ELOOP: i32 = 40;
+const ENOTSUP: i32 = 95;
+const VNODE_REG: u32 = 1;
+const VNODE_DIR: u32 = 2;
+const VNODE_SOCK: u32 = 5;
+const VNODE_LNK: u32 = 6;
+const VNODE_DEAD: u32 = 2;
+const MOUNT_RDONLY: u32 = 1;
+const VFS_NAME_MAX: usize = 255;
+const VFS_PATH_MAX: usize = 1024;
+const VFS_MAX_COMPONENTS: u32 = 40;
+const VFS_MAX_SYMLINKS: u32 = 8;
+const VFS_MAY_EXEC: u32 = 1;
+const VFS_MAY_WRITE: u32 = 2;
+const VFS_MAY_READ: u32 = 4;
+const VFS_SET_MODE: u32 = 1;
+const VFS_SET_MTIME: u32 = 2;
+const VFS_SET_MTIME_NOW: u32 = 4;
+const VFS_ID_KEEP: u32 = 0xFFFFFFFF;
+const PRIV_SYS_ADMIN: u32 = 2;
+const COSMO_O_RDONLY: u32 = 0;
+const COSMO_O_WRONLY: u32 = 1;
+const COSMO_O_ACCMODE: u32 = 3;
+const COSMO_O_CREAT: u32 = 0x40;
+const COSMO_O_EXCL: u32 = 0x80;
+const COSMO_O_TRUNC: u32 = 0x200;
+const COSMO_O_DIRECTORY: u32 = 0x10000;
+const COSMO_O_NOFOLLOW: u32 = 0x20000;
+const SLASH: u8 = 0x2F;
+const DOT: u8 = 0x2E;
+
+/// Safety: `vn` is live.
+unsafe fn lockOf(vn: *mut vnode) -> *mut mutex => borrow mut Ptr.toBorrowMut(vn).lock as *mut mutex;
+
+/// Safety: `vn` is live.
+unsafe fn mountOf(vn: *mut vnode) -> *mut mount => Ptr.toBorrow(vn as *vnode).mnt;
+
+/// The byte at `p + i`.
+/// Safety: `p + i` is readable.
+unsafe fn at(p: *u8, i: usize) -> u8 => *Ptr.toBorrow(p.add(i));
+
+/// Safety: `out` is writable.
+unsafe fn give(out: *mut *mut vnode, vn: *mut vnode) {
+    let slot = Ptr.toBorrowMut(out);
+    *slot = vn;
+}
+
+/// Safety: `out` is readable.
+unsafe fn taken(out: *mut *mut vnode) -> *mut vnode => *Ptr.toBorrow(out as **mut vnode);
+
+/// A lookup through the directory's operations.
+/// Safety: `dir` is a live directory with its lock held; `name` holds `len` bytes; `out` is writable.
+unsafe fn opLookup(dir: *mut vnode, name: *u8, len: usize, out: *mut *mut vnode) -> i32 =>
+    Ptr.toBorrow(Ptr.toBorrow(dir as *vnode).ops).lookup(dir, name as *CChar, len, out);
+
+/// The global root's vnode.
+/// Safety: a root is mounted.
+unsafe fn globalRoot() -> *mut vnode => Ptr.toBorrow(*Ptr.toBorrow(vfs_floor_root_slot()) as *mount).root;
+
+/// cred.h's cred_has: the bit, and an effective uid of 0.
+/// Safety: `c` is live.
+unsafe fn has(c: *credentials, priv: u32) -> bool {
+    let x = Ptr.toBorrow(c);
+    return (x.privs & priv) == priv && priv != 0 && x.euid == 0;
+}
+
+// --- crossing into a mount ------------------------------------------------------------------------------------------
+
+/// Cross into a mount whose root covers *vnp. Consumes the reference on failure. -EBUSY while an unmount of that
+/// mount is being decided: the walker must not fall through to the covered directory, since the unmount may yet be
+/// refused and the mount restored.
+/// Safety: *vnp is a vnode the caller holds a reference on; no vnode lock held.
+unsafe fn followMount(vnp: *mut *mut vnode) -> i32 {
+    var dir = taken(vnp);
+    var depth: u32 = 0;
+    while (depth < 16) {
+        // Taken under dir->lock: vfs_umount sets `unmounting` and, when it proceeds, removes its cover entry under
+        // the same lock, so a walker either already holds the root (the reference scan sees it) or is turned away.
+        mutex_lock(lockOf(dir));
+        let mnt = vfs_covering_mount_ns(dir as *vnode, mountns_current() as *mount_ns);
+        if (!mnt.isNull() && Ptr.toBorrow(mnt as *mount).unmounting) {
+            mutex_unlock(lockOf(dir));
+            vnode_put(dir);
+            return -EBUSY;
+        }
+        let root = if (mnt.isNull()) 0 as *mut vnode else Ptr.toBorrow(mnt as *mount).root;
+        if (!root.isNull()) {
+            vnode_get(root);
+        }
+        mutex_unlock(lockOf(dir));
+        if (root.isNull()) {
+            break;
+        }
+        vnode_put(dir);
+        dir = root;
+        depth += 1;
+    }
+    give(vnp, dir);
+    return 0;
+}
+
+// --- permissions ----------------------------------------------------------------------------------------------------
+
+/// Safety: `vn` is live.
+@export("vfs_permission")
+unsafe fn permission(vn: *vnode, mask: u32) -> i32 {
+    let c = cred_current();
+    let x = Ptr.toBorrow(vn);
+    if (has(c, PRIV_SYS_ADMIN)) {
+        // PRIV_SYS_ADMIN reads, writes and searches everything (uid 0 alone does not, roadmap M5); executing a
+        // regular file still needs it to be marked executable by someone.
+        if ((mask & VFS_MAY_EXEC) != 0 && x.kind == VNODE_REG && (x.mode & 0o111) == 0) {
+            return -EACCES;
+        }
+        return 0;
+    }
+    var bits: u32 = 0;
+    if (Ptr.toBorrow(c).euid == x.uid) {
+        bits = (x.mode >> 6) & 7;
+    } else if (cred_in_group(c, x.gid)) {
+        bits = (x.mode >> 3) & 7;
+    } else {
+        bits = x.mode & 7;
+    }
+    return if ((bits & mask) == mask) 0 else -EACCES;
+}
+
+/// The filesystem's say on a changed inode: its setattr, or none to make.
+/// Safety: `vn` is live, its lock held.
+unsafe fn store(vn: *mut vnode) -> i32 {
+    let ops = Ptr.toBorrow(vn as *vnode).ops;
+    return if (Ptr.toBorrow(ops).setattr.isNull()) 0 else Ptr.toBorrow(ops).setattr(vn);
+}
+
+/// Safety: `vn` is a live vnode the caller holds; no vnode lock held.
+@export("vfs_setattr")
+unsafe fn setattr(vn: *mut vnode, what: u32, mode: u32, mtimeNs: u64) -> i32 {
+    let c = cred_current();
+    let owner = has(c, PRIV_SYS_ADMIN) || Ptr.toBorrow(c).euid == Ptr.toBorrow(vn as *vnode).uid;
+    if ((what & (VFS_SET_MODE | VFS_SET_MTIME)) != 0 && !owner) {
+        return -EPERM;
+    }
+    if ((what & VFS_SET_MTIME_NOW) != 0 && !owner && permission(vn as *vnode, VFS_MAY_WRITE) != 0) {
+        return -EACCES;
+    }
+    let mnt = mountOf(vn);
+    if (!mnt.isNull() && (Ptr.toBorrow(mnt as *mount).flags & MOUNT_RDONLY) != 0) {
+        return -EROFS;
+    }
+    mutex_lock(lockOf(vn));
+    let now = vfs_now_ns();
+    {
+        let x = Ptr.toBorrowMut(vn);
+        if ((what & VFS_SET_MODE) != 0) {
+            x.mode = mode & 0o7777;
+        }
+        if ((what & VFS_SET_MTIME) != 0) {
+            x.mtime_ns = mtimeNs;
+        }
+        if ((what & VFS_SET_MTIME_NOW) != 0) {
+            x.mtime_ns = now;
+        }
+        x.ctime_ns = now;
+    }
+    let rc = store(vn);
+    mutex_unlock(lockOf(vn));
+    return rc;
+}
+
+/// Safety: `vn` is a live vnode the caller holds; no vnode lock held.
+@export("vfs_chown")
+unsafe fn chown(vn: *mut vnode, uid: u32, gid: u32) -> i32 {
+    let c = cred_current();
+    let admin = has(c, PRIV_SYS_ADMIN);
+    let mnt = mountOf(vn);
+    if (!mnt.isNull() && (Ptr.toBorrow(mnt as *mount).flags & MOUNT_RDONLY) != 0) {
+        return -EROFS;
+    }
+    // The rule reads the owner and group under the lock the change is made under: checked outside it, a group change
+    // could be authorised by an owner another chown had already replaced (found in review).
+    mutex_lock(lockOf(vn));
+    let owner = Ptr.toBorrow(c).euid == Ptr.toBorrow(vn as *vnode).uid;
+    if ((uid != VFS_ID_KEEP && !admin && !(owner && uid == Ptr.toBorrow(vn as *vnode).uid)) ||
+        (gid != VFS_ID_KEEP && !admin && !(owner && (gid == Ptr.toBorrow(vn as *vnode).gid || cred_in_group(c, gid))))) {
+        mutex_unlock(lockOf(vn));
+        return -EPERM;
+    }
+    let oldUid = Ptr.toBorrow(vn as *vnode).uid;
+    let oldGid = Ptr.toBorrow(vn as *vnode).gid;
+    let oldMode = Ptr.toBorrow(vn as *vnode).mode;
+    let oldCtime = Ptr.toBorrow(vn as *vnode).ctime_ns;
+    {
+        let x = Ptr.toBorrowMut(vn);
+        if (uid != VFS_ID_KEEP) {
+            x.uid = uid;
+        }
+        if (gid != VFS_ID_KEEP) {
+            x.gid = gid;
+        }
+        // Linux's ATTR_KILL_SUID and ATTR_KILL_SGID, which chown_common sets for every successful chown of a
+        // non-directory, -1, -1 included (found in review): a program's set-id bits do not survive a chown.
+        if (x.kind == VNODE_REG) {
+            x.mode = x.mode & (0o4000 ^ 0xFFFFFFFF);
+            if ((x.mode & 0o0010) != 0) {
+                x.mode = x.mode & (0o2000 ^ 0xFFFFFFFF);
+            }
+        }
+    }
+    let now = vfs_now_ns();
+    {
+        let x = Ptr.toBorrowMut(vn);
+        x.ctime_ns = now;
+    }
+    let rc = store(vn);
+    if (rc != 0) {
+        // Not stored: the vnode says what the inode says, not what was asked, or a later write-back would store it
+        // after all.
+        let x = Ptr.toBorrowMut(vn);
+        x.uid = oldUid;
+        x.gid = oldGid;
+        x.mode = oldMode;
+        x.ctime_ns = oldCtime;
+    }
+    mutex_unlock(lockOf(vn));
+    return rc;
+}
+
+/// Search permission on a directory being entered; consumes `dir` on failure.
+/// Safety: `dir` is a vnode the caller holds a reference on.
+unsafe fn maySearch(dir: *mut vnode) -> i32 {
+    let rc = permission(dir as *vnode, VFS_MAY_EXEC);
+    if (rc != 0) {
+        vnode_put(dir);
+    }
+    return rc;
+}
+
+// --- the walk -------------------------------------------------------------------------------------------------------
+
+/// One path resolution's symlink state: how many links it has expanded, and the two buffers an expansion needs -- the
+/// path being walked and the one being built -- carved from a single allocation taken on the first expansion. A walk
+/// that meets no link allocates nothing, which is every walk in a tree without links.
+///
+/// The halves ping-pong: a target is read into the half that is not the current path and the remainder is appended
+/// there, so the copy never overlaps the string it reads (the remainder points into the current path).
+struct Walk {
+    /// The traversed name (P32): the absolute name, relative to the caller's root, of the directory the walk is in.
+    /// Null when the caller did not ask; `nameLong` once it would not fit.
+    name: *mut u8;
+    nameLen: usize;
+    nameCap: usize;
+    nameLong: bool;
+    links: u32;
+    /// 2 * VFS_PATH_MAX, or null; `cur` the half holding the path being walked, `alt` the other.
+    buf: *mut u8;
+    cur: *mut u8;
+    alt: *mut u8;
+    /// The caller's root, referenced, captured at the walk's first need of it and used for all of it: an absolute
+    /// start, an absolute link target and every `..` boundary (shell completeness S4, P39 -- the root became mutable
+    /// with chroot, and a walk that re-read it at each `..` could see a nested chroot move the boundary below where it
+    /// already stood, and climb past both).
+    root: *mut vnode;
+}
+
+fn walkNew() -> Walk => Walk {
+    name: 0 as *mut u8,
+    nameLen: 0,
+    nameCap: 0,
+    nameLong: false,
+    links: 0,
+    buf: 0 as *mut u8,
+    cur: 0 as *mut u8,
+    alt: 0 as *mut u8,
+    root: 0 as *mut vnode,
+};
+
+/// Safety: called from a thread.
+unsafe fn walkRoot(w: borrow mut Walk) -> *mut vnode {
+    if (w.root.isNull()) {
+        w.root = vfs_current_root();
+    }
+    return w.root;
+}
+
+/// Safety: the walk's root, if any, is referenced.
+unsafe fn walkFini(w: borrow mut Walk) {
+    kfree(w.buf as *mut void);
+    w.buf = 0 as *mut u8;
+    if (!w.root.isNull()) {
+        vnode_put(w.root);
+    }
+    w.root = 0 as *mut vnode;
+}
+
+/// Whether `name` is "." or "..".
+/// Safety: `name` holds `len` bytes.
+@export("vfs_dot_name")
+unsafe fn dotName(name: *u8, len: usize) -> bool =>
+    (len == 1 && at(name, 0) == DOT) || (len == 2 && at(name, 0) == DOT && at(name, 1) == DOT);
+
+/// The traversed name follows the walk's own rules, applied to a string (docs/audit/next-subsystem-cwd-name.md,
+/// section 1): an absolute start or an absolute link target is `/`; a component entered as anything but a followed
+/// link is appended, `.` adding nothing and `..` removing the last component (and staying at `/`). A link is never
+/// appended: a relative target continues from the directory the link was found in, which is the name as it stands.
+/// `..` removing a component is right because the name holds no link -- the directory before its last component is
+/// the one `..` reaches, a mount root's included, whose mountpoint is the component removed.
+/// Safety: the walk's name, if any, holds nameCap bytes.
+unsafe fn nameReset(w: borrow mut Walk) {
+    if (w.name.isNull()) {
+        return;
+    }
+    {
+        let p0 = Ptr.toBorrowMut(w.name);
+        *p0 = SLASH;
+    }
+    {
+        let p1 = Ptr.toBorrowMut(w.name.add(1));
+        *p1 = 0;
+    }
+    w.nameLen = 1;
+    w.nameLong = false; // what overflowed before the restart is no part of the name (found in review)
+}
+
+/// Safety: as nameReset; `comp` holds `len` bytes.
+unsafe fn nameStep(w: borrow mut Walk, comp: *u8, len: usize) {
+    if (w.name.isNull() || (len == 1 && at(comp, 0) == DOT)) {
+        return;
+    }
+    if (len == 2 && at(comp, 0) == DOT && at(comp, 1) == DOT) {
+        var at2 = w.nameLen;
+        while (at2 > 1 && at(w.name as *u8, at2 - 1) != SLASH) {
+            at2 -= 1;
+        }
+        w.nameLen = if (at2 > 1) at2 - 1 else 1; // the separator goes too, unless it is the root
+        let end = Ptr.toBorrowMut(w.name.add(w.nameLen));
+        *end = 0;
+        return;
+    }
+    let sep: usize = if (w.nameLen > 1) 1 else 0;
+    if (w.nameLen + sep + len + 1 > w.nameCap) {
+        w.nameLong = true; // reported by the caller, which asked for it
+        return;
+    }
+    if (sep != 0) {
+        let s = Ptr.toBorrowMut(w.name.add(w.nameLen));
+        *s = SLASH;
+        w.nameLen += 1;
+    }
+    let _ = memcpy(w.name.add(w.nameLen) as *mut void, comp as *void, len);
+    w.nameLen += len;
+    let end = Ptr.toBorrowMut(w.name.add(w.nameLen));
+    *end = 0;
+}
+
+/// Replace the path being walked with `link`'s target followed by `rest`. Returns the new path through `out` and
+/// whether it is absolute; the caller decides where to continue from. -ELOOP past the budget, -ENAMETOOLONG when the
+/// result would not fit a path.
+/// Safety: `link` is a live link; `rest` null or NUL-terminated; `out` and `absolute` writable.
+unsafe fn walkExpand(w: borrow mut Walk, link: *mut vnode, rest: *u8, out: *mut *u8, absolute: *mut bool) -> i32 {
+    if (w.links >= VFS_MAX_SYMLINKS) {
+        return -ELOOP;
+    }
+    let ops = Ptr.toBorrow(link as *vnode).ops;
+    if (Ptr.toBorrow(ops).readlink.isNull()) {
+        return -EIO; // a link this filesystem cannot read is not a link
+    }
+    if (w.buf.isNull()) {
+        w.buf = kmalloc(2 * VFS_PATH_MAX, 0) as *mut u8;
+        if (w.buf.isNull()) {
+            return -ENOMEM;
+        }
+        w.cur = w.buf;
+        w.alt = w.buf.add(VFS_PATH_MAX);
+    }
+    let dst = w.alt;
+    mutex_lock(lockOf(link));
+    let n = Ptr.toBorrow(ops).readlink(link, dst as *mut CChar, VFS_PATH_MAX - 1);
+    mutex_unlock(lockOf(link));
+    if (n < 0) {
+        return n;
+    }
+    if (n == 0) {
+        return -ENOENT; // an empty target names nothing
+    }
+    let restlen = if (rest.isNull()) 0 else strlen(rest as *CChar);
+    let got = truncate<usize>(n); // positive
+    if (got + (if (restlen != 0) restlen + 1 else 0) >= VFS_PATH_MAX) {
+        return -ENAMETOOLONG; // never silently drop what follows the link
+    }
+    var end = got;
+    if (restlen != 0) {
+        let s = Ptr.toBorrowMut(dst.add(end));
+        *s = SLASH;
+        end += 1;
+        let _ = memcpy(dst.add(end) as *mut void, rest as *void, restlen);
+        end += restlen;
+    }
+    {
+        let z = Ptr.toBorrowMut(dst.add(end));
+        *z = 0;
+    }
+    let swap = w.cur;
+    w.cur = w.alt;
+    w.alt = swap;
+    {
+        let a = Ptr.toBorrowMut(absolute);
+        *a = at(dst as *u8, 0) == SLASH;
+    }
+    {
+        let o = Ptr.toBorrowMut(out);
+        *o = dst as *u8;
+    }
+    w.links += 1;
+    return 0;
+}
+
+/// One component from `dir` (referenced, consumed). Returns a referenced child. Entering a directory needs search
+/// permission on it. `..` stops at the walk's root.
+/// Safety: `dir` is a directory the caller holds; `name` holds `len` bytes; `out` is writable; no vnode lock held.
+unsafe fn step(w: borrow mut Walk, dir: *mut vnode, name: *u8, len: usize, out: *mut *mut vnode) -> i32 {
+    if (len == 1 && at(name, 0) == DOT) {
+        let rc = maySearch(dir);
+        if (rc != 0) {
+            return rc;
+        }
+        give(out, dir);
+        return 0;
+    }
+    if (len == 2 && at(name, 0) == DOT && at(name, 1) == DOT) {
+        // ".." stops at the caller's root as it stops at the global one, and the test comes *first* -- before the
+        // step that leaves a mount through its mountpoint. A process rooted at a mounted filesystem stands on that
+        // filesystem's root vnode, which the crossing would replace with the covered vnode underneath it: a different
+        // vnode, no longer equal to the root, and the walk would climb out of the very mount it was confined to.
+        //
+        // The root this walk began with, not the process's root now: a chroot on another thread (P39) must not move
+        // the boundary under a walk already past it.
+        if (dir == walkRoot(mut w)) {
+            let prc = maySearch(dir);
+            if (prc != 0) {
+                return prc;
+            }
+            give(out, dir);
+            return 0;
+        }
+
+        // At a mount root, ".." leaves through the mountpoint.
+        var base = dir;
+        let mnt = mountOf(dir);
+        if (Ptr.toBorrow(mnt as *mount).root == dir && !Ptr.toBorrow(mnt as *mount).mountpoint.isNull()) {
+            base = Ptr.toBorrow(mnt as *mount).mountpoint;
+            vnode_get(base);
+            vnode_put(dir);
+        }
+        let rc = maySearch(base);
+        if (rc != 0) {
+            return rc;
+        }
+        if (Ptr.toBorrow(mountOf(base) as *mount).root == base) { // the global root: stays put
+            give(out, base);
+            return 0;
+        }
+        mutex_lock(lockOf(base));
+        let lrc = opLookup(base, "..".ptr, 2, out);
+        mutex_unlock(lockOf(base));
+        vnode_put(base);
+        return lrc;
+    }
+    let prc = maySearch(dir);
+    if (prc != 0) {
+        return prc;
+    }
+    mutex_lock(lockOf(dir));
+    let rc = if ((Ptr.toBorrow(dir as *vnode).flags & VNODE_DEAD) != 0) -ENOENT else opLookup(dir, name, len, out);
+    mutex_unlock(lockOf(dir));
+    vnode_put(dir);
+    if (rc != 0) {
+        return rc;
+    }
+    return followMount(out);
+}
+
+/// Whether `dir` lies under `root`: climbing `..` as step() climbs it -- out of a mount through its mountpoint, then
+/// the filesystem's own entry -- meets `root` before the top of the tree. Free for an unconfined walk (`root` is the
+/// global root, which everything is under); for a confined one it costs a lookup per level, bounded by the depth a
+/// path can name.
+/// Safety: `dir` is a directory the caller holds; `root` null or referenced; no vnode lock held.
+unsafe fn withinRoot(dir: *mut vnode, root: *mut vnode) -> bool {
+    if (root.isNull() || root == globalRoot()) {
+        return true;
+    }
+    var cur = dir;
+    vnode_get(cur);
+    var depth: usize = 0;
+    while (depth < VFS_PATH_MAX / 2) {
+        if (cur == root) {
+            vnode_put(cur);
+            return true;
+        }
+        let mnt = mountOf(cur);
+        if (Ptr.toBorrow(mnt as *mount).root == cur) {
+            let mp = Ptr.toBorrow(mnt as *mount).mountpoint;
+            if (mp.isNull()) {
+                break; // the top of the tree, and the root was not on the way
+            }
+            vnode_get(mp);
+            vnode_put(cur);
+            cur = mp; // the covered directory, then its own `..`
+        } else {
+            var parent = 0 as *mut vnode;
+            mutex_lock(lockOf(cur));
+            let rc = if ((Ptr.toBorrow(cur as *vnode).flags & VNODE_DEAD) != 0) -ENOENT
+                else opLookup(cur, "..".ptr, 2, borrow mut parent as *mut *mut vnode);
+            mutex_unlock(lockOf(cur));
+            vnode_put(cur);
+            if (rc != 0) {
+                return false; // removed, or a filesystem that cannot say: not shown to be inside
+            }
+            cur = parent;
+        }
+        depth += 1;
+    }
+    vnode_put(cur);
+    return false;
+}
+
+/// Walk every component but the last, expanding any symbolic link met on the way. On success *parent is referenced
+/// and the last component is copied into `namebuf` (a VFS_NAME_MAX + 1 buffer; empty for the root), which is the
+/// caller's because the path may live in the walk's own scratch and not outlive it.
+/// Safety: `start` null or a directory the caller holds; `path` null or NUL-terminated; the out-pointers writable,
+/// `trailingSlash` null or writable; no vnode lock held.
+unsafe fn walkParent(start: *mut vnode, pathIn: *u8, w: borrow mut Walk, namebuf: *mut u8, parent: *mut *mut vnode,
+    lastLen: *mut usize, trailingSlash: *mut bool) -> i32 {
+    if (pathIn.isNull() || strnlen(pathIn as *CChar, VFS_PATH_MAX) >= VFS_PATH_MAX) {
+        return -ENAMETOOLONG;
+    }
+    if (!trailingSlash.isNull()) {
+        let t = Ptr.toBorrowMut(trailingSlash);
+        *t = false;
+    }
+    var path = pathIn;
+    var cur = 0 as *mut vnode;
+    if (at(path, 0) == SLASH || start.isNull()) {
+        // Absolute means absolute *to this process*: a process given a root below the global one cannot name its way
+        // out with a leading slash.
+        cur = walkRoot(mut w);
+        if (cur.isNull()) {
+            return -ENOENT; // no root mounted yet: nothing is absolute
+        }
+        vnode_get(cur);
+        nameReset(mut w);
+    } else {
+        // The one line every relative walk from every caller shares, and the first dereference of the caller's
+        // starting directory: the held-walk seam sits in front of it, with the pointer read and nothing yet taken.
+        let hrc = vfs_cwd_hold_walk(start);
+        if (hrc != 0) {
+            return hrc;
+        }
+        // A confined walk starts only from inside its root: a directory renamed out from under the root after it was
+        // entered or opened would otherwise be a base whose `..` never meets the root (P39; found in review, and
+        // older than chroot -- a root given at spawn had it too).
+        if (!withinRoot(start, walkRoot(mut w))) {
+            return -EACCES;
+        }
+        cur = start;
+        vnode_get(cur);
+    }
+    while (at(path, 0) == SLASH) {
+        path = path.add(1);
+    }
+
+    var components: u32 = 0;
+    loop {
+        var len: usize = 0;
+        while (at(path, len) != 0 && at(path, len) != SLASH) {
+            len += 1;
+        }
+        let end = path.add(len);
+        var next = end;
+        while (at(next, 0) == SLASH) {
+            next = next.add(1);
+        }
+
+        if (len == 0) { // the root itself, or a trailing separator
+            give(parent, cur);
+            {
+                let z = Ptr.toBorrowMut(namebuf);
+                *z = 0;
+            }
+            {
+                let l = Ptr.toBorrowMut(lastLen);
+                *l = 0;
+            }
+            return 0;
+        }
+        if (len > VFS_NAME_MAX) {
+            vnode_put(cur);
+            return -ENAMETOOLONG;
+        }
+        if (at(next, 0) == 0) {
+            give(parent, cur);
+            let _ = memcpy(namebuf as *mut void, path as *void, len);
+            {
+                let z = Ptr.toBorrowMut(namebuf.add(len));
+                *z = 0;
+            }
+            {
+                let l = Ptr.toBorrowMut(lastLen);
+                *l = len;
+            }
+            if (!trailingSlash.isNull()) {
+                let t = Ptr.toBorrowMut(trailingSlash);
+                *t = at(end, 0) == SLASH;
+            }
+            return 0;
+        }
+        components += 1;
+        if (components > VFS_MAX_COMPONENTS) {
+            vnode_put(cur);
+            return -ELOOP;
+        }
+        if (Ptr.toBorrow(cur as *vnode).kind != VNODE_DIR) {
+            vnode_put(cur);
+            return -ENOTDIR;
+        }
+        // step() consumes this reference (it puts `dir` before returning the child), and a relative target resolves
+        // against the directory the link was found in -- so the walk holds a second one across the step and releases
+        // it as soon as the child turns out not to be a link.
+        let linkdir = cur;
+        vnode_get(linkdir);
+        var child = 0 as *mut vnode;
+        let rc = step(mut w, cur, path, len, borrow mut child as *mut *mut vnode);
+        if (rc != 0) {
+            vnode_put(linkdir);
+            return rc;
+        }
+        if (Ptr.toBorrow(child as *vnode).kind == VNODE_LNK) {
+            var expanded = 0 as *u8;
+            var absolute = false;
+            let erc = walkExpand(mut w, child, next, borrow mut expanded as *mut *u8, borrow mut absolute as *mut bool);
+            vnode_put(child);
+            if (erc != 0) {
+                vnode_put(linkdir);
+                return erc;
+            }
+            if (absolute) {
+                vnode_put(linkdir);
+                cur = walkRoot(mut w);
+                if (cur.isNull()) {
+                    return -ENOENT;
+                }
+                vnode_get(cur);
+                nameReset(mut w);
+            } else {
+                cur = linkdir; // keeps linkdir's reference; the name stays the directory's
+            }
+            path = expanded;
+            while (at(path, 0) == SLASH) {
+                path = path.add(1);
+            }
+        } else {
+            vnode_put(linkdir);
+            nameStep(mut w, path, len);
+            cur = child;
+            path = next;
+        }
+    }
+}
+
+/// A walk to the parent of `path`'s last component, with a walk of its own: what a mutation and a link walk.
+/// Safety: as walkParent.
+@export("vfs_walk_parent")
+unsafe fn walkParentPlain(start: *mut vnode, path: *CChar, namebuf: *mut CChar, parent: *mut *mut vnode,
+    lastLen: *mut usize, trailingSlash: *mut bool) -> i32 {
+    var w = walkNew();
+    let rc = walkParent(start, path as *u8, mut w, namebuf as *mut u8, parent, lastLen, trailingSlash);
+    walkFini(mut w);
+    return rc;
+}
+
+/// The name `name` in the referenced directory `dir`, with the search permission check and the mount crossing the
+/// walk applies. `dir` stays the caller's.
+/// Safety: `dir` is a directory the caller holds; `name` holds `len` bytes; `out` is writable; no vnode lock held.
+unsafe fn lookupIn(dir: *mut vnode, name: *u8, len: usize, out: *mut *mut vnode) -> i32 {
+    var rc = permission(dir as *vnode, VFS_MAY_EXEC);
+    if (rc != 0) {
+        return rc;
+    }
+    mutex_lock(lockOf(dir));
+    rc = if ((Ptr.toBorrow(dir as *vnode).flags & VNODE_DEAD) != 0) -ENOENT else opLookup(dir, name, len, out);
+    mutex_unlock(lockOf(dir));
+    if (rc != 0) {
+        return rc;
+    }
+    return followMount(out);
+}
+
+const RESOLVE_FOLLOW: u32 = 1; // follow a link named by the last component
+
+/// A whole path to a referenced vnode, expanding links on the way and -- with RESOLVE_FOLLOW -- at the end. The walk
+/// carries the budget, so a chain that ends in a link cannot outrun it. An absolute target restarts at the caller's
+/// root (walk_parent does that for a NULL start), which is what keeps a link inside a process's root.
+/// Safety: as walkParent; `out` is writable.
+unsafe fn resolve(start: *mut vnode, pathIn: *u8, w: borrow mut Walk, flags: u32, out: *mut *mut vnode) -> i32 {
+    var name: [u8; 256] = [0; 256];
+    let namePtr = borrow mut name as *mut [u8; 256] as *mut u8;
+    var base = start; // borrowed from the caller ...
+    var owned = false; // ... until an expansion makes it ours
+    var path = pathIn;
+    loop {
+        var parent = 0 as *mut vnode;
+        var len: usize = 0;
+        var trailing = false;
+        var rc = walkParent(base, path, mut w, namePtr, borrow mut parent as *mut *mut vnode,
+            borrow mut len as *mut usize, borrow mut trailing as *mut bool);
+        if (owned) {
+            vnode_put(base); // walk_parent took its own reference
+            base = 0 as *mut vnode;
+            owned = false;
+        }
+        if (rc != 0) {
+            return rc;
+        }
+        if (len == 0) { // the root itself: never a link
+            give(out, parent);
+            return 0;
+        }
+        if (Ptr.toBorrow(parent as *vnode).kind != VNODE_DIR) {
+            vnode_put(parent);
+            return -ENOTDIR;
+        }
+        var vn = 0 as *mut vnode;
+        if (dotName(namePtr as *u8, len)) {
+            vnode_get(parent);
+            rc = step(mut w, parent, namePtr as *u8, len, borrow mut vn as *mut *mut vnode); // consumes that reference
+        } else {
+            rc = lookupIn(parent, namePtr as *u8, len, borrow mut vn as *mut *mut vnode);
+        }
+        if (rc != 0) {
+            vnode_put(parent);
+            return rc;
+        }
+        if (Ptr.toBorrow(vn as *vnode).kind != VNODE_LNK || (flags & RESOLVE_FOLLOW) == 0) {
+            vnode_put(parent);
+            nameStep(mut w, namePtr as *u8, len);
+            // `name/` names a directory, whatever the name resolved to.
+            if (trailing && Ptr.toBorrow(vn as *vnode).kind != VNODE_DIR) {
+                vnode_put(vn);
+                return -ENOTDIR;
+            }
+            give(out, vn);
+            return 0;
+        }
+        var expanded = 0 as *u8;
+        var absolute = false;
+        rc = walkExpand(mut w, vn, 0 as *u8, borrow mut expanded as *mut *u8, borrow mut absolute as *mut bool);
+        vnode_put(vn);
+        if (rc != 0) {
+            vnode_put(parent);
+            return rc;
+        }
+        if (absolute) {
+            vnode_put(parent);
+            base = 0 as *mut vnode;
+        } else {
+            base = parent;
+            owned = true;
+        }
+        path = expanded;
+    }
+}
+
+/// Safety: as resolve.
+unsafe fn lookupFlags(start: *mut vnode, path: *CChar, flags: u32, out: *mut *mut vnode) -> i32 {
+    var w = walkNew();
+    let rc = resolve(start, path as *u8, mut w, flags, out);
+    walkFini(mut w);
+    return rc;
+}
+
+/// Safety: `start` null or a directory the caller holds; `path` null or NUL-terminated; `out` writable.
+@export("vfs_lookup")
+unsafe fn lookup(start: *mut vnode, path: *CChar, out: *mut *mut vnode) -> i32 =>
+    lookupFlags(start, path, RESOLVE_FOLLOW, out);
+
+/// Safety: as vfs_lookup; `startname` null or NUL-terminated; `name` holds `n` bytes.
+@export("vfs_lookup_named")
+unsafe fn lookupNamed(start: *mut vnode, startname: *CChar, path: *CChar, out: *mut *mut vnode, name: *mut CChar,
+    n: usize) -> i32 {
+    if (name.isNull() || n < 2) {
+        return -EINVAL;
+    }
+    if (!path.isNull() && at(path as *u8, 0) != SLASH && !start.isNull()) {
+        // A relative walk continues from its start's name, which must be one: a directory that recorded none cannot
+        // name what is below it.
+        if (startname.isNull() || at(startname as *u8, 0) != SLASH) {
+            return -ENOENT;
+        }
+        if (strlcpy(name, startname, n) >= n) {
+            return -ENAMETOOLONG;
+        }
+    } else {
+        // walk_parent resets it too; this is the empty-path case
+        {
+            let p0 = Ptr.toBorrowMut(name as *mut u8);
+            *p0 = SLASH;
+        }
+        let p1 = Ptr.toBorrowMut((name as *mut u8).add(1));
+        *p1 = 0;
+    }
+    var w = walkNew();
+    w.name = name as *mut u8;
+    w.nameLen = strlen(name as *CChar);
+    w.nameCap = n;
+    let rc = resolve(start, path as *u8, mut w, RESOLVE_FOLLOW, out);
+    walkFini(mut w);
+    if (rc != 0) {
+        return rc;
+    }
+    if (w.nameLong) {
+        vnode_put(taken(out));
+        give(out, 0 as *mut vnode);
+        return -ENAMETOOLONG;
+    }
+    return 0;
+}
+
+/// Safety: as vfs_lookup.
+@export("vfs_lookup_nofollow")
+unsafe fn lookupNofollow(start: *mut vnode, path: *CChar, out: *mut *mut vnode) -> i32 =>
+    lookupFlags(start, path, 0, out);
+
+// --- an open's walk -------------------------------------------------------------------------------------------------
+
+/// vfs_open's walk, which keeps the traversed name when `w` asks for one.
+/// Safety: as walkParent; `out` writable.
+unsafe fn openWalk(start: *mut vnode, pathIn: *u8, flagsIn: u32, mode: u32, out: *mut *mut file, w: borrow mut Walk)
+    -> i32 {
+    var flags = flagsIn;
+    let acc = flags & COSMO_O_ACCMODE;
+    if (acc == COSMO_O_ACCMODE) {
+        return -EINVAL;
+    }
+
+    // The resolution is a loop so that a symbolic link named by the last component re-enters it with the target
+    // path: O_CREAT then creates the target of a dangling link, O_TRUNC truncates the target, and the permission
+    // checks are the target's -- which is what every one of those flags means. The walk carries the budget across
+    // rounds, so a chain ending in a link cannot outrun it, and every exit runs one cleanup.
+    var base = start; // borrowed from the caller ...
+    var baseOwned = false; // ... until an expansion makes it ours
+    var vn = 0 as *mut vnode;
+    var created = false;
+    var rc: i32 = 0;
+    var path = pathIn;
+    var last: [u8; 256] = [0; 256];
+    let lastPtr = borrow mut last as *mut [u8; 256] as *mut u8;
+
+    loop {
+        var parent = 0 as *mut vnode;
+        var len: usize = 0;
+        var trailing = false;
+        rc = walkParent(base, path, mut w, lastPtr, borrow mut parent as *mut *mut vnode, borrow mut len as *mut usize,
+            borrow mut trailing as *mut bool);
+        if (baseOwned) {
+            vnode_put(base); // walk_parent took its own reference
+            base = 0 as *mut vnode;
+            baseOwned = false;
+        }
+        if (rc != 0) {
+            break;
+        }
+        if (trailing) {
+            flags = flags | COSMO_O_DIRECTORY;
+        }
+
+        if (len == 0) {
+            vn = parent; // the root itself
+            break;
+        }
+        if (Ptr.toBorrow(parent as *vnode).kind != VNODE_DIR) {
+            vnode_put(parent);
+            rc = -ENOTDIR;
+            break;
+        }
+        if (dotName(lastPtr as *u8, len)) {
+            rc = step(mut w, parent, lastPtr as *u8, len, borrow mut vn as *mut *mut vnode); // consumes the reference
+            if (rc != 0) {
+                break;
+            }
+            nameStep(mut w, lastPtr as *u8, len);
+            break; // "." and ".." are directories
+        }
+
+        rc = permission(parent as *vnode, VFS_MAY_EXEC); // search the last directory
+        if (rc != 0) {
+            vnode_put(parent);
+            break;
+        }
+        mutex_lock(lockOf(parent));
+        rc = if ((Ptr.toBorrow(parent as *vnode).flags & VNODE_DEAD) != 0) -ENOENT
+            else opLookup(parent, lastPtr as *u8, len, borrow mut vn as *mut *mut vnode);
+        if (rc == -ENOENT && (flags & COSMO_O_CREAT) != 0) {
+            let ops = Ptr.toBorrow(parent as *vnode).ops;
+            if ((Ptr.toBorrow(mountOf(parent) as *mount).flags & MOUNT_RDONLY) != 0) {
+                rc = -EROFS;
+            } else if (Ptr.toBorrow(ops).create.isNull()) {
+                rc = -ENOTSUP;
+            } else if (permission(parent as *vnode, VFS_MAY_WRITE) != 0) {
+                rc = -EACCES; // creating an entry writes the directory
+            } else {
+                rc = Ptr.toBorrow(ops).create(parent, lastPtr as *CChar, len, mode & 0o7777,
+                    borrow mut vn as *mut *mut vnode);
+                created = rc == 0;
+            }
+        } else if (rc == 0 && (flags & COSMO_O_CREAT) != 0 && (flags & COSMO_O_EXCL) != 0) {
+            vnode_put(vn);
+            rc = -EEXIST; // a link counts as existing, as POSIX says
+        }
+        mutex_unlock(lockOf(parent));
+        if (rc == 0) {
+            rc = followMount(borrow mut vn as *mut *mut vnode);
+        }
+        if (rc != 0) {
+            vnode_put(parent);
+            break;
+        }
+        if (Ptr.toBorrow(vn as *vnode).kind != VNODE_LNK) {
+            vnode_put(parent);
+            nameStep(mut w, lastPtr as *u8, len);
+            break;
+        }
+        if ((flags & COSMO_O_NOFOLLOW) != 0) {
+            vnode_put(vn);
+            vnode_put(parent);
+            vn = 0 as *mut vnode;
+            rc = -ELOOP; // Linux's answer for a link opened with O_NOFOLLOW
+            break;
+        }
+        var expanded = 0 as *u8;
+        var absolute = false;
+        rc = walkExpand(mut w, vn, 0 as *u8, borrow mut expanded as *mut *u8, borrow mut absolute as *mut bool);
+        vnode_put(vn);
+        vn = 0 as *mut vnode;
+        if (rc != 0) {
+            vnode_put(parent);
+            break;
+        }
+        if (absolute) {
+            vnode_put(parent); // an absolute target restarts at the caller's root
+        } else {
+            base = parent; // a relative one, at the link's own directory
+            baseOwned = true;
+        }
+        path = expanded;
+    }
+    walkFini(mut w);
+    if (rc != 0) {
+        if (baseOwned) {
+            vnode_put(base);
+        }
+        return rc;
+    }
+
+    if ((flags & COSMO_O_DIRECTORY) != 0 && Ptr.toBorrow(vn as *vnode).kind != VNODE_DIR) {
+        vnode_put(vn);
+        return -ENOTDIR;
+    }
+    if (Ptr.toBorrow(vn as *vnode).kind == VNODE_SOCK) {
+        vnode_put(vn);
+        return -ENXIO; // a socket's name is connected to, not opened (Linux's answer)
+    }
+    if (Ptr.toBorrow(vn as *vnode).kind == VNODE_DIR && acc != COSMO_O_RDONLY) {
+        vnode_put(vn);
+        return -EISDIR;
+    }
+    if (acc != COSMO_O_RDONLY && (Ptr.toBorrow(mountOf(vn) as *mount).flags & MOUNT_RDONLY) != 0) {
+        vnode_put(vn);
+        return -EROFS;
+    }
+    // The file itself: read and/or write per the access mode. A file this call just created is the caller's
+    // regardless of the mode it asked for (POSIX), so the check is skipped for it.
+    if (!created) {
+        var need: u32 = 0;
+        if (acc != COSMO_O_WRONLY) {
+            need = need | VFS_MAY_READ;
+        }
+        if (acc != COSMO_O_RDONLY) {
+            need = need | VFS_MAY_WRITE;
+        }
+        rc = permission(vn as *vnode, need);
+        if (rc != 0) {
+            vnode_put(vn);
+            return rc;
+        }
+    }
+    if ((flags & COSMO_O_TRUNC) != 0 && Ptr.toBorrow(vn as *vnode).kind == VNODE_REG && acc != COSMO_O_RDONLY) {
+        mutex_lock(lockOf(vn));
+        // Truncating a running program removes the pages it is executing: the same harm the write refuses.
+        let ops = Ptr.toBorrow(vn as *vnode).ops;
+        rc = if (vfs_text_busy_locked(vn)) -ETXTBSY
+            else if (Ptr.toBorrow(ops).truncate.isNull()) -ENOTSUP
+            else Ptr.toBorrow(ops).truncate(vn, 0);
+        mutex_unlock(lockOf(vn));
+        if (rc != 0) {
+            vnode_put(vn);
+            return rc;
+        }
+    }
+    return openVnodeAs(vn, flags, out);
+}
+
+/// The file for `vn` (whose reference it takes), its open hook run.
+/// Safety: `vn` is a vnode the caller holds a reference on, which it gives up; `out` writable.
+unsafe fn openVnodeAs(vn: *mut vnode, flags: u32, out: *mut *mut file) -> i32 {
+    let f = vfs_file_alloc(vn, flags);
+    if (f.isNull()) {
+        vnode_put(vn);
+        return -ENOMEM;
+    }
+    let orc = vfs_file_run_open(f);
+    if (orc != 0) {
+        return orc;
+    }
+    let slot = Ptr.toBorrowMut(out);
+    *slot = f;
+    return 0;
+}
+
+/// Safety: as openWalk.
+@export("vfs_open")
+unsafe fn open(start: *mut vnode, path: *CChar, flags: u32, mode: u32, out: *mut *mut file) -> i32 {
+    var w = walkNew();
+    return openWalk(start, path as *u8, flags, mode, out, mut w);
+}
+
+/// The open's own walk names what it opened (P32): one walk, so the name is of the very vnode the file holds -- a
+/// second walk to name it could meet a rename in between and name another directory. The open never fails for the
+/// name's sake: a relative path from a start with no name, or a name that does not fit, leaves `name` empty.
+/// Safety: as openWalk; `startname` null or NUL-terminated; `name` holds `n` bytes, n >= 1.
+@export("vfs_open_named")
+unsafe fn openNamed(start: *mut vnode, startname: *CChar, path: *CChar, flags: u32, mode: u32, out: *mut *mut file,
+    name: *mut CChar, n: usize) -> i32 {
+    var w = walkNew();
+    {
+        let p0 = Ptr.toBorrowMut(name as *mut u8);
+        *p0 = 0;
+    }
+    if (n >= 2) {
+        var seeded = true;
+        if (!path.isNull() && at(path as *u8, 0) != SLASH && !start.isNull()) {
+            seeded = !startname.isNull() && at(startname as *u8, 0) == SLASH && strlcpy(name, startname, n) < n;
+        } else {
+            let _ = strlcpy(name, "/\0".ptr as *CChar, n);
+        }
+        if (seeded) {
+            w.name = name as *mut u8;
+            w.nameLen = strlen(name as *CChar);
+            w.nameCap = n;
+        } else {
+            let p0 = Ptr.toBorrowMut(name as *mut u8);
+            *p0 = 0;
+        }
+    }
+    let rc = openWalk(start, path as *u8, flags, mode, out, mut w);
+    if (rc == 0 && w.nameLong) {
+        let p0 = Ptr.toBorrowMut(name as *mut u8);
+        *p0 = 0;
+    }
+    return rc;
+}
+
+/// Safety: `vn` is a vnode the caller holds a reference on, which it gives up; `out` writable.
+@export("vfs_open_vnode")
+unsafe fn openVnode(vn: *mut vnode, flags: u32, out: *mut *mut file) -> i32 => openVnodeAs(vn, flags, out);

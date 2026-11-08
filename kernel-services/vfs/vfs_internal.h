@@ -60,4 +60,18 @@ struct mount *vfs_covering_mount(const struct vnode *dir);
 struct mount *vfs_covering_mount_ns(const struct vnode *dir, const struct mount_ns *ns);
 bool vfs_entry_is_mountpoint(struct vnode *vn, struct vnode *held1, struct vnode *held2);
 
+/* The walk to the parent of `path`'s last component, which is copied into
+ * `namebuf` (VFS_NAME_MAX + 1 bytes; empty for the root): *parent is
+ * referenced on success (vfs_walk.cee). Whether `name` is "." or "..". */
+int vfs_walk_parent(struct vnode *start, const char *path, char *namebuf, struct vnode **parent, size_t *last_len,
+                    bool *trailing_slash);
+bool vfs_dot_name(const char *name, size_t len);
+
+/* vfs.c's files, which the open's walk makes: a file for `vn` (taking the
+ * reference), its open hook run (on refusal the file is dropped); whether
+ * a regular file's text is executing (vn->lock held). */
+struct file *vfs_file_alloc(struct vnode *vn, unsigned flags);
+int vfs_file_run_open(struct file *f);
+bool vfs_text_busy_locked(struct vnode *vn);
+
 #endif /* VFS_INTERNAL_H */
