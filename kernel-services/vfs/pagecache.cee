@@ -6,13 +6,13 @@
 // whose cache is not their store sit on a global LRU, from whose tail a global limit evicts; dirty pages of such
 // mounts are counted against a bound at which a writer writes its own file back and then sleeps.
 //
-// The caches, their entries and the mounts stay C (pagecache.h, vfs.h). pagecache_floor.c keeps the LRU, a static
-// whose list head points into itself, and its lock; the dirty bound's waitqueue and lockdep class; the injected
-// readpage failure and the lockdep assertion, which some builds make inline; and a frame's direct-map address.
+// The caches, their entries and the mounts stay C (pagecache.h, vfs.h). The LRU is a static whose list head points
+// into itself, beside its lock and the dirty bound's waitqueue and lockdep class; the injected readpage failure is
+// faultinject.h's, and the lockdep assertion a `cfg` block (ADR 0080 §3.3).
 
-@header("kernel/errno.h", "kernel/kmalloc.h", "kernel/list.h", "kernel/mutex.h", "kernel/object.h",
-    "kernel/page.h", "kernel/pagecache.h", "kernel/pmm.h", "kernel/spinlock.h", "kernel/string.h", "kernel/vfs.h",
-    "kernel/vmm.h", "kernel/wait.h", "arch/mmu.h")
+@header("kernel/errno.h", "kernel/kmalloc.h", "kernel/list.h", "kernel/mutex.h", "kernel/object.h", "kernel/page.h",
+    "kernel/pagecache.h", "kernel/pmm.h", "kernel/spinlock.h", "kernel/string.h", "kernel/vfs.h", "kernel/vmm.h",
+    "kernel/wait.h", "arch/mmu.h", "kernel/faultinject.h", "kernel/lockdep.h")
 extern "C" {
     struct page {
         flags: u32;
@@ -28,7 +28,7 @@ extern "C" {
         lru: list_node;
     }
     struct pagecache {
-        // buckets, struct pc_entry *[PC_HASH] at offset 0 (asserted in pagecache_floor.c): reached through bucket()
+        // buckets, struct pc_entry *[PC_HASH] at offset 0 (which C checks): reached through bucket()
         nr_pages: u32;
         nr_dirty: u32;
         lock: mutex;
@@ -98,31 +98,89 @@ extern "C" {
         ns: u64,
     ) -> bool;
 
-    // pagecache_floor.c
-    fn pagecache_floor_lru() -> *mut list_node;
-    fn pagecache_floor_lru_lock() -> *mut spinlock_t;
-    fn pagecache_floor_dirty_wq() -> *mut waitqueue;
-    fn pagecache_floor_dirty_init();
-    fn pagecache_floor_dirty_wait();
-    fn pagecache_floor_dirty_signal();
-    fn pagecache_floor_readpage_fails() -> bool;
-    fn pagecache_floor_assert_held(m: *mut mutex);
-    fn pagecache_floor_virt(p: *page) -> *mut u8;
+    fn waitqueue_init(wq: *mut waitqueue, name: *CChar);
+    fn lockdep_completion_init(slot: *mut u16, name: *CChar, ip: usize);
+    fn lockdep_completion_wait(c: *void, slot: *mut u16, name: *CChar, ip: usize);
+    fn lockdep_completion_signal(c: *void, slot: *mut u16, name: *CChar, ip: usize);
+    /// lockdep.h: whether this thread holds `lock`, in a lockdep build only.
+    @cfg("CONFIG_LOCKDEP")
+    fn lockdep_is_held(lock: *void, kind: u32) -> bool;
+    const LOCKDEP_KIND_MUTEX: u32 = 1;
+    /// faultinject.h's readpage failure, for any miss (a hole on ramfs included), so the SIGBUS proof needs no disk.
+    enum fi_kind: u32;
+    const FI_FILE_READPAGE: fi_kind = 11;
+    fn faultinject_should_fail(kind: fi_kind) -> bool;
+    /// page.h's direct map (an inline function).
+    fn page_to_virt(p: *page) -> *mut void;
+
+    // The values and layout the C compiler checks (ADR 0080 §3.1), which the floor asserted.
+    const EIO: i32 = 5;
+    const ENOMEM: i32 = 12;
+    const EFBIG: i32 = 27;
+    const ENOSPC: i32 = 28;
+    const PAGE_SIZE: u64 = 4096;
+    const PC_HASH: u64 = 32;
+    const MOUNT_CACHE_IS_STORE: u32 = 2;
+    const PG_PAGECACHE: u32 = 128;
+    const PMM_FLAGS_ZERO: u32 = 4;
+    const VNODE_REG: u32 = 1;
+    /// pagecache.cee's errno.h, page.h, pagecache.h, pmm.h and vfs.h values
+    @cvalue("PAGECACHE_WRITE_RUN == 8 && sizeof(struct pagecache_stats) == 11 * 8")
+    const PAGECACHE_FACT_0: bool = true;
+    /// pagecache.cee's buckets: the cache's first field, an array of pointers
+    @cvalue("offsetof(struct pagecache, buckets) == 0 && sizeof(((struct pagecache *)0)->buckets[0]) == sizeof(size_t)")
+    const PAGECACHE_FACT_1: bool = true;
 }
 
-// errno.h, page.h, pagecache.h, pmm.h and vfs.h, which pagecache_floor.c checks.
-const EIO: i32 = 5;
-const ENOMEM: i32 = 12;
-const EFBIG: i32 = 27;
-const ENOSPC: i32 = 28;
-const PAGE_SIZE: u64 = 4096;
+// ---- The LRU, the dirty bound's wait, and the seams ----
+
+/// The global LRU of clean, reclaimable pages: head = most recent.
+static mut LRU: list_node = list_node { next: borrow mut LRU as *mut list_node, prev: borrow mut LRU as *mut list_node };
+static mut LRU_LOCK: spinlock_t = SPINLOCK_INIT("pagecache-lru\0".ptr as *CChar);
+/// The dirty bound's waitqueue, set up at boot, and the lockdep completion class of its sleep.
+static mut DIRTY_WQ: waitqueue = waitqueue {};
+static mut DIRTY_CLASS: u16 = 0;
+/// Where pagecache_dirty_init was called from, which names the class in lockdep's reports.
+static DIRTY_IP: AtomicUSize = AtomicUSize.constant(0);
+
+/// Safety: the LRU is used under its lock.
+unsafe fn lru() -> *mut list_node => borrow mut LRU as *mut list_node;
+
+/// Safety: as lru.
+unsafe fn lruLock() -> *mut spinlock_t => borrow mut LRU_LOCK as *mut spinlock_t;
+
+/// Safety: the waitqueue is set up at boot, before a writer is throttled.
+unsafe fn dirtyWq() -> *mut waitqueue => borrow mut DIRTY_WQ as *mut waitqueue;
+
+/// lockdep's record of the dirty bound's sleep and its wake.
+/// Safety: after pagecache_dirty_init.
+unsafe fn dirtyWait() {
+    lockdep_completion_wait(dirtyWq() as *void, borrow mut DIRTY_CLASS as *mut u16, "pagecache-dirty\0".ptr as *CChar,
+        DIRTY_IP.load());
+}
+
+/// Safety: as dirtyWait.
+unsafe fn dirtySignal() {
+    lockdep_completion_signal(dirtyWq() as *void, borrow mut DIRTY_CLASS as *mut u16, "pagecache-dirty\0".ptr as *CChar,
+        DIRTY_IP.load());
+}
+
+/// lockdep_assert_held(m, LOCKDEP_KIND_MUTEX), which only a lockdep build makes.
+/// Safety: `m` is a live mutex.
+unsafe fn assertHeld(m: *mut mutex) {
+    if (cfg("CONFIG_LOCKDEP")) {
+        if (!lockdep_is_held(m as *void, LOCKDEP_KIND_MUTEX)) {
+            var buffer: [u8; 96] = [0; 96];
+            var line = TextWriter.create(mut buffer[..]);
+            line.text("assertion failed: lockdep_is_held(m) (pagecache.cee, assertHeld)");
+            KernelLog.panic(line);
+        }
+    }
+}
+
+// errno.h, page.h, pagecache.h, pmm.h and vfs.h's.
 const PAGE_BYTES: usize = 4096;
-const PC_HASH: u64 = 32;
 const WRITE_RUN: u32 = 8;
-const MOUNT_CACHE_IS_STORE: u32 = 2;
-const PG_PAGECACHE: u32 = 128;
-const PMM_FLAGS_ZERO: u32 = 4;
-const VNODE_REG: u32 = 1;
 const U64_MAX: u64 = 0xffffffffffffffff;
 
 // Dirty pages, bounded (MEM-9; design.md, "Dirty pages, bounded"). Every dirty page of a reclaimable mount is counted
@@ -263,7 +321,7 @@ unsafe fn mountOf(e: *mut pc_entry) -> borrow(static) mount =>
 unsafe fn reclaimable(e: *mut pc_entry) -> bool => (mountOf(e).flags & MOUNT_CACHE_IS_STORE) == 0;
 
 /// Safety: `e` is a live entry.
-unsafe fn frameOf(e: *mut pc_entry) -> *mut u8 => pagecache_floor_virt(Ptr.toBorrow(e as *pc_entry).page as *page);
+unsafe fn frameOf(e: *mut pc_entry) -> *mut u8 => page_to_virt(Ptr.toBorrow(e as *pc_entry).page as *page) as *mut u8;
 
 fn dirtyLimit() -> u64 => limit() / DIRTY_DIVISOR;
 
@@ -295,8 +353,8 @@ unsafe fn dirtyDec(e: *mut pc_entry) {
     }
     let _ = DIRTY.fetchSubWith(1, Ordering.Relaxed);
     if (THROTTLED.loadWith(LoadOrdering.Acquire) != 0 && !dirtyOver()) {
-        pagecache_floor_dirty_signal();
-        let _ = waitqueue_wake_all(pagecache_floor_dirty_wq());
+        dirtySignal();
+        let _ = waitqueue_wake_all(dirtyWq());
     }
 }
 
@@ -306,11 +364,11 @@ unsafe fn lruAdd(e: *mut pc_entry) {
     if (!reclaimable(e) || Ptr.toBorrow(e as *pc_entry).on_lru) {
         return;
     }
-    let s = spin_lock_irqsave(pagecache_floor_lru_lock());
-    List.pushFront(pagecache_floor_lru(), lruOf(e));
+    let s = spin_lock_irqsave(lruLock());
+    List.pushFront(lru(), lruOf(e));
     let fields = Ptr.toBorrowMut(e);
     fields.on_lru = true;
-    spin_unlock_irqrestore(pagecache_floor_lru_lock(), s);
+    spin_unlock_irqrestore(lruLock(), s);
 }
 
 /// Safety: `e` is a live entry.
@@ -318,20 +376,20 @@ unsafe fn lruRemove(e: *mut pc_entry) {
     if (!Ptr.toBorrow(e as *pc_entry).on_lru) {
         return;
     }
-    let s = spin_lock_irqsave(pagecache_floor_lru_lock());
+    let s = spin_lock_irqsave(lruLock());
     if (Ptr.toBorrow(e as *pc_entry).on_lru) {
         List.remove(lruOf(e));
         let fields = Ptr.toBorrowMut(e);
         fields.on_lru = false;
     }
-    spin_unlock_irqrestore(pagecache_floor_lru_lock(), s);
+    spin_unlock_irqrestore(lruLock(), s);
 }
 
 /// Back to the head of the LRU, so the next candidate differs. Under the LRU lock.
 /// Safety: `e` is on the LRU.
 unsafe fn lruToHead(e: *mut pc_entry) {
     List.remove(lruOf(e));
-    List.pushFront(pagecache_floor_lru(), lruOf(e));
+    List.pushFront(lru(), lruOf(e));
 }
 
 @export("pagecache_set_limit")
@@ -351,8 +409,8 @@ fn limit() -> u64 => LIMIT.loadWith(LoadOrdering.Relaxed);
 unsafe fn reclaim(max: u32) -> u32 {
     var done: u32 = 0;
     var skipped: u32 = 0;
-    let lru = pagecache_floor_lru();
-    let lruLock = pagecache_floor_lru_lock();
+    let lru = lru();
+    let lruLock = lruLock();
     while (done < max && skipped < 16) {
         var s = spin_lock_irqsave(lruLock);
         if (List.isEmpty(lru as *list_node)) {
@@ -520,7 +578,7 @@ unsafe fn get(vn: *mut vnode, index: u64, err: borrow mut i32) -> *mut pc_entry 
     frame.flags = frame.flags | PG_PAGECACHE; // the frame is the cache's: a mapping references, never owns, it
     // The injected failure stands in for readpage on ANY miss, a hole on ramfs included, so the SIGBUS proof does not
     // need a disk.
-    let injected = pagecache_floor_readpage_fails();
+    let injected = faultinject_should_fail(FI_FILE_READPAGE);
     let ops = Ptr.toBorrow(Ptr.toBorrow(vn as *vnode).ops);
     if (injected || (index.wrappingMul(PAGE_SIZE) < Ptr.toBorrow(vn as *vnode).size && !ops.readpage.isNull())) {
         let rc = if (injected) -EIO else ops.readpage(vn, index, frameOf(e) as *mut void);
@@ -720,7 +778,7 @@ unsafe fn write(vn: *mut vnode, off: u64, buf: *void, len: usize) -> i64 {
         // the vnode lock, the order pagecache_sync runs in.
         err = mayDirty(vn, e);
         if ((err == -EFBIG || err == -ENOSPC) && Ptr.toBorrow(pc as *pagecache).nr_dirty != 0 && !flushed) {
-            pagecache_floor_assert_held(borrow mut Ptr.toBorrowMut(vn).lock as *mut mutex);
+            assertHeld(borrow mut Ptr.toBorrowMut(vn).lock as *mut mutex);
             mutex_unlock(lock);
             err = sync(vn);
             mutex_lock(lock);
@@ -853,7 +911,9 @@ unsafe fn sync(vn: *mut vnode) -> i32 {
 /// Safety: called once, at boot, before a writer can be throttled.
 @export("pagecache_dirty_init")
 unsafe fn dirtyInit() {
-    pagecache_floor_dirty_init();
+    DIRTY_IP.store(callerAddress());
+    waitqueue_init(dirtyWq(), "pagecache-dirty\0".ptr as *CChar);
+    lockdep_completion_init(borrow mut DIRTY_CLASS as *mut u16, "pagecache-dirty\0".ptr as *CChar, DIRTY_IP.load());
     DIRTY_READY.storeWith(true, StoreOrdering.Release);
 }
 
@@ -878,8 +938,8 @@ unsafe fn throttle(vn: *mut vnode) {
     var i: u32 = 0;
     while (i < THROTTLE_WAITS && dirtyOver()) {
         let _ = THROTTLED.fetchAddWith(1, Ordering.AcquireRelease);
-        pagecache_floor_dirty_wait();
-        let _ = wait_floor_until_timeout(pagecache_floor_dirty_wq(), dirtyUnder, 0 as *mut void, THROTTLE_NS);
+        dirtyWait();
+        let _ = wait_floor_until_timeout(dirtyWq(), dirtyUnder, 0 as *mut void, THROTTLE_NS);
         let _ = THROTTLED.fetchSubWith(1, Ordering.AcquireRelease);
         statAdd(Stat.Throttled, 1);
         i += 1;
@@ -1013,7 +1073,7 @@ unsafe fn unlockCache(vn: *mut vnode) {
 @export("pagecache_fault_page")
 unsafe fn faultPage(vn: *mut vnode, index: u64, dirty: bool, out: *mut *mut page) -> i32 {
     let pc = pcOf(vn);
-    pagecache_floor_assert_held(lockOf(pc));
+    assertHeld(lockOf(pc));
     // The end of the file as a mapping sees it: the size, and the trim bound for the window between a trim and the
     // size drop that follows it. Past it get() would make a zero page, which is right for a write() and wrong for a
     // mapping (POSIX: SIGBUS).

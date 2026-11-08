@@ -69,7 +69,8 @@ extern "C" {
     fn pagecache_lock(vn: *mut vnode);
     fn pagecache_unlock(vn: *mut vnode);
     fn pagecache_fault_page(vn: *mut vnode, index: u64, dirty: bool, out: *mut *mut page) -> i32;
-    fn pagecache_floor_virt(p: *page) -> *mut u8;
+    /// page.h's direct map (an inline function).
+    fn page_to_virt(p: *page) -> *mut void;
     fn pmm_page_put(p: *mut page);
     fn cosmofs_test_set_writeback(mnt: *mut mount, on: bool);
     fn clock_now_ns() -> u64;
@@ -940,7 +941,7 @@ unsafe fn selftestPagecachePinned(reason: *mut *CChar) -> bool {
     if (!(hp2.refcount == 2 && (hp2.flags & PG_PAGECACHE) != 0)) { // still the cache's, still ours
         return failed(reason, "check failed: held->refcount == 2 && (held->flags & PG_PAGECACHE) at line 941\0");
     }
-    if (!(*Ptr.toBorrow(pagecache_floor_virt(held as *page) as *u8) == 3)) {
+    if (!(*Ptr.toBorrow(page_to_virt(held as *page) as *u8) == 3)) {
         return failed(reason, "check failed: ((uint8_t *)page_to_virt(held))[0] == 3 at line 944\0");
     }
 
