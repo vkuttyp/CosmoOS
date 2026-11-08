@@ -10,18 +10,34 @@
 //
 // The process, its threads, its terminal and the vnodes stay C (process.h, thread.h, tty.h, vfs.h). Text is written
 // as the C's ksnprintf wrote it, a piece at a time from where the last one ended, each piece cut at the buffer's end
-// and counted whole, so a text and its length are the C's. procfs_floor.c keeps the operation tables and the file
-// system type (C data naming the operations by address), the readdir callback's call, what a build configuration or
-// a macro decides (the compiler's name, the debug build's count of texts), the threads' container_of, and the names
-// of /proc/net's files, a C array.
+// and counted whole, so a text and its length are the C's. The operation tables and the file system type are this
+// file's, the /proc/version strings and procnet_names C's data (ADR 0080 §3.1–§3.2), and the debug build's count of
+// live texts a `cfg` block (§3.3).
 
 @header("kernel/cred.h", "kernel/errno.h", "kernel/handle.h", "kernel/kmalloc.h", "kernel/mountns.h",
     "kernel/net/procnet.h", "kernel/pagecache.h", "kernel/percpu.h", "kernel/pmm.h", "kernel/process.h",
     "kernel/sched.h", "kernel/string.h", "kernel/thread.h", "kernel/timer.h", "kernel/tty.h", "kernel/vfs.h",
-    "arch/cpu.h")
+    "arch/cpu.h", "kernel/version.h")
 extern "C" {
     enum vnode_type: u32;
-    struct vnode_ops;
+    /// vfs.h's operations, the members procfs's tables set.
+    struct vnode_ops {
+        lookup: extern "C" fn(*mut vnode, *CChar, usize, *mut *mut vnode) -> i32;
+        readdir: extern "C" fn(*mut vnode, *mut u64, extern "C" fn(*mut void, *CChar, usize, u64, vnode_type) -> i32,
+            *mut void) -> i32;
+        readlink: extern "C" fn(*mut vnode, *mut CChar, usize) -> i32;
+        readpage: extern "C" fn(*mut vnode, u64, *mut void) -> i32;
+        evict: extern "C" fn(*mut vnode);
+        open: extern "C" fn(*mut vnode, *mut file) -> i32;
+    }
+    struct blkdev;
+    /// vfs.h's filesystem type: procfs's name, magic and operations.
+    struct fs_type {
+        name: *CChar;
+        magic: u32;
+        mount: extern "C" fn(*mut fs_type, *mut blkdev, u32, *mut mount) -> i32;
+        unmount: extern "C" fn(*mut mount) -> i32;
+    }
     struct mount_ns;
     struct handle_table;
     struct mount {
@@ -65,6 +81,7 @@ extern "C" {
     struct thread {
         state: u32;
         cpu: i32;
+        proc_link: list_node;
     }
     struct exec_record {
         exe_len: u16;
@@ -96,6 +113,8 @@ extern "C" {
         chrooted_since_exec: bool;
         cputime: cputime;
         umask: u32;
+        /// Read atomically: a set*id exec clears it while a reader looks (process.h).
+        dumpable: AtomicU8;
     }
     struct tty {
         lock: spinlock_t;
@@ -147,43 +166,125 @@ extern "C" {
     fn vfs_mounts_render(out: *mut CChar, n: usize) -> i32;
     fn mountns_initial() -> *mut mount_ns;
     fn procnet_render(f: u32, out: *mut *mut CChar) -> i32;
-    /// procfs_floor.c: the operation table `which` (OPS_*), the strings of
-    /// /proc/version, the count of live texts, a thread by its link, the name of an object's kind, a process's
-    /// dumpable flag, and /proc/net's file names.
-    fn procfs_floor_ops(which: u32) -> *vnode_ops;
-    fn procfs_floor_version(which: u32) -> *CChar;
-    fn procfs_floor_count(delta: i32);
-    fn procfs_floor_thread(link: *mut list_node) -> *mut thread;
-    fn procfs_floor_kind_name(obj: *mut kobject) -> *CChar;
-    fn procfs_floor_dumpable(p: *mut process) -> bool;
-    fn procfs_floor_net_name(i: u32) -> *CChar;
-    /// procfs_floor.c: sched_loadavg, whose averages are unsigned longs.
-    fn procfs_floor_loadavg(out: *mut u64);
+    /// version.h's strings for /proc/version: the release, the compiler, uname's name, version and build.
+    const KERNEL_LINUX_RELEASE: *CChar;
+    const PROCFS_COMPILER: *CChar;
+    const KERNEL_NAME: *CChar;
+    const KERNEL_VERSION: *CChar;
+    const COSMO_BUILD_ID: *CChar;
+    /// procnet.h's file names under /proc/net.
+    static procnet_names: [*CChar; 8];
+    /// sched.h's 1, 5 and 15 minute averages with `shift` fractional bits.
+    fn sched_loadavg(out: *mut CULong, shift: u32);
+    /// A kobject's type is its first member (object.h).
+    @cvalue("offsetof(struct kobject, type)")
+    const KOBJECT_TYPE_AT: usize = 0;
+
+    // The values and layout the C compiler checks (ADR 0080 §3.1), which the floor asserted.
+    const ENOENT: i32 = 2;
+    const ESRCH: i32 = 3;
+    const ENOMEM: i32 = 12;
+    const EACCES: i32 = 13;
+    const EINVAL: i32 = 22;
+    const VNODE_REG: u32 = 1;
+    const VNODE_DIR: u32 = 2;
+    const VNODE_LNK: u32 = 6;
+    const VNODE_PINNED: u32 = 1;
+    const PAGE_SIZE: usize = 4096;
+    const VFS_PATH_MAX: usize = 1024;
+    const HANDLE_TABLE_SIZE: i32 = 64;
+    const CONFIG_MAX_CPUS: u32 = 64;
+    const PROCESS_EXITED: u32 = 2;
+    const THREAD_READY: u32 = 0;
+    const THREAD_RUNNING: u32 = 1;
+    const PRIV_PROC: u32 = 8;
+    const PROCNET_COUNT: u32 = 8;
+    /// procfs.cee's vfs.h values
+    @cvalue("offsetof(struct vnode, type) == 56 && sizeof(((struct vnode *)0)->type) == 4")
+    const PROCFS_FACT_0: bool = true;
+    /// procfs.cee's process.h, thread.h, cred.h, handle.h and uapi values
+    @cvalue("COSMO_RLIM_INFINITY == ~0ull && COSMO_RLIMIT_COUNT == 6 && COSMO_PRIV_COUNT == 6 && PROCESS_NAME_MAX == 32 && PROCESS_CMDLINE_MAX == 256 && sizeof(pid_t) == 4")
+    const PROCFS_FACT_1: bool = true;
+    /// procfs.cee's process and thread field sizes
+    @cvalue("sizeof(((struct process *)0)->cwd_path_locked) == 1024 && sizeof(((struct process *)0)->state) == 4 && sizeof(((struct thread *)0)->state) == 4 && sizeof(unsigned long) == 8")
+    const PROCFS_FACT_2: bool = true;
+    /// procfs.cee's slots for pmm_stats, pagecache_stats and cputime_pair
+    @cvalue("sizeof(struct pmm_stats) <= 16 * 8 && offsetof(struct pmm_stats, total_pages) == 0 && offsetof(struct pmm_stats, free_pages) == 8 && sizeof(struct pagecache_stats) <= 16 * 8 && offsetof(struct pagecache_stats, pages) == 24 && sizeof(struct cputime_pair) == 16 && offsetof(struct cputime_pair, user_ns) == 0 && offsetof(struct cputime_pair, system_ns) == 8")
+    const PROCFS_FACT_3: bool = true;
 }
 
-// ---- errno.h, vfs.h, process.h, thread.h, cred.h and the uapi values (procfs_floor.c asserts them) ----
+// ---- The tables, the strings and the counters (ADR 0080) ----
 
-const ENOENT: i32 = 2;
-const ESRCH: i32 = 3;
-const ENOMEM: i32 = 12;
-const EACCES: i32 = 13;
-const EINVAL: i32 = 22;
-const VNODE_REG: u32 = 1;
-const VNODE_DIR: u32 = 2;
-const VNODE_LNK: u32 = 6;
-const VNODE_PINNED: u32 = 1;
+/// The operations, in OPS_* order: /proc, /proc/<pid>, /proc/<pid>/fd, an fd's link, a rendered file, environ, cwd/exe/
+/// root, /proc/net and self.
+static mut OPS: [vnode_ops; 9] = [
+    vnode_ops { lookup: rootLookup, readdir: rootReaddir },
+    vnode_ops { lookup: pidLookup, readdir: pidReaddir },
+    vnode_ops { lookup: fdLookup, readdir: fdReaddir },
+    vnode_ops { readlink: fdReadlink },
+    vnode_ops { readpage: readpage, evict: evict },
+    vnode_ops { readpage: readpage, evict: evict, open: environOpen },
+    vnode_ops { readlink: linkReadlink },
+    vnode_ops { lookup: netLookup, readdir: netReaddir },
+    vnode_ops { readlink: selfReadlink },
+];
+
+/// The operation table `which` (OPS_*).
+/// Safety: `which` is an OPS_* value; the tables are never written.
+unsafe fn opsOf(which: u32) -> *vnode_ops => borrow mut OPS[which as usize] as *mut vnode_ops as *vnode_ops;
+
+/// /proc/version's strings: the release, the compiler, uname's name, version and build.
+fn versionPart(which: u32) -> *CChar => if (which == 0) KERNEL_LINUX_RELEASE else if (which == 1) PROCFS_COMPILER else
+    if (which == 2) KERNEL_NAME else if (which == 3) KERNEL_VERSION else if (which == 4) COSMO_BUILD_ID else
+    "\0".ptr as *CChar;
+
+/// Rendered texts alive now: the proc-exit-read self-test's leak check, counted in a debug build only.
+static PROC_TEXTS: AtomicU32 = AtomicU32.constant(0);
+
+/// vfs.h's procfs_texts_live, a debug build's.
+@export("procfs_texts_live")
+@cfg("CONFIG_DEBUG")
+fn textsLive() -> u32 => PROC_TEXTS.loadWith(LoadOrdering.Relaxed);
+
+/// One more rendered text alive (1), or one fewer (-1).
+fn countText(delta: i32) {
+    if (cfg("CONFIG_DEBUG")) {
+        let _ = PROC_TEXTS.fetchAdd(truncate<u32>(delta as i64));
+    }
+}
+
+/// A thread from its link in its process's list.
+/// Safety: `link` is a thread's proc_link.
+unsafe fn threadOfLink(link: *mut list_node) -> *mut thread => containerOf(link, offsetOf<thread>(proc_link)) as *mut thread;
+
+/// /proc/net's file `i`'s name.
+/// Safety: `i` below PROCNET_COUNT.
+unsafe fn netName(i: u32) -> *CChar => procnet_names[i as usize];
+
+/// The name of an object's kind, or "object".
+/// Safety: `obj` is a live kobject.
+unsafe fn kindName(obj: *mut kobject) -> *CChar {
+    let kind = ((obj as *mut u8).add(KOBJECT_TYPE_AT) as *mut *kobject_type).read();
+    if (kind.isNull() || Ptr.toBorrow(kind).name.isNull()) {
+        return "object\0".ptr as *CChar;
+    }
+    return Ptr.toBorrow(kind).name;
+}
+
+/// procfs's filesystem type (`extern struct fs_type procfs_fs_type`), which boot composition registers.
+@export("procfs_fs_type")
+static mut PROCFS_FS_TYPE: fs_type = fs_type {
+    magic: 0x9fa0, // Linux's PROC_SUPER_MAGIC
+    name: "procfs\0".ptr as *CChar,
+    mount: mountFs,
+    unmount: unmount,
+};
+
+// ---- errno.h, vfs.h, process.h, thread.h, cred.h and the uapi values ----
+
 /// Where a struct vnode's `type`, a name CeeSafe reserves, is.
 const VN_TYPE: usize = 56;
-const PAGE_SIZE: usize = 4096;
-const VFS_PATH_MAX: usize = 1024;
-const HANDLE_TABLE_SIZE: i32 = 64;
-const CONFIG_MAX_CPUS: u32 = 64;
-const PROCESS_EXITED: u32 = 2;
-const THREAD_READY: u32 = 0;
-const THREAD_RUNNING: u32 = 1;
-const PRIV_PROC: u32 = 8;
 const COSMO_RLIM_INFINITY: u64 = 0xFFFFFFFFFFFFFFFF;
-const PROCNET_COUNT: u32 = 8;
 /// A struct pmm_stats and a struct pagecache_stats are given 16 words; their fields by offset.
 const PMM_TOTAL: usize = 0;
 const PMM_FREE: usize = 1;
@@ -234,7 +335,7 @@ const PROC_ROOT_INO: u64 = 0; // procIno(0, PROC_ROOT)
 const PROC_SELF_INO: u64 = 4; // procIno(0, PROC_SELF)
 const PROC_NET_INO: u64 = 14; // procIno(0, PROC_NET_DIR)
 
-// The operation tables (procfs_floor.c).
+// The operation tables (OPS).
 const OPS_ROOT: u32 = 0;
 const OPS_PID_DIR: u32 = 1;
 const OPS_FD_DIR: u32 = 2;
@@ -395,7 +496,7 @@ unsafe fn newVnode(mnt: *mut mount, ino: u64, kind: u32, mode: u32, ops: u32) ->
     v.mode = mode;
     v.uid = 0;
     v.gid = 0;
-    v.ops = procfs_floor_ops(ops);
+    v.ops = opsOf(ops);
     return vn;
 }
 
@@ -457,7 +558,7 @@ unsafe fn threadsOf(p: *mut process) -> Threads {
     let head = borrow mut Ptr.toBorrowMut(p).threads as *mut list_node;
     var link = Ptr.toBorrow(head as *list_node).next;
     while (link != head) {
-        let t = procfs_floor_thread(link);
+        let t = threadOfLink(link);
         out.runNs = out.runNs.wrappingAdd(sched_thread_run_ns(t, now));
         let st = Ptr.toBorrow(t as *thread).state;
         if (st == THREAD_RUNNING || st == THREAD_READY) {
@@ -818,7 +919,11 @@ fn load(w: borrow mut TextWriter, x: u64) {
 /// Safety: none beyond the scheduler's own.
 unsafe fn renderLoadavg(out: SliceMut<u8>) -> i32 {
     var l: [u64; 3] = [0; 3];
-    procfs_floor_loadavg(borrow mut l as *mut [u64; 3] as *mut u64);
+    var averages: [CULong; 3] = [0; 3];
+    sched_loadavg(borrow mut averages[0] as *mut CULong, 11);
+    for (k in 0..3) {
+        l[k] = averages[k] as u64;
+    }
     var running: u32 = 0;
     for (c in 0u32..CONFIG_MAX_CPUS) {
         if (cpu_online(c)) {
@@ -876,15 +981,15 @@ unsafe fn renderUptime(out: SliceMut<u8>) -> i32 {
 unsafe fn renderVersion(out: SliceMut<u8>) -> i32 {
     var w = TextWriter.create(mut out);
     w.text("Linux version ");
-    w.bytes(cBytes(procfs_floor_version(0)));
+    w.bytes(cBytes(versionPart(0)));
     w.text(" (");
-    w.bytes(cBytes(procfs_floor_version(1)));
+    w.bytes(cBytes(versionPart(1)));
     w.text(") ");
-    w.bytes(cBytes(procfs_floor_version(2)));
+    w.bytes(cBytes(versionPart(2)));
     w.byte(32);
-    w.bytes(cBytes(procfs_floor_version(3)));
+    w.bytes(cBytes(versionPart(3)));
     w.byte(32);
-    w.bytes(cBytes(procfs_floor_version(4)));
+    w.bytes(cBytes(versionPart(4)));
     w.byte(10);
     return result(w.wanted());
 }
@@ -1004,7 +1109,7 @@ unsafe fn readpage(vn: *mut vnode, index: u64, buf: *mut void) -> i32 {
 unsafe fn evict(vn: *mut vnode) {
     let v = Ptr.toBorrowMut(vn);
     if (!v.fs_priv.isNull()) {
-        procfs_floor_count(-1);
+        countText(-1);
     }
     kfree(v.fs_priv);
     v.fs_priv = 0 as *mut void;
@@ -1080,7 +1185,7 @@ unsafe fn procFile(mnt: *mut mount, pid: u32, kind: u32, out: *mut *mut vnode) -
     }
     let v = Ptr.toBorrowMut(vn);
     v.fs_priv = t;
-    procfs_floor_count(1);
+    countText(1);
     v.size = textLen(t) as u64;
     out.write(vn);
     return 0;
@@ -1110,7 +1215,7 @@ unsafe fn mayInspect(p: *mut process) -> bool {
     let t = borrow proc(p).cred;
     let ids = c.euid == t.ruid && c.euid == t.euid && c.euid == t.suid && c.egid == t.rgid && c.egid == t.egid &&
         c.egid == t.sgid;
-    let dumpable = procfs_floor_dumpable(p);
+    let dumpable = Ptr.toBorrow(p as *process).dumpable.loadWith(LoadOrdering.Relaxed) != 0;
     spin_unlock_irqrestore(lockOf(p), s);
     return ids && dumpable;
 }
@@ -1151,7 +1256,7 @@ unsafe fn environOpen(vn: *mut vnode, f: *mut file) -> i32 {
         return 0;
     }
     v.fs_priv = t;
-    procfs_floor_count(1);
+    countText(1);
     v.size = len as u64;
     return 0;
 }
@@ -1334,7 +1439,7 @@ unsafe fn fdTarget(p: *mut process, fd: i32, buf: SliceMut<u8>) -> i32 {
             w.byte(93);
         } else { // the kind alone: an address would map the kernel heap for whoever reads it
             w.text("anon_inode:[");
-            w.bytes(cBytes(procfs_floor_kind_name(obj)));
+            w.bytes(cBytes(kindName(obj)));
             w.byte(93);
         }
     }
@@ -1598,7 +1703,7 @@ unsafe fn netLookup(dir: *mut vnode, name: *CChar, len: usize, out: *mut *mut vn
         return mountRoot(dir, out);
     }
     for (i in 0u32..PROCNET_COUNT) {
-        let known = cBytes(procfs_floor_net_name(i));
+        let known = cBytes(netName(i));
         if (len == known.length && equalBytes(s, known)) {
             return procFile(Ptr.toBorrow(dir as *vnode).mnt, i, PROC_NET_FILE, out);
         }
@@ -1631,7 +1736,7 @@ unsafe fn netReaddir(dir: *mut vnode, pos: *mut u64, cb: extern "C" fn(*mut void
             rc = emit(cb, arg, "..\0".ptr as *CChar, 2, PROC_ROOT_INO, VNODE_DIR);
         } else {
             let f = truncate<u32>(i - 2);
-            let name = procfs_floor_net_name(f);
+            let name = netName(f);
             rc = emit(cb, arg, name, strlen(name), procIno(f, PROC_NET_FILE), VNODE_REG);
         }
         if (rc != 0) {
@@ -1785,7 +1890,7 @@ unsafe fn rootReaddir(dir: *mut vnode, pos: *mut u64, cb: extern "C" fn(*mut voi
 
 /// Safety: `mnt` is the mount being made.
 @export("procfs_mount")
-unsafe fn mountFs(fs: *mut void, bdev: *mut void, flags: u32, mnt: *mut mount) -> i32 {
+unsafe fn mountFs(fs: *mut fs_type, bdev: *mut blkdev, flags: u32, mnt: *mut mount) -> i32 {
     let _ = fs;
     let _ = flags;
     if (!bdev.isNull()) {

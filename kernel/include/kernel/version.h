@@ -20,6 +20,12 @@
 #define COSMO_BUILD_ID "unknown"
 #endif
 
+/* The compiler /proc/version names (procfs.cee). A host test, which gcc
+ * may build, names its own. */
+#ifndef PROCFS_COMPILER
+#define PROCFS_COMPILER "clang " __clang_version__
+#endif
+
 #ifndef COSMO_BUILD_TYPE
 #define COSMO_BUILD_TYPE "unknown"
 #endif
