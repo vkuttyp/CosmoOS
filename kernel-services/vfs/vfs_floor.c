@@ -121,6 +121,16 @@ int vfs_floor_readdir(struct vnode *vn, uint64_t *pos, void *ctx)
     return vn->ops->readdir(vn, pos, readdir_emit, ctx);
 }
 
+/* A filesystem's mknod takes an enum vnode_type: called here, with the
+ * type vfs_dir.cee passes as the integer it is. */
+int vfs_floor_mknod(struct vnode *dir, const char *name, size_t len, uint32_t mode, uint32_t type,
+                    struct vnode **out);
+int vfs_floor_mknod(struct vnode *dir, const char *name, size_t len, uint32_t mode, uint32_t type,
+                    struct vnode **out)
+{
+    return dir->ops->mknod(dir, name, len, mode, (enum vnode_type)type, out);
+}
+
 /* A stream's driver runs with no vnode lock held (lockdep.h's assertion, a
  * macro: nothing in a build without lockdep). */
 void vfs_floor_assert_unlocked(struct vnode *vn);

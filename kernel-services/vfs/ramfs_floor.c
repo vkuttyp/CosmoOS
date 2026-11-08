@@ -33,8 +33,17 @@ _Static_assert(VNODE_REG == 1 && VNODE_DIR == 2 && VNODE_CHR == 3 && VNODE_FIFO 
 int ramfs_lookup(struct vnode *dir, const char *name, size_t len, struct vnode **out);
 int ramfs_create(struct vnode *dir, const char *name, size_t len, uint32_t mode, struct vnode **out);
 int ramfs_mkdir(struct vnode *dir, const char *name, size_t len, uint32_t mode, struct vnode **out);
-int ramfs_mknod(struct vnode *dir, const char *name, size_t len, uint32_t mode, enum vnode_type type,
-                struct vnode **out);
+int ramfs_mknod(struct vnode *dir, const char *name, size_t len, uint32_t mode, uint32_t type, struct vnode **out);
+
+/* mknod's type is an enum vnode_type, which a CeeSafe function cannot
+ * spell: the table's entry has the enum, and passes it on as the integer
+ * it is (a call through a pointer of another type is what UBSan's
+ * function check refuses, CI's clang 19, 2026-11-08). */
+static int ramfs_mknod_op(struct vnode *dir, const char *name, size_t len, uint32_t mode, enum vnode_type type,
+                          struct vnode **out)
+{
+    return ramfs_mknod(dir, name, len, mode, (uint32_t)type, out);
+}
 int ramfs_symlink(struct vnode *dir, const char *name, size_t len, const char *target, struct vnode **out);
 int ramfs_readlink(struct vnode *vn, char *buf, size_t len);
 int ramfs_link(struct vnode *dir, const char *name, size_t len, struct vnode *target);
@@ -100,7 +109,7 @@ static const struct vnode_ops ramfs_ops[] = {
         .rename = ramfs_rename,
         .readdir = ramfs_readdir,
         .symlink = ramfs_symlink,
-        .mknod = ramfs_mknod,
+        .mknod = ramfs_mknod_op,
         .evict = ramfs_evict,
     },
     [1] = {   /* regular files */
