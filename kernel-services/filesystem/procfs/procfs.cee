@@ -20,6 +20,7 @@
     "kernel/sched.h", "kernel/string.h", "kernel/thread.h", "kernel/timer.h", "kernel/tty.h", "kernel/vfs.h",
     "arch/cpu.h")
 extern "C" {
+    enum vnode_type: u32;
     struct vnode_ops;
     struct mount_ns;
     struct handle_table;
@@ -146,11 +147,10 @@ extern "C" {
     fn vfs_mounts_render(out: *mut CChar, n: usize) -> i32;
     fn mountns_initial() -> *mut mount_ns;
     fn procnet_render(f: u32, out: *mut *mut CChar) -> i32;
-    /// procfs_floor.c: the operation table `which` (OPS_*), the reader's callback for one entry, the strings of
+    /// procfs_floor.c: the operation table `which` (OPS_*), the strings of
     /// /proc/version, the count of live texts, a thread by its link, the name of an object's kind, a process's
     /// dumpable flag, and /proc/net's file names.
     fn procfs_floor_ops(which: u32) -> *vnode_ops;
-    fn procfs_floor_emit(cb: *void, arg: *mut void, name: *CChar, len: usize, ino: u64, kind: u32) -> i32;
     fn procfs_floor_version(which: u32) -> *CChar;
     fn procfs_floor_count(delta: i32);
     fn procfs_floor_thread(link: *mut list_node) -> *mut thread;
@@ -1407,13 +1407,13 @@ fn digitsOf(v: u64, out: SliceMut<u8>) -> usize {
 }
 
 /// Safety: `dir` is an fd directory of this filesystem; `pos` writable; `cb` a vfs_dirent_cb.
-@export("procfs_fd_readdir_cee")
-unsafe fn fdReaddir(dir: *mut vnode, pos: *mut u64, cb: *void, arg: *mut void) -> i32 {
+@export("procfs_fd_readdir")
+unsafe fn fdReaddir(dir: *mut vnode, pos: *mut u64, cb: extern "C" fn(*mut void, *CChar, usize, u64, vnode_type) -> i32, arg: *mut void) -> i32 {
     let ino = Ptr.toBorrow(dir as *vnode).ino;
     let pid = inoPid(ino);
     while (pos.read() < 2) {
-        let rc = if (pos.read() == 0) procfs_floor_emit(cb, arg, ".\0".ptr as *CChar, 1, ino, VNODE_DIR)
-            else procfs_floor_emit(cb, arg, "..\0".ptr as *CChar, 2, procIno(pid, PROC_PID_DIR), VNODE_DIR);
+        let rc = if (pos.read() == 0) emit(cb, arg, ".\0".ptr as *CChar, 1, ino, VNODE_DIR)
+            else emit(cb, arg, "..\0".ptr as *CChar, 2, procIno(pid, PROC_PID_DIR), VNODE_DIR);
         if (rc != 0) {
             return rc;
         }
@@ -1433,7 +1433,7 @@ unsafe fn fdReaddir(dir: *mut vnode, pos: *mut u64, cb: *void, arg: *mut void) -
             kobject_put(obj);
             var name: [u8; 8] = [0; 8];
             let n = digitsOf(truncate<u64>(fd), mut name[..]); // fd is not negative
-            rc = procfs_floor_emit(cb, arg, borrow name as *[u8; 8] as *CChar, n, procInoFd(pid, fd), VNODE_LNK);
+            rc = emit(cb, arg, borrow name as *[u8; 8] as *CChar, n, procInoFd(pid, fd), VNODE_LNK);
             if (rc != 0) {
                 break;
             }
@@ -1529,14 +1529,14 @@ const PID_TYPES: [u32; 9] = [
 fn cName(s: StringView) -> *CChar => s.bytes().ptr as *CChar;
 
 /// Safety: `dir` is a pid directory of this filesystem; `pos` writable; `cb` a vfs_dirent_cb.
-@export("procfs_pid_readdir_cee")
-unsafe fn pidReaddir(dir: *mut vnode, pos: *mut u64, cb: *void, arg: *mut void) -> i32 {
+@export("procfs_pid_readdir")
+unsafe fn pidReaddir(dir: *mut vnode, pos: *mut u64, cb: extern "C" fn(*mut void, *CChar, usize, u64, vnode_type) -> i32, arg: *mut void) -> i32 {
     let ino = Ptr.toBorrow(dir as *vnode).ino;
     let pid = inoPid(ino);
     while (pos.read() < 11) {
         let i = pos.read();
-        let rc = if (i == 0) procfs_floor_emit(cb, arg, ".\0".ptr as *CChar, 1, ino, VNODE_DIR)
-            else if (i == 1) procfs_floor_emit(cb, arg, "..\0".ptr as *CChar, 2, PROC_ROOT_INO, VNODE_DIR)
+        let rc = if (i == 0) emit(cb, arg, ".\0".ptr as *CChar, 1, ino, VNODE_DIR)
+            else if (i == 1) emit(cb, arg, "..\0".ptr as *CChar, 2, PROC_ROOT_INO, VNODE_DIR)
             else emitNamed(cb, arg, PID_FILES[i as usize - 2], procIno(pid, PID_KINDS[i as usize - 2]),
                 PID_TYPES[i as usize - 2]);
         if (rc != 0) {
@@ -1547,15 +1547,20 @@ unsafe fn pidReaddir(dir: *mut vnode, pos: *mut u64, cb: *void, arg: *mut void) 
     return 0;
 }
 
+/// One entry to the reader: nonzero when it wants no more.
+/// Safety: `arg` is `cb`'s argument; `name` holds `len` bytes.
+unsafe fn emit(cb: extern "C" fn(*mut void, *CChar, usize, u64, vnode_type) -> i32, arg: *mut void, name: *CChar, len: usize, ino: u64, kind: u32) -> i32 =>
+    cb(arg, name, len, ino, kind as vnode_type);
+
 /// One entry named by text of this file's own: the name is copied out zero-terminated, as the C's literals were.
 /// Safety: `cb` is a vfs_dirent_cb and `arg` its argument; `name` is at most 15 bytes.
-unsafe fn emitNamed(cb: *void, arg: *mut void, name: StringView, ino: u64, kind: u32) -> i32 {
+unsafe fn emitNamed(cb: extern "C" fn(*mut void, *CChar, usize, u64, vnode_type) -> i32, arg: *mut void, name: StringView, ino: u64, kind: u32) -> i32 {
     var buf: [u8; 16] = [0; 16];
     let b = name.bytes();
     for (i in 0..b.length) {
         buf[i] = b[i];
     }
-    return procfs_floor_emit(cb, arg, borrow buf as *[u8; 16] as *CChar, b.length, ino, kind);
+    return emit(cb, arg, borrow buf as *[u8; 16] as *CChar, b.length, ino, kind);
 }
 
 /// Safety: `mnt` is this filesystem's mount; `out` writable.
@@ -1614,20 +1619,20 @@ fn equalBytes(a: Slice<u8>, b: Slice<u8>) -> bool {
 }
 
 /// Safety: `dir` is /proc/net; `pos` writable; `cb` a vfs_dirent_cb.
-@export("procfs_net_readdir_cee")
-unsafe fn netReaddir(dir: *mut vnode, pos: *mut u64, cb: *void, arg: *mut void) -> i32 {
+@export("procfs_net_readdir")
+unsafe fn netReaddir(dir: *mut vnode, pos: *mut u64, cb: extern "C" fn(*mut void, *CChar, usize, u64, vnode_type) -> i32, arg: *mut void) -> i32 {
     let ino = Ptr.toBorrow(dir as *vnode).ino;
     while (pos.read() < 2 + PROCNET_COUNT as u64) {
         let i = pos.read();
         var rc: i32 = 0;
         if (i == 0) {
-            rc = procfs_floor_emit(cb, arg, ".\0".ptr as *CChar, 1, ino, VNODE_DIR);
+            rc = emit(cb, arg, ".\0".ptr as *CChar, 1, ino, VNODE_DIR);
         } else if (i == 1) {
-            rc = procfs_floor_emit(cb, arg, "..\0".ptr as *CChar, 2, PROC_ROOT_INO, VNODE_DIR);
+            rc = emit(cb, arg, "..\0".ptr as *CChar, 2, PROC_ROOT_INO, VNODE_DIR);
         } else {
             let f = truncate<u32>(i - 2);
             let name = procfs_floor_net_name(f);
-            rc = procfs_floor_emit(cb, arg, name, strlen(name), procIno(f, PROC_NET_FILE), VNODE_REG);
+            rc = emit(cb, arg, name, strlen(name), procIno(f, PROC_NET_FILE), VNODE_REG);
         }
         if (rc != 0) {
             return rc;
@@ -1731,8 +1736,8 @@ const ROOT_FIXED: [StringView; 4] = [".", "..", "self", "net"];
 /// process table is walked under a spinlock, and the callback writes into a buffer, which is not work to do inside
 /// one.
 /// Safety: `dir` is /proc; `pos` writable; `cb` a vfs_dirent_cb.
-@export("procfs_root_readdir_cee")
-unsafe fn rootReaddir(dir: *mut vnode, pos: *mut u64, cb: *void, arg: *mut void) -> i32 {
+@export("procfs_root_readdir")
+unsafe fn rootReaddir(dir: *mut vnode, pos: *mut u64, cb: extern "C" fn(*mut void, *CChar, usize, u64, vnode_type) -> i32, arg: *mut void) -> i32 {
     let ino = Ptr.toBorrow(dir as *vnode).ino;
     while (pos.read() < 4) {
         let i = pos.read();
@@ -1766,7 +1771,7 @@ unsafe fn rootReaddir(dir: *mut vnode, pos: *mut u64, cb: *void, arg: *mut void)
     while (i < total) {
         var name: [u8; 12] = [0; 12];
         let n = digitsOf(listed[i as usize] as u64, mut name[..]);
-        rc = procfs_floor_emit(cb, arg, borrow name as *[u8; 12] as *CChar, n, procIno(listed[i as usize],
+        rc = emit(cb, arg, borrow name as *[u8; 12] as *CChar, n, procIno(listed[i as usize],
             PROC_PID_DIR), VNODE_DIR);
         if (rc != 0) {
             break;

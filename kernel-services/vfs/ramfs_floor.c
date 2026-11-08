@@ -2,12 +2,10 @@
  * ramfs_floor.c - The C under ramfs.cee (roadmap 2.0 SA7): the operation
  * tables, which ramfs.cee hands out and compares by address, and
  * ramfs_fs_type, which boot composition registers by name -- C data
- * naming the operations by address; readdir's entry point and the call
- * through its callback, whose type (vfs_dirent_cb) takes an enum
- * vnode_type a CeeSafe function type cannot spell; the boot archive's
- * entries, whose function has its struct's name; and the values
- * ramfs.cee writes as its own constants, asserted. ramfs itself is
- * CeeSafe (ramfs.cee, generated into ramfs.c).
+ * naming the operations by address; the boot archive's entries, whose
+ * function has its struct's name; and the values ramfs.cee writes as its
+ * own constants, asserted. ramfs itself is CeeSafe (ramfs.cee, generated
+ * into ramfs.c).
  */
 
 #include <kernel/bootarchive.h>
@@ -33,14 +31,8 @@ _Static_assert(VNODE_REG == 1 && VNODE_DIR == 2 && VNODE_CHR == 3 && VNODE_FIFO 
 int ramfs_lookup(struct vnode *dir, const char *name, size_t len, struct vnode **out);
 int ramfs_create(struct vnode *dir, const char *name, size_t len, uint32_t mode, struct vnode **out);
 int ramfs_mkdir(struct vnode *dir, const char *name, size_t len, uint32_t mode, struct vnode **out);
-int ramfs_mknod(struct vnode *dir, const char *name, size_t len, uint32_t mode, uint32_t type, struct vnode **out);
-
-/* mknod's enum vnode_type, which a CeeSafe function cannot spell (UBSan's function check). */
-static int ramfs_mknod_op(struct vnode *dir, const char *name, size_t len, uint32_t mode, enum vnode_type type,
-                          struct vnode **out)
-{
-    return ramfs_mknod(dir, name, len, mode, (uint32_t)type, out);
-}
+int ramfs_mknod(struct vnode *dir, const char *name, size_t len, uint32_t mode, enum vnode_type type,
+                struct vnode **out);
 int ramfs_symlink(struct vnode *dir, const char *name, size_t len, const char *target, struct vnode **out);
 int ramfs_readlink(struct vnode *vn, char *buf, size_t len);
 int ramfs_link(struct vnode *dir, const char *name, size_t len, struct vnode *target);
@@ -48,7 +40,7 @@ int ramfs_unlink(struct vnode *dir, const char *name, size_t len, struct vnode *
 int ramfs_rmdir(struct vnode *dir, const char *name, size_t len, struct vnode *victim);
 int ramfs_rename(struct vnode *odir, const char *oname, size_t olen, struct vnode *victim, struct vnode *ndir,
                  const char *nname, size_t nlen, struct vnode *replaced);
-int ramfs_readdir_cee(struct vnode *dir, uint64_t *pos, void *cb, void *arg);
+int ramfs_readdir(struct vnode *dir, uint64_t *pos, vfs_dirent_cb cb, void *arg);
 int ramfs_readpage(struct vnode *vn, uint64_t index, void *buf);
 int ramfs_writepage(struct vnode *vn, uint64_t index, const void *buf);
 int ramfs_truncate(struct vnode *vn, uint64_t size);
@@ -74,25 +66,12 @@ int ramfs_unmount(struct mount *mnt);
 
 /* What ramfs.cee calls here. */
 const struct vnode_ops *ramfs_floor_ops(unsigned which);
-int ramfs_floor_emit(void *cb, void *arg, const char *name, size_t len, uint64_t ino, unsigned type);
 const struct bootarchive_entry *ramfs_floor_archive(unsigned index);
 
 /* The archive's entry `index`: bootarchive_entry, a function CeeSafe cannot name beside its struct. */
 const struct bootarchive_entry *ramfs_floor_archive(unsigned index)
 {
     return bootarchive_entry(index);
-}
-
-static int ramfs_readdir(struct vnode *dir, uint64_t *pos, vfs_dirent_cb cb, void *arg)
-{
-    return ramfs_readdir_cee(dir, pos, (void *)cb, arg);
-}
-
-/* One entry to the reader: nonzero when it wants no more. */
-int ramfs_floor_emit(void *cb, void *arg, const char *name, size_t len, uint64_t ino, unsigned type)
-{
-    vfs_dirent_cb f = (vfs_dirent_cb)cb;
-    return f(arg, name, len, ino, (enum vnode_type)type);
 }
 
 static const struct vnode_ops ramfs_ops[] = {
@@ -106,7 +85,7 @@ static const struct vnode_ops ramfs_ops[] = {
         .rename = ramfs_rename,
         .readdir = ramfs_readdir,
         .symlink = ramfs_symlink,
-        .mknod = ramfs_mknod_op,
+        .mknod = ramfs_mknod,
         .evict = ramfs_evict,
     },
     [1] = {   /* regular files */

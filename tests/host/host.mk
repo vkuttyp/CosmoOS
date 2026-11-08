@@ -250,7 +250,6 @@ HOST_CFSDIRBLK_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/co
 	tests/host/ceesafe_panic.c tests/host/test_cfsdirblk.c
 # cosmofs's directory operations with the real directory helpers and entry decoders: the rest is the test's.
 HOST_CFSDIR_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/cosmofs_dir.c \
-	kernel-services/filesystem/cosmofs/cosmofs_dir_floor.c \
 	kernel-services/filesystem/cosmofs/cosmofs.c kernel-services/filesystem/cosmofs/cosmofs_floor.c \
 	kernel-services/filesystem/cosmofs/cfsparse.c kernel/core/crc32c.c kernel/ceesafe/ceesafe_rt_core.c \
 	tests/host/ceesafe_panic.c tests/host/test_cfsdir.c

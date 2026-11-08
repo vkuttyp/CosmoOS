@@ -8,12 +8,12 @@
 // vnode's release and writes back what a closing writer left dirty.
 //
 // The files and vnodes stay C (vfs.h). vfs_floor.c keeps the file's kobject_io_type, C data whose entries are this
-// file's exports; the call into a filesystem's readdir, whose callback takes an enum vnode_type a CeeSafe function type
-// cannot spell; the lockdep assertion, a macro; and the values this file writes as its own constants, asserted.
+// file's exports; the lockdep assertion, a macro; and the values this file writes as its own constants, asserted.
 
 @header("kernel/errno.h", "kernel/kmalloc.h", "kernel/lockdep.h", "kernel/mutex.h", "kernel/object.h",
     "kernel/pagecache.h", "kernel/string.h", "kernel/vfs.h")
 extern "C" {
+    enum vnode_type: u32;
     struct waitqueue;
     struct chrdev_ops {
         fills: bool;
@@ -30,6 +30,7 @@ extern "C" {
         poll_wq: extern "C" fn(*mut vnode, *mut file, u32) -> *mut waitqueue;
         set_nonblock: extern "C" fn(*mut vnode, *mut file, i32) -> i32;
         sync: extern "C" fn(*mut vnode) -> i32;
+        readdir: extern "C" fn(*mut vnode, *mut u64, extern "C" fn(*mut void, *CChar, usize, u64, vnode_type) -> i32, *mut void) -> i32;
     }
     struct pagecache {
         nr_dirty: u32;
@@ -89,8 +90,6 @@ extern "C" {
     // vfs_floor.c
     fn vfs_floor_file_type() -> *kobject_type;
     fn vfs_floor_is_file(obj: *kobject) -> bool;
-    fn vfs_floor_readdir(vn: *mut vnode, pos: *mut u64, ctx: *mut void) -> i32;
-    fn vfs_floor_has_readdir(vn: *vnode) -> bool;
     fn vfs_floor_assert_unlocked(vn: *mut vnode);
 }
 
@@ -670,9 +669,10 @@ struct ReaddirCtx {
 
 /// One entry into the caller's buffer, as a cosmo_dirent of `reclen` bytes, 8-aligned, the name NUL-terminated: 0, or
 /// 1 when it does not fit (the position stays before it).
+/// A filesystem's readdir calls it through a vfs_dirent_cb.
 /// Safety: `arg` is the ReaddirCtx of a file_readdir in progress; `name` holds `len` bytes.
-@export("vfs_readdir_emit")
-unsafe fn emit(arg: *mut void, name: *CChar, len: usize, ino: u64, kind: u32) -> i32 {
+@callback
+unsafe fn emit(arg: *mut void, name: *CChar, len: usize, ino: u64, kind: vnode_type) -> i32 {
     let c = Ptr.toBorrowMut(arg as *mut ReaddirCtx);
     let reclen = (DIRENT_SIZE + len + 1 + 7) & (7 ^ 0xFFFFFFFFFFFFFFFF);
     if (c.used + reclen > c.len) {
@@ -687,7 +687,7 @@ unsafe fn emit(arg: *mut void, name: *CChar, len: usize, ino: u64, kind: u32) ->
         let rec = Ptr.toBorrowMut(d as *mut cosmo_dirent);
         rec.ino = ino;
         rec.reclen = truncate<u16>(reclen);
-        rec.kind = truncate<u8>(kind);
+        rec.kind = truncate<u8>(kind as u32);
         rec.namelen = truncate<u8>(len);
     }
     let _ = memcpy(d.add(DIRENT_NAME) as *mut void, name as *void, len);
@@ -703,7 +703,8 @@ unsafe fn readdir(f: *mut file, buf: *mut void, len: usize) -> i64 {
     if (kindOf(vn) != VNODE_DIR) {
         return -ENOTDIR as i64;
     }
-    if (!vfs_floor_has_readdir(vn as *vnode)) {
+    let ops = Ptr.toBorrow(vn as *vnode).ops;
+    if (Ptr.toBorrow(ops).readdir.isNull()) {
         return -ENOTSUP as i64;
     }
     if (len < DIRENT_SIZE + 2) {
@@ -713,7 +714,7 @@ unsafe fn readdir(f: *mut file, buf: *mut void, len: usize) -> i64 {
     mutex_lock(fileLock(f));
     mutex_lock(lockOf(vn));
     var pos = posOf(f);
-    let rc = vfs_floor_readdir(vn, borrow mut pos as *mut u64, borrow mut c as *mut ReaddirCtx as *mut void);
+    let rc = Ptr.toBorrow(ops).readdir(vn, borrow mut pos as *mut u64, emit, borrow mut c as *mut ReaddirCtx as *mut void);
     mutex_unlock(lockOf(vn));
     if (rc == 0) {
         setPos(f, pos);

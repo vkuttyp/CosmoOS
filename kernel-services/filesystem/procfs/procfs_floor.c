@@ -1,8 +1,7 @@
 /*
  * procfs_floor.c - The C under procfs.cee (roadmap 2.0 SA7): the vnode
  * operation tables and the file system type, C data that names the
- * operations by address; the readdir callback's call, a C function
- * pointer of a C enum's argument; what a macro or a build configuration
+ * operations by address; what a macro or a build configuration
  * decides -- /proc/version's strings and compiler, and the debug build's
  * count of live texts; a thread from its link in its process's list
  * (container_of); the name of an object's kind; a process's dumpable
@@ -54,16 +53,15 @@ int procfs_root_lookup(struct vnode *dir, const char *name, size_t len, struct v
 int procfs_pid_lookup(struct vnode *dir, const char *name, size_t len, struct vnode **out);
 int procfs_fd_lookup(struct vnode *dir, const char *name, size_t len, struct vnode **out);
 int procfs_net_lookup(struct vnode *dir, const char *name, size_t len, struct vnode **out);
-int procfs_root_readdir_cee(struct vnode *dir, uint64_t *pos, const void *cb, void *arg);
-int procfs_pid_readdir_cee(struct vnode *dir, uint64_t *pos, const void *cb, void *arg);
-int procfs_fd_readdir_cee(struct vnode *dir, uint64_t *pos, const void *cb, void *arg);
-int procfs_net_readdir_cee(struct vnode *dir, uint64_t *pos, const void *cb, void *arg);
+int procfs_root_readdir(struct vnode *dir, uint64_t *pos, vfs_dirent_cb cb, void *arg);
+int procfs_pid_readdir(struct vnode *dir, uint64_t *pos, vfs_dirent_cb cb, void *arg);
+int procfs_fd_readdir(struct vnode *dir, uint64_t *pos, vfs_dirent_cb cb, void *arg);
+int procfs_net_readdir(struct vnode *dir, uint64_t *pos, vfs_dirent_cb cb, void *arg);
 int procfs_mount(void *fs, void *bdev, uint32_t flags, struct mount *mnt);
 int procfs_unmount(struct mount *mnt);
 
 /* What procfs.cee calls here. */
 const struct vnode_ops *procfs_floor_ops(unsigned which);
-int procfs_floor_emit(const void *cb, void *arg, const char *name, size_t len, uint64_t ino, unsigned type);
 const char *procfs_floor_version(unsigned which);
 void procfs_floor_count(int delta);
 struct thread *procfs_floor_thread(struct list_node *link);
@@ -72,44 +70,16 @@ bool procfs_floor_dumpable(struct process *p);
 const char *procfs_floor_net_name(unsigned i);
 void procfs_floor_loadavg(uint64_t *out);
 
-/* The readdirs, with the VFS's callback as the CeeSafe half takes it. */
-static int root_readdir(struct vnode *dir, uint64_t *pos, vfs_dirent_cb cb, void *arg)
-{
-    return procfs_root_readdir_cee(dir, pos, (const void *)cb, arg);
-}
-
-static int pid_readdir(struct vnode *dir, uint64_t *pos, vfs_dirent_cb cb, void *arg)
-{
-    return procfs_pid_readdir_cee(dir, pos, (const void *)cb, arg);
-}
-
-static int fd_readdir(struct vnode *dir, uint64_t *pos, vfs_dirent_cb cb, void *arg)
-{
-    return procfs_fd_readdir_cee(dir, pos, (const void *)cb, arg);
-}
-
-static int net_readdir(struct vnode *dir, uint64_t *pos, vfs_dirent_cb cb, void *arg)
-{
-    return procfs_net_readdir_cee(dir, pos, (const void *)cb, arg);
-}
-
-/* One entry to the reader: nonzero when it wants no more. */
-int procfs_floor_emit(const void *cb, void *arg, const char *name, size_t len, uint64_t ino, unsigned type)
-{
-    vfs_dirent_cb f = (vfs_dirent_cb)(uintptr_t)cb;
-    return f(arg, name, len, ino, (enum vnode_type)type);
-}
-
 /* The tables, in procfs.cee's OPS_* order. */
 static const struct vnode_ops g_ops[] = {
-    { .lookup = procfs_root_lookup, .readdir = root_readdir },                                /* /proc */
-    { .lookup = procfs_pid_lookup, .readdir = pid_readdir },                                  /* /proc/<pid> */
-    { .lookup = procfs_fd_lookup, .readdir = fd_readdir },                                    /* /proc/<pid>/fd */
+    { .lookup = procfs_root_lookup, .readdir = procfs_root_readdir },                                /* /proc */
+    { .lookup = procfs_pid_lookup, .readdir = procfs_pid_readdir },                                  /* /proc/<pid> */
+    { .lookup = procfs_fd_lookup, .readdir = procfs_fd_readdir },                                    /* /proc/<pid>/fd */
     { .readlink = procfs_fd_readlink },                                                       /* an fd's link */
     { .readpage = procfs_readpage, .evict = procfs_evict },                                   /* a rendered file */
     { .readpage = procfs_readpage, .evict = procfs_evict, .open = procfs_environ_open },      /* environ */
     { .readlink = procfs_link_readlink },                                                     /* cwd, exe, root */
-    { .lookup = procfs_net_lookup, .readdir = net_readdir },                                  /* /proc/net */
+    { .lookup = procfs_net_lookup, .readdir = procfs_net_readdir },                                  /* /proc/net */
     { .readlink = procfs_self_readlink },                                                     /* self */
 };
 

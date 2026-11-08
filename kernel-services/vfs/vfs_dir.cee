@@ -12,6 +12,7 @@
 @header("kernel/cred.h", "kernel/errno.h", "kernel/lockdep.h", "kernel/mutex.h", "kernel/string.h",
     "kernel/types.h", "kernel/vfs.h")
 extern "C" {
+    enum vnode_type: u32;
     struct cosmo_stat;
     struct vfs_statfs {
         magic: u32;
@@ -31,7 +32,7 @@ extern "C" {
         symlink: extern "C" fn(*mut vnode, *CChar, usize, *CChar, *mut *mut vnode) -> i32;
         readlink: extern "C" fn(*mut vnode, *mut CChar, usize) -> i32;
         mkdir: extern "C" fn(*mut vnode, *CChar, usize, u32, *mut *mut vnode) -> i32;
-        mknod: extern "C" fn(*mut vnode, *CChar, usize, u32, u32, *mut *mut vnode) -> i32;
+        mknod: extern "C" fn(*mut vnode, *CChar, usize, u32, vnode_type, *mut *mut vnode) -> i32;
         unlink: extern "C" fn(*mut vnode, *CChar, usize, *mut vnode) -> i32;
         link: extern "C" fn(*mut vnode, *CChar, usize, *mut vnode) -> i32;
         rmdir: extern "C" fn(*mut vnode, *CChar, usize, *mut vnode) -> i32;
@@ -78,10 +79,6 @@ extern "C" {
     fn vfs_text_busy_locked(vn: *mut vnode) -> bool;
     fn vfs_covering_mount(dir: *vnode) -> *mut mount;
     fn vfs_entry_is_mountpoint(vn: *mut vnode, held1: *mut vnode, held2: *mut vnode) -> bool;
-
-    // vfs_floor.c: the call through ops->mknod, whose type takes an enum vnode_type a CeeSafe function type cannot
-    // spell.
-    fn vfs_floor_mknod(dir: *mut vnode, name: *CChar, len: usize, mode: u32, kind: u32, out: *mut *mut vnode) -> i32;
 }
 
 // errno.h, vfs.h, lockdep.h, cred.h and types.h, which vfs_floor.c checks.
@@ -282,7 +279,8 @@ unsafe fn unlink(start: *mut vnode, path: *CChar) -> i32 => removeEntry(start, p
 
 /// Safety: as vfs_mkdir; `out` writable.
 @export("vfs_mknod")
-unsafe fn mknod(start: *mut vnode, path: *CChar, mode: u32, kind: u32, out: *mut *mut vnode) -> i32 {
+unsafe fn mknod(start: *mut vnode, path: *CChar, mode: u32, nodeType: vnode_type, out: *mut *mut vnode) -> i32 {
+    let kind = nodeType as u32;
     if (kind != VNODE_SOCK && kind != VNODE_FIFO) {
         return -EINVAL;
     }
@@ -308,7 +306,8 @@ unsafe fn mknod(start: *mut vnode, path: *CChar, mode: u32, kind: u32, out: *mut
             vn = 0 as *mut vnode;
             rc = -EEXIST;
         } else if (rc == -ENOENT) {
-            rc = vfs_floor_mknod(parent, name as *CChar, len, mode & 0o7777, kind, borrow mut vn as *mut *mut vnode);
+            rc = Ptr.toBorrow(ops).mknod(parent, name as *CChar, len, mode & 0o7777, nodeType,
+                borrow mut vn as *mut *mut vnode);
         }
     }
     mutex_unlock(lockOf(parent));

@@ -105,31 +105,6 @@ bool vfs_floor_is_file(const struct kobject *obj);
 const struct kobject_type *vfs_floor_file_type(void) { return &file_type.base; }
 bool vfs_floor_is_file(const struct kobject *obj) { return obj->type == &file_type.base; }
 
-/* A filesystem's readdir calls back with an enum vnode_type: vfs_file.cee's
- * emit takes it as the integer it is. */
-int vfs_readdir_emit(void *arg, const char *name, size_t len, uint64_t ino, uint32_t type);
-static int readdir_emit(void *arg, const char *name, size_t len, uint64_t ino, enum vnode_type type)
-{
-    return vfs_readdir_emit(arg, name, len, ino, (uint32_t)type);
-}
-
-int vfs_floor_readdir(struct vnode *vn, uint64_t *pos, void *ctx);
-bool vfs_floor_has_readdir(const struct vnode *vn);
-bool vfs_floor_has_readdir(const struct vnode *vn) { return vn->ops->readdir != NULL; }
-int vfs_floor_readdir(struct vnode *vn, uint64_t *pos, void *ctx)
-{
-    return vn->ops->readdir(vn, pos, readdir_emit, ctx);
-}
-
-/* A filesystem's mknod, whose type takes an enum vnode_type. */
-int vfs_floor_mknod(struct vnode *dir, const char *name, size_t len, uint32_t mode, uint32_t type,
-                    struct vnode **out);
-int vfs_floor_mknod(struct vnode *dir, const char *name, size_t len, uint32_t mode, uint32_t type,
-                    struct vnode **out)
-{
-    return dir->ops->mknod(dir, name, len, mode, (enum vnode_type)type, out);
-}
-
 /* A stream's driver runs with no vnode lock held (lockdep.h's assertion, a
  * macro: nothing in a build without lockdep). */
 void vfs_floor_assert_unlocked(struct vnode *vn);

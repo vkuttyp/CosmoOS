@@ -12,6 +12,7 @@
     "kernel/list.h", "kernel/lockdep.h", "kernel/log.h", "kernel/mutex.h", "kernel/pagecache.h", "kernel/string.h",
     "kernel/vfs.h")
 extern "C" {
+    enum vnode_type: u32;
     struct vnode_ops;
     struct fifo;
     struct file;
@@ -101,7 +102,6 @@ extern "C" {
     fn ramfs_floor_ops(which: u32) -> *vnode_ops;
     /// bootarchive_entry, whose name is the struct's.
     fn ramfs_floor_archive(index: u32) -> *bootarchive_entry;
-    fn ramfs_floor_emit(cb: *mut void, arg: *mut void, name: *CChar, len: usize, ino: u64, kind: u32) -> i32;
 }
 
 // errno.h, vfs.h, lockdep.h, cred.h, kmalloc.h and syscall.h, which ramfs_floor.c checks.
@@ -356,7 +356,8 @@ unsafe fn mkdir(dir: *mut vnode, name: *CChar, len: usize, mode: u32, out: *mut 
 /// node.
 /// Safety: as createCommon.
 @export("ramfs_mknod")
-unsafe fn mknod(dir: *mut vnode, name: *CChar, len: usize, mode: u32, kind: u32, out: *mut *mut vnode) -> i32 {
+unsafe fn mknod(dir: *mut vnode, name: *CChar, len: usize, mode: u32, nodeType: vnode_type, out: *mut *mut vnode) -> i32 {
+    let kind = nodeType as u32;
     if (kind == VNODE_SOCK) {
         return createCommon(dir, name, len, mode, VNODE_SOCK, out);
     }
@@ -545,14 +546,15 @@ unsafe fn rename(
 
 /// The directory's entries from `*pos` -- 0 is ".", 1 is "..", 2 on the entries in order -- until the reader wants no
 /// more; `*pos` is where the next call starts.
-/// Safety: `dir` is a live ramfs directory, locked; `pos` is writable; `cb` is a vfs_dirent_cb and `arg` its argument.
-@export("ramfs_readdir_cee")
-unsafe fn readdir(dir: *mut vnode, pos: *mut u64, cb: *mut void, arg: *mut void) -> i32 {
+/// Safety: `dir` is a live ramfs directory, locked; `pos` is writable; `arg` is `cb`'s argument.
+@export("ramfs_readdir")
+unsafe fn readdir(dir: *mut vnode, pos: *mut u64, cb: extern "C" fn(*mut void, *CChar, usize, u64, vnode_type) -> i32,
+    arg: *mut void) -> i32 {
     let n = nodeOf(dir);
     let at = Ptr.toBorrowMut(pos);
     var i: u64 = 0;
     if (*at == 0) {
-        if (ramfs_floor_emit(cb, arg, ".\0".ptr as *CChar, 1, Ptr.toBorrow(dir as *vnode).ino, VNODE_DIR) != 0) {
+        if (cb(arg, ".\0".ptr as *CChar, 1, Ptr.toBorrow(dir as *vnode).ino, VNODE_DIR as vnode_type) != 0) {
             return 0;
         }
         *at = 1;
@@ -560,7 +562,7 @@ unsafe fn readdir(dir: *mut vnode, pos: *mut u64, cb: *mut void, arg: *mut void)
     if (*at == 1) {
         let parent = Ptr.toBorrow(n as *Node).parent;
         let p = if (parent.isNull()) dir else parent;
-        if (ramfs_floor_emit(cb, arg, "..\0".ptr as *CChar, 2, Ptr.toBorrow(p as *vnode).ino, VNODE_DIR) != 0) {
+        if (cb(arg, "..\0".ptr as *CChar, 2, Ptr.toBorrow(p as *vnode).ino, VNODE_DIR as vnode_type) != 0) {
             return 0;
         }
         *at = 2;
@@ -576,7 +578,7 @@ unsafe fn readdir(dir: *mut vnode, pos: *mut u64, cb: *mut void, arg: *mut void)
         }
         let entry = Ptr.toBorrow(e as *Dirent);
         let child = Ptr.toBorrow(entry.child as *vnode);
-        if (ramfs_floor_emit(cb, arg, nameOf(e) as *CChar, entry.len as usize, child.ino, child.kind) != 0) {
+        if (cb(arg, nameOf(e) as *CChar, entry.len as usize, child.ino, child.kind as vnode_type) != 0) {
             return 0;
         }
         i += 1;

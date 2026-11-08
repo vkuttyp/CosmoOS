@@ -13,6 +13,7 @@
 
 @header("kernel/vfs.h", "kernel/kmalloc.h", "kernel/mutex.h", "kernel/string.h", "kernel/cred.h", "cosmofs_internal.h")
 extern "C" {
+    enum vnode_type: u32;
     struct mount {
         fs_priv: *mut void;
         flags: u32;
@@ -121,8 +122,6 @@ extern "C" {
     fn memset(p: *mut void, c: i32, n: usize) -> *mut void;
     fn memcpy(dst: *mut void, src: *void, n: usize) -> *mut void;
     fn memcmp(a: *void, b: *void, n: usize) -> i32;
-    /// cosmofs_dir_floor.c: one entry to readdir's reader; nonzero when it wants no more.
-    fn cfs_dir_floor_emit(cb: *void, arg: *mut void, name: *CChar, len: usize, ino: u64, kind: u32) -> i32;
 }
 
 // ---- errno.h, vfs.h and cosmofs_format.h values (asserted in tests/host/test_cfsdir.c) ----
@@ -1076,24 +1075,29 @@ unsafe fn renameLocked(fs: *mut cfs, odir: *mut vnode, oname: *CChar, olen: usiz
 
 // ---- readdir ----
 
+/// One entry to readdir's reader: nonzero when it wants no more.
+/// Safety: `arg` is `cb`'s argument; `name` holds `len` bytes.
+unsafe fn emit(cb: extern "C" fn(*mut void, *CChar, usize, u64, vnode_type) -> i32, arg: *mut void, name: *CChar, len: usize, ino: u64, kind: u32) -> i32 =>
+    cb(arg, name, len, ino, kind as vnode_type);
+
 /// The walk of readdir from `*pos`: "." and ".." first, then every entry, a long name's continuations stepped over;
-/// `*pos` left where the next call goes on. `cb` and `arg` go to cfs_dir_floor_emit.
+/// `*pos` left where the next call goes on, each entry given to `cb` with `arg`.
 /// Safety: `dir` is a directory vnode of this filesystem; `pos` writable; `cb` a vfs_dirent_cb.
-@export("cfs_dir_readdir")
-unsafe fn readdir(dir: *mut vnode, pos: *mut u64, cb: *void, arg: *mut void) -> i32 {
+@export("cfs_readdir")
+unsafe fn readdir(dir: *mut vnode, pos: *mut u64, cb: extern "C" fn(*mut void, *CChar, usize, u64, vnode_type) -> i32, arg: *mut void) -> i32 {
     let fs = fsOf(dir);
     if (unusable(fs)) {
         return -EIO; // unmounted, or the transaction was abandoned
     }
     if (pos.read() == 0) {
-        if (cfs_dir_floor_emit(cb, arg, ".\0".ptr as *CChar, 1, ino(dir), VNODE_DIR) != 0) {
+        if (emit(cb, arg, ".\0".ptr as *CChar, 1, ino(dir), VNODE_DIR) != 0) {
             return 0;
         }
         pos.write(1);
     }
     if (pos.read() == 1) {
         let parent = Ptr.toBorrow(inodeOf(dir) as *cfs_inode).parent;
-        if (cfs_dir_floor_emit(cb, arg, "..\0".ptr as *CChar, 2, parent, VNODE_DIR) != 0) {
+        if (emit(cb, arg, "..\0".ptr as *CChar, 2, parent, VNODE_DIR) != 0) {
             return 0;
         }
         pos.write(2);
@@ -1134,7 +1138,7 @@ unsafe fn readdir(dir: *mut vnode, pos: *mut u64, cb: *void, arg: *mut void) -> 
             let nlen = cfs_dirent_name(d, s, name);
             let t = if (block.add(s as usize * CFS_DIRENT_SIZE + DIRENT_TYPE).read() as u32 == CFS_TYPE_DIR) VNODE_DIR
                 else VNODE_REG;
-            if (cfs_dir_floor_emit(cb, arg, name as *CChar, nlen as usize, e, t) != 0) {
+            if (emit(cb, arg, name as *CChar, nlen as usize, e, t) != 0) {
                 break;
             }
             i += (slots - 1) as u64; // past its continuations, which stay in this block
