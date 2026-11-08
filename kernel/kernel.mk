@@ -180,7 +180,6 @@ KERNEL_GENERIC_SRCS := \
 	kernel-services/filesystem/procfs/procfs.c \
 	kernel-services/vfs/pagecache.c \
 	kernel-services/vfs/ramfs.c \
-	kernel-services/vfs/ramfs_floor.c \
 	kernel-services/vfs/memdev.c \
 	kernel-services/vfs/vfstest_base.c \
 	kernel-services/vfs/vfstest_mount.c \

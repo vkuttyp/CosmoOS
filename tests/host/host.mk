@@ -92,7 +92,7 @@ HOST_BLKCTL_SRCS := $(HOST_COMMON_SRCS) kernel-services/vfs/blkctl.c \
 	kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_blkctl.c
 HOST_PAGECACHE_SRCS := $(HOST_COMMON_SRCS) kernel-services/vfs/pagecache.c \
 	kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_pagecache.c
-HOST_RAMFS_SRCS := $(HOST_COMMON_SRCS) kernel-services/vfs/ramfs.c kernel-services/vfs/ramfs_floor.c \
+HOST_RAMFS_SRCS := $(HOST_COMMON_SRCS) kernel-services/vfs/ramfs.c \
 	kernel/core/printf.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_ramfs.c
 HOST_FSCTL_SRCS := $(HOST_COMMON_SRCS) kernel-services/vfs/fsctl.c \
 	kernel/core/printf.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c \

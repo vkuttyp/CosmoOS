@@ -4,21 +4,52 @@
 // Directories are lists of entries pointing at pinned vnodes; regular file data lives in the vnode's page cache
 // (readpage zero-fills, writepage keeps the page resident). Inode numbers are per mount.
 //
-// The vnodes, mounts and device tables stay C (vfs.h). ramfs_floor.c keeps the operation tables and ramfs_fs_type,
-// C data the VFS and boot composition name, and readdir's entry point and the call through its callback, whose type
-// takes an enum vnode_type a CeeSafe function type cannot spell.
+// The vnodes, mounts and device tables stay C (vfs.h). The operation tables and ramfs_fs_type, C data the VFS and boot
+// composition name, are this file's (ADR 0080 §3.2), and readdir's callback type takes the imported enum vnode_type.
 
-@header("kernel/bootarchive.h", "kernel/cred.h", "kernel/errno.h", "kernel/fifo.h", "kernel/kmalloc.h",
-    "kernel/list.h", "kernel/lockdep.h", "kernel/log.h", "kernel/mutex.h", "kernel/pagecache.h", "kernel/string.h",
-    "kernel/vfs.h")
+@header("kernel/bootarchive.h", "kernel/cred.h", "kernel/errno.h", "kernel/fifo.h", "kernel/kmalloc.h", "kernel/list.h",
+    "kernel/lockdep.h", "kernel/log.h", "kernel/mutex.h", "kernel/pagecache.h", "kernel/string.h", "kernel/vfs.h",
+    "kernel/page.h")
 extern "C" {
     enum vnode_type: u32;
-    struct vnode_ops;
+    /// vfs.h's operations, the members ramfs's tables set.
+    struct vnode_ops {
+        create: extern "C" fn(*mut vnode, *CChar, usize, u32, *mut *mut vnode) -> i32;
+        evict: extern "C" fn(*mut vnode);
+        link: extern "C" fn(*mut vnode, *CChar, usize, *mut vnode) -> i32;
+        lookup: extern "C" fn(*mut vnode, *CChar, usize, *mut *mut vnode) -> i32;
+        mkdir: extern "C" fn(*mut vnode, *CChar, usize, u32, *mut *mut vnode) -> i32;
+        mknod: extern "C" fn(*mut vnode, *CChar, usize, u32, vnode_type, *mut *mut vnode) -> i32;
+        open: extern "C" fn(*mut vnode, *mut file) -> i32;
+        poll_wq: extern "C" fn(*mut vnode, *mut file, u32) -> *mut waitqueue;
+        read: extern "C" fn(*mut vnode, u64, *mut void, usize) -> i64;
+        read_file: extern "C" fn(*mut vnode, *mut file, u64, *mut void, usize) -> i64;
+        readdir: extern "C" fn(*mut vnode, *mut u64, extern "C" fn(*mut void, *CChar, usize, u64, vnode_type) -> i32, *mut void) -> i32;
+        readlink: extern "C" fn(*mut vnode, *mut CChar, usize) -> i32;
+        readpage: extern "C" fn(*mut vnode, u64, *mut void) -> i32;
+        ready: extern "C" fn(*mut vnode, *mut file) -> u32;
+        release: extern "C" fn(*mut vnode, *mut file);
+        rename: extern "C" fn(*mut vnode, *CChar, usize, *mut vnode, *mut vnode, *CChar, usize, *mut vnode) -> i32;
+        rmdir: extern "C" fn(*mut vnode, *CChar, usize, *mut vnode) -> i32;
+        set_nonblock: extern "C" fn(*mut vnode, *mut file, i32) -> i32;
+        symlink: extern "C" fn(*mut vnode, *CChar, usize, *CChar, *mut *mut vnode) -> i32;
+        truncate: extern "C" fn(*mut vnode, u64) -> i32;
+        unlink: extern "C" fn(*mut vnode, *CChar, usize, *mut vnode) -> i32;
+        write: extern "C" fn(*mut vnode, u64, *void, usize) -> i64;
+        write_file: extern "C" fn(*mut vnode, *mut file, u64, *void, usize) -> i64;
+        writepage: extern "C" fn(*mut vnode, u64, *void) -> i32;
+    }
     struct fifo;
     struct file;
     struct waitqueue;
     struct blkdev;
-    struct fs_type;
+    /// vfs.h's filesystem type: ramfs's name, magic and operations.
+    struct fs_type {
+        name: *CChar;
+        magic: u32;
+        mount: extern "C" fn(*mut fs_type, *mut blkdev, u32, *mut mount) -> i32;
+        unmount: extern "C" fn(*mut mount) -> i32;
+    }
     struct mount {
         flags: u32;
         root: *mut vnode;
@@ -98,44 +129,51 @@ extern "C" {
     fn fifo_set_nonblock(fifo: *mut fifo, f: *mut file, on: i32) -> i32;
     fn bootarchive_count() -> u32;
 
-    // ramfs_floor.c
-    fn ramfs_floor_ops(which: u32) -> *vnode_ops;
-    /// bootarchive_entry, whose name is the struct's.
-    fn ramfs_floor_archive(index: u32) -> *bootarchive_entry;
+    /// bootarchive.h's entry `index`, a function whose name its struct has too (ADR 0080 §3.5).
+    @cname("bootarchive_entry")
+    fn archiveEntry(index: u32) -> *bootarchive_entry;
+
+    // The values and layout the C compiler checks (ADR 0080 §3.1), which the floor asserted.
+    const EPERM: i32 = 1;
+    const ENOENT: i32 = 2;
+    const EIO: i32 = 5;
+    const ENOMEM: i32 = 12;
+    const EEXIST: i32 = 17;
+    const ENOTDIR: i32 = 20;
+    const EINVAL: i32 = 22;
+    const EFBIG: i32 = 27;
+    const ENAMETOOLONG: i32 = 36;
+    const ENOTEMPTY: i32 = 39;
+    const ENOTSUP: i32 = 95;
+    const VNODE_REG: u32 = 1;
+    const VNODE_DIR: u32 = 2;
+    const VNODE_CHR: u32 = 3;
+    const VNODE_FIFO: u32 = 4;
+    const VNODE_SOCK: u32 = 5;
+    const VNODE_LNK: u32 = 6;
+    const VNODE_PINNED: u32 = 1;
+    const VNODE_DEAD: u32 = 2;
+    const VNODE_NESTED_CHILD: u32 = 2;
+    const MOUNT_CACHE_IS_STORE: u32 = 2;
+    const MOUNT_SCRATCH: u32 = 4;
+    const VFS_NAME_MAX: usize = 255;
+    const VFS_PATH_MAX: usize = 1024;
+    const CRED_ROOT_UID: u32 = 0;
+    const COSMO_O_WRONLY: u32 = 0x0001;
+    const COSMO_O_CREAT: u32 = 0x0040;
+    const COSMO_O_TRUNC: u32 = 0x0200;
+    const COSMO_IO_READABLE: u32 = 1;
+    const COSMO_IO_WRITABLE: u32 = 2;
+    /// ramfs.cee's errno.h values
+    @cvalue("EOPNOTSUPP == ENOTSUP")
+    const RAMFS_FACT_0: bool = true;
+    /// ramfs.cee's vfs.h, lockdep.h, cred.h, syscall.h and bootarchive.h values
+    @cvalue("PAGE_SIZE == 4096 && BOOTARCHIVE_NAME_MAX == 100")
+    const RAMFS_FACT_1: bool = true;
 }
 
-// errno.h, vfs.h, lockdep.h, cred.h, kmalloc.h and syscall.h, which ramfs_floor.c checks.
-const EPERM: i32 = 1;
-const ENOENT: i32 = 2;
-const EIO: i32 = 5;
-const ENOMEM: i32 = 12;
-const EEXIST: i32 = 17;
-const ENOTDIR: i32 = 20;
-const EINVAL: i32 = 22;
-const EFBIG: i32 = 27;
-const ENAMETOOLONG: i32 = 36;
-const ENOTEMPTY: i32 = 39;
-const ENOTSUP: i32 = 95;
-const VNODE_REG: u32 = 1;
-const VNODE_DIR: u32 = 2;
-const VNODE_CHR: u32 = 3;
-const VNODE_FIFO: u32 = 4;
-const VNODE_SOCK: u32 = 5;
-const VNODE_LNK: u32 = 6;
-const VNODE_PINNED: u32 = 1;
-const VNODE_DEAD: u32 = 2;
-const VNODE_NESTED_CHILD: u32 = 2;
-const MOUNT_CACHE_IS_STORE: u32 = 2;
-const MOUNT_SCRATCH: u32 = 4;
-const VFS_NAME_MAX: usize = 255;
-const VFS_PATH_MAX: usize = 1024;
+// errno.h, vfs.h, lockdep.h, cred.h, kmalloc.h and syscall.h's.
 const PAGE_BYTES: usize = 4096;
-const CRED_ROOT_UID: u32 = 0;
-const COSMO_O_WRONLY: u32 = 0x0001;
-const COSMO_O_CREAT: u32 = 0x0040;
-const COSMO_O_TRUNC: u32 = 0x0200;
-const COSMO_IO_READABLE: u32 = 1;
-const COSMO_IO_WRITABLE: u32 = 2;
 
 const RAMFS_MAX_FILE: u64 = 64 << 20;
 const RAMFS_MAX_PAGES: u64 = 16384;
@@ -148,13 +186,85 @@ const MODE_PROC: u32 = 0x16D;
 const MODE_LINK: u32 = 0x1FF;
 const MODE_BITS: u32 = 0xFFF;
 
-// ramfs_floor_ops' tables.
+// The operation tables.
 const OPS_DIR: u32 = 0;
 const OPS_FILE: u32 = 1;
 const OPS_LNK: u32 = 2;
 const OPS_SOCK: u32 = 3;
 const OPS_FIFO: u32 = 4;
 const OPS_CHR: u32 = 5;
+
+/// The operations, in OPS_* order: directories, regular files, symbolic links, sockets' names, named pipes,
+/// character devices.
+static mut RAMFS_OPS: [vnode_ops; 6] = [
+    // directories
+    vnode_ops {
+        lookup: lookup,
+        create: create,
+        mkdir: mkdir,
+        unlink: unlink,
+        link: link,
+        rmdir: rmdir,
+        rename: rename,
+        readdir: readdir,
+        symlink: symlink,
+        mknod: mknod,
+        evict: evict,
+    },
+    // regular files
+    vnode_ops {
+        readpage: readpage,
+        writepage: writepage,
+        truncate: truncateTo,
+        evict: evict,
+    },
+    // symbolic links
+    vnode_ops {
+        readlink: readlink,
+        evict: evict,
+    },
+    // sockets' names
+    vnode_ops {
+        evict: evict,
+    },
+    // named pipes
+    vnode_ops {
+        open: fifoOpen,
+        release: fifoRelease,
+        read_file: fifoRead,
+        write_file: fifoWrite,
+        ready: fifoReady,
+        poll_wq: fifoPollWq,
+        set_nonblock: fifoSetNonblock,
+        evict: evict,
+    },
+    // character devices
+    vnode_ops {
+        read: chrRead,
+        write: chrWrite,
+        open: chrOpen,
+        release: chrRelease,
+        read_file: chrReadFile,
+        write_file: chrWriteFile,
+        ready: chrReady,
+        poll_wq: chrPollWq,
+        set_nonblock: chrSetNonblock,
+        evict: evict,
+    },
+];
+
+/// The table of `which` (OPS_*).
+/// Safety: `which` is an OPS_* value; the tables are never written.
+unsafe fn opsOf(which: u32) -> *vnode_ops => borrow mut RAMFS_OPS[which as usize] as *mut vnode_ops as *vnode_ops;
+
+/// ramfs's filesystem type (`extern struct fs_type ramfs_fs_type`), which boot composition registers by name.
+@export("ramfs_fs_type")
+static mut RAMFS_FS_TYPE: fs_type = fs_type {
+    magic: 0x858458f6, // Linux's RAMFS_MAGIC
+    name: "ramfs\0".ptr as *CChar,
+    mount: mountFs,
+    unmount: unmount,
+};
 
 /// A directory entry: a name and the vnode it pins, one pin however many names (VFS-4). Laid out by C's rules, as
 /// every struct is (type-system.md §12).
@@ -247,7 +357,7 @@ unsafe fn ramfsNew(mnt: *mut mount, kind: u32, mode: u32, parent: *mut vnode) ->
     file.gid = Ptr.toBorrow(cred_current()).egid;
     let which = if (kind == VNODE_DIR) OPS_DIR else if (kind == VNODE_LNK) OPS_LNK
         else if (kind == VNODE_SOCK) OPS_SOCK else if (kind == VNODE_FIFO) OPS_FIFO else OPS_FILE;
-    file.ops = ramfs_floor_ops(which);
+    file.ops = opsOf(which);
     file.fs_priv = n as *mut void;
     file.flags = file.flags | VNODE_PINNED; // the reference from vnode_alloc is the pin
     file.nlink = if (kind == VNODE_DIR) 2 else 1;
@@ -752,7 +862,7 @@ unsafe fn chrSetNonblock(vn: *mut vnode, f: *mut file, on: i32) -> i32 {
 /// Safety: `vn` is a live vnode.
 @export("ramfs_chr_ops_of")
 unsafe fn chrOpsOf(vn: *vnode) -> *chrdev_ops {
-    if (Ptr.toBorrow(vn).ops != ramfs_floor_ops(OPS_CHR)) {
+    if (Ptr.toBorrow(vn).ops != opsOf(OPS_CHR)) {
         return 0 as *chrdev_ops;
     }
     return Ptr.toBorrow(nodeOf(vn as *mut vnode) as *Node).chr;
@@ -767,7 +877,7 @@ unsafe fn chrPriv(vn: *vnode) -> *mut void =>
 /// Safety: `dir` is a live vnode.
 unsafe fn ramfsDir(dir: *mut vnode) -> bool {
     let d = Ptr.toBorrow(dir as *vnode);
-    return d.kind == VNODE_DIR && d.ops == ramfs_floor_ops(OPS_DIR);
+    return d.kind == VNODE_DIR && d.ops == opsOf(OPS_DIR);
 }
 
 /// The character node at `path`, whose directory is a ramfs directory.
@@ -837,7 +947,7 @@ unsafe fn mkchrAt(
         node.chr = ops;
         node.chrPriv.storeWith(priv as usize, StoreOrdering.Relaxed);
         let fileVn = fileOf(vn);
-        fileVn.ops = ramfs_floor_ops(OPS_CHR);
+        fileVn.ops = opsOf(OPS_CHR);
         // This lock used to be given its own lockdep class here, because a device whose operations consult the mount
         // table -- /dev/fsctl does, by definition -- read as an inversion of `mounts -> vnode` and panicked on its
         // first boot. The split was sound (nothing mounts onto a character device) and it answered the wrong question:
@@ -865,8 +975,8 @@ unsafe fn mkchrAt(
 /// Safety: `dir` and `victim` are live vnodes, unlocked; `name` is NUL-terminated.
 @export("ramfs_unlink_chr_at")
 unsafe fn unlinkChrAt(dir: *mut vnode, name: *CChar, victim: *mut vnode) -> i32 {
-    if (Ptr.toBorrow(dir as *vnode).ops != ramfs_floor_ops(OPS_DIR) ||
-        Ptr.toBorrow(victim as *vnode).ops != ramfs_floor_ops(OPS_CHR)) {
+    if (Ptr.toBorrow(dir as *vnode).ops != opsOf(OPS_DIR) ||
+        Ptr.toBorrow(victim as *vnode).ops != opsOf(OPS_CHR)) {
         return -EINVAL;
     }
     mutex_lock(lockOf(dir));
@@ -1082,7 +1192,7 @@ unsafe fn populateBoot() {
     let count = bootarchive_count();
     var path: [u8; 1024] = [0; 1024];
     for (i in 0..count) {
-        let e = ramfs_floor_archive(i);
+        let e = archiveEntry(i);
         let name = (e as *u8).add(offsetOf<bootarchive_entry>(name)) as *CChar;
         let target = (e as *u8).add(offsetOf<bootarchive_entry>(link)) as *CChar;
         // The bootstrap namespace: bin/, sbin/, etc/ and usr/ entries are the installed system (docs/userland/);
