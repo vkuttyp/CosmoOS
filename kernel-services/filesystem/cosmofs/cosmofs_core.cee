@@ -9,9 +9,8 @@
 // struct cfs, the pool, the superblock, the mount and the vnodes stay C (cosmofs_internal.h, kernel/storage.h,
 // kernel/vfs.h). What the C kept on the stack -- two superblocks, a MAC key, an inode -- is kept in zeroed slots of
 // words, checked against their C sizes (tests/host/test_cfscore.c): a CeeSafe local cannot hold C state.
-// cosmofs_core_floor.c keeps the fs_type table and its registration, the walk of the VFS's vnode hash under its
-// spinlock, whose list and reference count are inline functions of kernel/vfs.h, and the lock assertion only a lockdep
-// build makes.
+// The fs_type table and its registration, the walk of the VFS's vnode hash under its spinlock, and the lock assertion
+// only a lockdep build makes (a `cfg` block, ADR 0080 §3.3) are this file's too.
 
 @header("kernel/blk.h", "kernel/vfs.h", "kernel/storage.h", "kernel/kmalloc.h", "kernel/string.h", "kernel/thread.h",
     "kernel/timer.h", "kernel/lockdep.h", "kernel/fwcfg.h", "kernel/cosmofs.h", "uapi/cosmo/fsctl.h",
@@ -22,11 +21,40 @@ extern "C" {
         obj: kobject;
         name: [u8; 16];
     }
+    struct cosmofs_check_report;
+    struct cosmofs_scrub_stats;
+    struct cosmofs_dev_report;
+    struct cosmofs_snap_req;
+    struct cosmofs_pool_req;
+    struct cosmofs_key_req;
+    struct cosmo_keyslot;
+    /// vfs.h's filesystem type: its name, statfs magic and operations.
     struct fs_type {
         name: *CChar;
+        magic: u32;
+        mount: extern "C" fn(*mut fs_type, *mut blkdev, u32, *mut mount) -> i32;
+        unmount: extern "C" fn(*mut mount) -> i32;
+        sync: extern "C" fn(*mut mount) -> i32;
+        check: extern "C" fn(*mut mount, *mut cosmofs_check_report, u32) -> i32;
+        scrub: extern "C" fn(*mut mount, *mut cosmofs_scrub_stats, u32) -> i32;
+        check_dev: extern "C" fn(*mut blkdev, u32, *mut cosmofs_check_report, *mut cosmofs_dev_report) -> i32;
+        snapctl: extern "C" fn(*mut mount, *mut cosmofs_snap_req) -> i32;
+        poolctl: extern "C" fn(*mut mount, *mut cosmofs_pool_req) -> i32;
+        format: extern "C" fn(*mut blkdev, *CChar) -> i32;
+        format_mirror: extern "C" fn(*mut *mut blkdev, u32, *CChar) -> i32;
+        keyctl: extern "C" fn(*mut blkdev, *mut mount, *mut cosmofs_key_req) -> i32;
+        format_keyed: extern "C" fn(*mut *mut blkdev, u32, *CChar, *u8, *u8, *cosmo_keyslot) -> i32;
+        statfs: extern "C" fn(*mut mount, *mut vfs_statfs) -> i32;
+    }
+    struct pagecache {
+        nr_dirty: u32;
     }
     struct vnode {
         lock: mutex;
+        hash_link: list_node;
+        @cname("type")
+        kind: u32;
+        pc: pagecache;
     }
     struct vfs_statfs {
         bsize: u32;
@@ -41,6 +69,8 @@ extern "C" {
         sync_lock: mutex;
         cache_dirty: u64;
         unmounted: bool;
+        lock: spinlock_t;
+        vnodes: [list_node; 64];
     }
     struct spool_member {
         nblocks: u64;
@@ -193,10 +223,111 @@ extern "C" {
     fn memcmp(a: *void, b: *void, n: usize) -> i32;
     fn memcpy(dst: *mut void, src: *void, n: usize) -> *mut void;
     fn memset(p: *mut void, c: i32, n: usize) -> *mut void;
-    /// cosmofs_core_floor.c: the next hashed regular file of bucket `b` with dirty pages, referenced; or null.
-    fn cfs_core_floor_dirty_vnode(mnt: *mut mount, b: u32) -> *mut vnode;
-    /// cosmofs_core_floor.c: lockdep_assert_held(&fs->lock, LOCKDEP_KIND_MUTEX), which only a lockdep build makes.
-    fn cfs_core_floor_assert_held(fs: *mut cfs);
+    fn vnode_get(vn: *mut vnode);
+    fn vfs_register_fs(fst: *mut fs_type) -> i32;
+    /// lockdep.h: whether this thread holds `lock`, in a lockdep build only.
+    @cfg("CONFIG_LOCKDEP")
+    fn lockdep_is_held(lock: *void, kind: u32) -> bool;
+    const LOCKDEP_KIND_MUTEX: u32 = 1;
+    const VNODE_REG: u32 = 1;
+    // The maintenance passes, the formats and the key operations: other files' exports.
+    fn cosmofs_check(mnt: *mut mount, out: *mut cosmofs_check_report, flags: u32) -> i32;
+    fn cosmofs_scrub(mnt: *mut mount, out: *mut cosmofs_scrub_stats, flags: u32) -> i32;
+    fn cosmofs_check_dev(bd: *mut blkdev, flags: u32, rep: *mut cosmofs_check_report, dev: *mut cosmofs_dev_report) -> i32;
+    fn cosmofs_snapctl(mnt: *mut mount, req: *mut cosmofs_snap_req) -> i32;
+    fn cosmofs_poolctl(mnt: *mut mount, req: *mut cosmofs_pool_req) -> i32;
+    fn cosmofs_format_label(bd: *mut blkdev, label: *CChar) -> i32;
+    fn cfs_format_mirror_devs(bd: *mut *mut blkdev, n: u32, label: *CChar) -> i32;
+    fn cosmofs_keyctl(bd: *mut blkdev, mnt: *mut mount, req: *mut cosmofs_key_req) -> i32;
+    fn cosmofs_format_keys(bd: *mut *mut blkdev, n: u32, label: *CChar, uuid: *u8, master: *u8,
+        slots: *cosmo_keyslot) -> i32;
+    /// The newest format this kernel reads (cosmofs_format.h), which FORMAT_MARKER names.
+    const CFS_VERSION: u32 = 15;
+}
+
+/// The next hashed regular file of bucket `b` with dirty pages, with a reference for the caller; null when there is
+/// none. The hash lock is a spinlock; a hashed vnode always holds a reference (vnode_put unhashes before the last drop).
+/// Safety: `mnt` is a live mount; `b` below VNODE_HASH.
+unsafe fn dirtyVnode(mnt: *mut mount, b: u32) -> *mut vnode {
+    let lock = borrow mut Ptr.toBorrowMut(mnt).lock as *mut spinlock_t;
+    let s = spin_lock_irqsave(lock);
+    let head = (borrow mut Ptr.toBorrowMut(mnt).vnodes as *mut [list_node; 64] as *mut list_node).add(b as usize);
+    var found = 0 as *mut vnode;
+    var node = List.first(head as *list_node);
+    while (!node.isNull()) {
+        let it = containerOf(node, offsetOf<vnode>(hash_link)) as *mut vnode;
+        let v = Ptr.toBorrow(it as *vnode);
+        if (v.kind == VNODE_REG && v.pc.nr_dirty != 0) {
+            found = it;
+            vnode_get(found);
+            break;
+        }
+        node = List.next(head as *list_node, node);
+    }
+    spin_unlock_irqrestore(lock, s);
+    return found;
+}
+
+/// A commit counted as the writeback thread's is counted under the lock that publishes it: lockdep_assert_held, which
+/// only a lockdep build makes.
+/// Safety: `fs` is a live filesystem.
+unsafe fn assertHeld(fs: *mut cfs) {
+    if (cfg("CONFIG_LOCKDEP")) {
+        let held = lockdep_is_held(borrow mut Ptr.toBorrowMut(fs).lock as *mut mutex as *void, LOCKDEP_KIND_MUTEX);
+        if (!held) {
+            var buffer: [u8; 96] = [0; 96];
+            var line = TextWriter.create(mut buffer[..]);
+            line.text("assertion failed: lockdep_is_held(&fs->lock) (cosmofs_core.cee, assertHeld)");
+            KernelLog.panic(line);
+        }
+    }
+}
+
+/// The filesystem type (cosmofs.h's `extern struct fs_type cosmofs_fs_type`), C data the VFS registry links in.
+@export("cosmofs_fs_type")
+static mut FS_TYPE: fs_type = fs_type {
+    name: "cosmofs\0".ptr as *CChar,
+    magic: 0x4d534643, // "CFSM", the metadata header's magic: Linux has no number for this one
+    statfs: statfs,
+    mount: mountFs,
+    unmount: unmount,
+    sync: sync,
+    // The maintenance passes, reachable from /dev/fsctl.
+    check: cosmofs_check,
+    scrub: cosmofs_scrub,
+    check_dev: cosmofs_check_dev,
+    snapctl: cosmofs_snapctl,
+    poolctl: cosmofs_poolctl,
+    // A single-device pool, unencrypted: what the installer makes through /dev/blkctl, named or not.
+    format: cosmofs_format_label,
+    format_mirror: cfs_format_mirror_devs,
+    // An encrypted pool's key, and making one.
+    keyctl: cosmofs_keyctl,
+    format_keyed: cosmofs_format_keys,
+};
+
+/// The newest format this kernel reads, as text in its image: cosmo-upgrade looks for it in a release's kernel.elf
+/// before switching to that release, and refuses one that could not mount the root (a kernel without the marker reads
+/// 11 at most; design.md, "Format version 12"). Printed at boot, which also keeps it in every build. Update it with
+/// CFS_VERSION.
+static FORMAT_MARKER: StringView = "cosmofs-format-max=15";
+
+/// Registers the filesystem type; boot composition calls it.
+/// Safety: called once, at boot, before any mount.
+@export("cosmofs_init")
+unsafe fn init() {
+    if (vfs_register_fs(borrow mut FS_TYPE as *mut fs_type) != 0) {
+        var stopBuffer: [u8; 64] = [0; 64];
+        var stop = TextWriter.create(mut stopBuffer[..]);
+        stop.text("cosmofs: cannot register");
+        KernelLog.panic(stop);
+    }
+    var buffer: [u8; 96] = [0; 96];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("cosmofs: reads format versions 2 to 15 (");
+    line.text(FORMAT_MARKER);
+    line.text(")");
+    KernelLog.send(LogLevel.Info, line);
 }
 
 // ---- errno.h, vfs.h, thread.h, lockdep.h, fsctl.h, cosmofs_format.h and cosmofs_internal.h values (asserted in
@@ -229,7 +360,6 @@ const CFS_BITS_PER_BITMAP: u64 = 32512;
 const CFS_SUPER_A: u32 = 0;
 const CFS_SUPER_B: u32 = 1;
 const CFS_VERSION_MIN: u32 = 2;
-const CFS_VERSION: u32 = 15;
 const CFS_ROOT_INO: u64 = 1;
 const CFS_TYPE_DIR: u32 = 2;
 const CFS_KIND_ALLOCIDX: u32 = 4;
@@ -359,7 +489,7 @@ unsafe fn syncVnodes(fs: *mut cfs) -> i32 {
     var rc: i32 = 0;
     for (b in 0u32..VNODE_HASH) {
         while (true) {
-            let vn = cfs_core_floor_dirty_vnode(mnt, b);
+            let vn = dirtyVnode(mnt, b);
             if (vn.isNull()) {
                 break;
             }
@@ -1207,7 +1337,7 @@ unsafe fn syncCounted(mnt: *mut mount, writeback: bool) -> i32 {
     rc = cfs_commit_ex(fs, borrow mut published as *mut bool);
     if (rc == 0 && writeback && published) {
         // Published with the generation, not after it.
-        cfs_core_floor_assert_held(fs);
+        assertHeld(fs);
         let f = fsOf(fs);
         f.wb_commits = f.wb_commits.wrappingAdd(1);
     }
