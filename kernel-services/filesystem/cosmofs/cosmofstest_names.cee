@@ -4,12 +4,12 @@
 // cosmofs-v3 (a version-3 disk mounts, writes and keeps a snapshot's holds), cosmofs-pool2 (two members, found by
 // label), cosmofs-snapshot-remount, cosmofs-snap-identity (format version 12), cosmofs-longname and
 // cosmofs-check-longname (format version 15) and cosmofs-link. Debug builds only; the shared helpers are
-// cosmofstest_lib.cee's, a pool's statistics come through cosmofstest_freelog_floor.c. cosmofstest_names_floor.c
-// asserts the values this file writes as its own constants and is the release build's stand-in for the two tests
-// the selftest table names there.
+// cosmofstest_lib.cee's, a pool's statistics come through cosmofstest_freelog_floor.c. The values
+// this file writes as its own constants are the headers', which the C compiler checks, and a release build runs
+// neither test (a `cfg` block; ADR 0080).
 
 @header("kernel/blk.h", "kernel/vfs.h", "kernel/kmalloc.h", "kernel/ramblk.h", "kernel/string.h", "kernel/cosmofs.h",
-    "uapi/cosmo/syscall.h")
+    "uapi/cosmo/syscall.h", "kernel/errno.h", "kernel/selftest.h", "cosmofs_format.h")
 extern "C" {
     struct blkdev;
     struct mount;
@@ -90,27 +90,38 @@ extern "C" {
     fn cfst_check_why(r: *cosmofs_check_report) -> *CChar;
     fn cfst_snapctl(op: u32, name: *CChar, out: *mut cosmofs_snap_info, max: u32, count: *mut u32) -> i32;
     fn cfst_info_named(v: *cosmofs_snap_info, n: u32, name: *CChar) -> *cosmofs_snap_info;
+
+    // The values and layout the C compiler checks (ADR 0080 §3.1), which the floor asserted.
+    const EPERM: i32 = 1;
+    const ENOENT: i32 = 2;
+    const EEXIST: i32 = 17;
+    const EINVAL: i32 = 22;
+    const EROFS: i32 = 30;
+    const ENAMETOOLONG: i32 = 36;
+    const EOPNOTSUPP: i32 = 95;
+    const VFS_UMOUNT_FORCE: u32 = 1;
+    const CFS_BLOCK: u64 = 4096;
+    const CFS_FORMAT_VERSION: u64 = 11;
+    const CFS_NAME_MAX_LONG: usize = 255;
+    const CFS_DIRENTS_PER_BLOCK: u32 = 64;
+    /// cosmofstest_names.cee's errno.h, syscall.h and vfs.h values
+    @cvalue("COSMO_O_RDONLY == 0 && COSMO_O_WRONLY == 1 && COSMO_O_RDWR == 2 && COSMO_O_CREAT == 0x40 && COSMO_DT_LNK == 6")
+    const COSMOFSTEST_NAMES_FACT_0: bool = true;
+    /// cosmofstest_names.cee's cosmofs_format.h and cosmofs.h values
+    @cvalue("COSMOFS_SNAP_CREATE == 1 && COSMOFS_SNAP_LIST == 2 && COSMOFS_SNAP_DELETE == 3 && COSMOFS_CHECK_REPAIR == 1 && COSMOFS_CORRUPT_DUP_NAME == 13 && COSMOFS_CORRUPT_SNAP_UUID == 17 && COSMOFS_CORRUPT_LONGNAME_EXTRA == 20 && COSMOFS_CORRUPT_LONGNAME_CONT == 21")
+    const COSMOFSTEST_NAMES_FACT_1: bool = true;
+    /// cosmofstest_names.cee's sizes and offsets
+    @cvalue("sizeof(struct cosmofs_snap_info) == 104 && sizeof(struct cosmo_dirent) == 16 && offsetof(struct cosmo_dirent, reclen) == 8 && offsetof(struct cosmo_dirent, namelen) == 11 && offsetof(struct cosmo_dirent, name) == 12 && sizeof(struct cosmo_stat) <= 64 && offsetof(struct cosmo_stat, type) == 8 && offsetof(struct cosmo_stat, nlink) == 16 && sizeof(struct cosmofs_check_report) <= 2048")
+    const COSMOFSTEST_NAMES_FACT_2: bool = true;
 }
 
-// ---- Values (asserted in cosmofstest_names_floor.c) ----
+// ---- Values ----
 
-const EPERM: i32 = 1;
-const ENOENT: i32 = 2;
-const EEXIST: i32 = 17;
-const EINVAL: i32 = 22;
-const EROFS: i32 = 30;
-const ENAMETOOLONG: i32 = 36;
-const EOPNOTSUPP: i32 = 95;
 const O_RDONLY: u32 = 0;
 const O_WRONLY: u32 = 1;
 const O_RDWR: u32 = 2;
 const O_CREAT: u32 = 0x40;
-const VFS_UMOUNT_FORCE: u32 = 1;
 const DT_LNK: u32 = 6;
-const CFS_BLOCK: u64 = 4096;
-const CFS_FORMAT_VERSION: u64 = 11;
-const CFS_NAME_MAX_LONG: usize = 255;
-const CFS_DIRENTS_PER_BLOCK: u32 = 64;
 const SNAP_CREATE: u32 = 1;
 const SNAP_LIST: u32 = 2;
 const SNAP_DELETE: u32 = 3;
@@ -607,9 +618,11 @@ unsafe fn selftestPool2(reason: *mut *CChar) -> bool {
 
 /// A snapshot survives an unmount: its entry is on disk, not in memory.
 /// Safety: `reason` writable.
-@cfg("CONFIG_DEBUG")
 @export("selftest_cosmofs_snapshot_remount")
 unsafe fn selftestSnapshotRemount(reason: *mut *CChar) -> bool {
+    if (cfg("!CONFIG_DEBUG")) {
+        return true; // a debug build's test
+    }
     var bd = 0 as *mut blkdev;
     if (!cfst_engine_mount(borrow mut bd as *mut *mut blkdev, 512, reason)) {
         return false;
@@ -671,9 +684,11 @@ unsafe fn uuidZero(p: *cosmofs_snap_info) -> bool {
 /// list's sizes say what each snapshot alone holds; a pool older than 11 refuses identity and keeps its version; and
 /// the checker names a snapshot with no uuid and repairs it.
 /// Safety: `reason` writable.
-@cfg("CONFIG_DEBUG")
 @export("selftest_cosmofs_snap_identity")
 unsafe fn selftestSnapIdentity(reason: *mut *CChar) -> bool {
+    if (cfg("!CONFIG_DEBUG")) {
+        return true; // a debug build's test
+    }
     var bd = 0 as *mut blkdev;
     if (!cfst_engine_mount(borrow mut bd as *mut *mut blkdev, 1024, reason)) {
         return false;

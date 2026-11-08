@@ -223,25 +223,19 @@ KERNEL_GENERIC_SRCS := \
 	kernel-services/filesystem/cosmofs/cosmofstest_lib.c \
 	kernel-services/filesystem/cosmofs/cosmofstest_lib_floor.c \
 	kernel-services/filesystem/cosmofs/cosmofstest_media.c \
-	kernel-services/filesystem/cosmofs/cosmofstest_media_floor.c \
 	kernel-services/filesystem/cosmofs/cosmofstest_extent.c \
 	kernel-services/filesystem/cosmofs/cosmofstest_extent_floor.c \
 	kernel-services/filesystem/cosmofs/cosmofstest_rollback.c \
-	kernel-services/filesystem/cosmofs/cosmofstest_rollback_floor.c \
 	kernel-services/filesystem/cosmofs/cosmofstest_b2.c \
 	kernel-services/filesystem/cosmofs/cosmofstest_b2_floor.c \
 	kernel-services/filesystem/cosmofs/cosmofstest_basic.c \
-	kernel-services/filesystem/cosmofs/cosmofstest_basic_floor.c \
 	kernel-services/filesystem/cosmofs/cosmofstest_copies.c \
 	kernel-services/filesystem/cosmofs/cosmofstest_copies_floor.c \
 	kernel-services/filesystem/cosmofs/cosmofstest_freelog.c \
 	kernel-services/filesystem/cosmofs/cosmofstest_freelog_floor.c \
 	kernel-services/filesystem/cosmofs/cosmofstest_names.c \
-	kernel-services/filesystem/cosmofs/cosmofstest_names_floor.c \
 	kernel-services/filesystem/cosmofs/cosmofstest_check.c \
-	kernel-services/filesystem/cosmofs/cosmofstest_check_floor.c \
 	kernel-services/filesystem/cosmofs/cosmofstest_orphan.c \
-	kernel-services/filesystem/cosmofs/cosmofstest_orphan_floor.c \
 	kernel-services/filesystem/cosmofs/cosmofs_keytest.c \
 	kernel-services/filesystem/cosmofs/cosmofs_keytest_floor.c \
 	kernel-services/filesystem/cosmofs/cosmofscrash.c \
@@ -462,6 +456,14 @@ $(OUT)/kernel-services/filesystem/cosmofs/cosmofstest_rollback.o $(OUT)/kernel-s
 $(OUT)/kernel-services/filesystem/cosmofs/cosmofstest_b2.o $(OUT)/kernel-services/filesystem/cosmofs/cosmofstest_b2.analyzed: \
 	EXTRA_CFLAGS += -I$(ROOT)/kernel-services/filesystem/cosmofs
 $(OUT)/kernel-services/filesystem/cosmofs/cosmofstest_basic.o $(OUT)/kernel-services/filesystem/cosmofs/cosmofstest_basic.analyzed: \
+	EXTRA_CFLAGS += -I$(ROOT)/kernel-services/filesystem/cosmofs
+$(OUT)/kernel-services/filesystem/cosmofs/cosmofstest_check.o $(OUT)/kernel-services/filesystem/cosmofs/cosmofstest_check.analyzed: \
+	EXTRA_CFLAGS += -I$(ROOT)/kernel-services/filesystem/cosmofs
+$(OUT)/kernel-services/filesystem/cosmofs/cosmofstest_media.o $(OUT)/kernel-services/filesystem/cosmofs/cosmofstest_media.analyzed: \
+	EXTRA_CFLAGS += -I$(ROOT)/kernel-services/filesystem/cosmofs
+$(OUT)/kernel-services/filesystem/cosmofs/cosmofstest_names.o $(OUT)/kernel-services/filesystem/cosmofs/cosmofstest_names.analyzed: \
+	EXTRA_CFLAGS += -I$(ROOT)/kernel-services/filesystem/cosmofs
+$(OUT)/kernel-services/filesystem/cosmofs/cosmofstest_orphan.o $(OUT)/kernel-services/filesystem/cosmofs/cosmofstest_orphan.analyzed: \
 	EXTRA_CFLAGS += -I$(ROOT)/kernel-services/filesystem/cosmofs
 $(OUT)/kernel-services/filesystem/cosmofs/cosmofstest_copies.o $(OUT)/kernel-services/filesystem/cosmofs/cosmofstest_copies.analyzed: \
 	EXTRA_CFLAGS += -I$(ROOT)/kernel-services/filesystem/cosmofs

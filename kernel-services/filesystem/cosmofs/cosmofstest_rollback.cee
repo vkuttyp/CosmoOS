@@ -4,11 +4,12 @@
 // cosmofs-rollback, cosmofs-rollback-shared, cosmofs-rollback-atomic, cosmofs-rollback-record and cosmofs-clone, on
 // the RAM device cosmofstest_lib.cee mounts at /mnt/eng. A check's reason keeps the C's form, "check failed: COND at
 // line N", N its line here. What the C kept in statics (a snapshot record, a check report, the files' contents) is in
-// statics here too: the runner runs one self-test at a time. cosmofstest_rollback_floor.c asserts the values and
-// sizes written here as constants and is these tests in a build without CONFIG_DEBUG.
+// statics here too: the runner runs one self-test at a time. The values and sizes
+// written here as constants are the headers', which the C compiler checks, and a build without CONFIG_DEBUG runs none
+// of these tests (a `cfg` block; ADR 0080).
 
 @header("kernel/blk.h", "kernel/vfs.h", "kernel/kmalloc.h", "kernel/string.h", "kernel/crc32c.h", "kernel/cosmofs.h",
-    "uapi/cosmo/syscall.h", "cosmofs_internal.h")
+    "uapi/cosmo/syscall.h", "cosmofs_internal.h", "kernel/errno.h", "kernel/selftest.h", "cosmofs_format.h")
 extern "C" {
     struct blkdev;
     struct mount;
@@ -80,17 +81,31 @@ extern "C" {
     fn cfst_remount_eng(bd: *mut blkdev, reason: *mut *CChar) -> bool;
     fn cfst_snapctl(op: u32, name: *CChar, out: *mut cosmofs_snap_info, max: u32, count: *mut u32) -> i32;
     fn cfst_info_named(v: *cosmofs_snap_info, n: u32, name: *CChar) -> *cosmofs_snap_info;
+
+    // The values and layout the C compiler checks (ADR 0080 §3.1), which the floor asserted.
+    const ENOENT: i32 = 2;
+    const EIO: i32 = 5;
+    const EBUSY: i32 = 16;
+    const EEXIST: i32 = 17;
+    const EXDEV: i32 = 18;
+    const EINVAL: i32 = 22;
+    const EROFS: i32 = 30;
+    /// cosmofstest_rollback.cee's errno.h and syscall.h values
+    @cvalue("COSMO_O_RDONLY == 0 && COSMO_O_RDWR == 2")
+    const COSMOFSTEST_ROLLBACK_FACT_0: bool = true;
+    /// cosmofstest_rollback.cee's cosmofs.h values
+    @cvalue("COSMOFS_SNAP_CREATE == 1 && COSMOFS_SNAP_LIST == 2 && COSMOFS_SNAP_DELETE == 3 && COSMOFS_SNAP_ROLLBACK == 4 && COSMOFS_SNAP_CANCEL == 5 && COSMOFS_SNAP_CLONE == 6 && COSMOFS_SNAP_BOOT_OK == 7 && COSMOFS_POOL_PENDING == 1 && COSMOFS_POOL_HELD == 2 && COSMOFS_SNAP_I_TARGET == 2 && COSMOFS_SNAP_I_SAFETY == 4 && COSMOFS_SNAP_I_HELD == 8 && COSMOFS_CORRUPT_ROLLBACK_CRC == 18 && COSMOFS_CHECK_REPAIR == 1")
+    const COSMOFSTEST_ROLLBACK_FACT_1: bool = true;
+    /// cosmofstest_rollback.cee's slots for cosmofs.h's and syscall.h's structs
+    @cvalue("sizeof(struct cosmofs_snap_info) <= 13 * 8 && sizeof(struct cosmofs_snap_req) <= 12 * 8 && sizeof(struct cosmofs_check_report) <= 200 * 8 && sizeof(struct cosmo_stat) <= 8 * 8 && sizeof(struct cosmofs_stats) <= 32 * 8 && offsetof(struct cosmofs_stats, free_blocks) == 8")
+    const COSMOFSTEST_ROLLBACK_FACT_2: bool = true;
+    /// cosmofstest_rollback.cee's cosmofs_format.h values and offsets
+    @cvalue("sizeof(struct cfs_rollback) == 120 && offsetof(struct cfs_rollback, magic) == 0 && offsetof(struct cfs_rollback, version) == 4 && offsetof(struct cfs_rollback, state) == 8 && offsetof(struct cfs_rollback, target_uuid) == 16 && offsetof(struct cfs_rollback, safety_uuid) == 32 && offsetof(struct cfs_rollback, target_id) == 48 && offsetof(struct cfs_rollback, safety_id) == 56 && offsetof(struct cfs_rollback, generation) == 64 && offsetof(struct cfs_rollback, requested_ns) == 72 && offsetof(struct cfs_rollback, crc) == 112 && CFS_ROLLBACK_MAGIC == 0x42524643u && CFS_ROLLBACK_PENDING == 1 && CFS_ROLLBACK_HELD == 2")
+    const COSMOFSTEST_ROLLBACK_FACT_3: bool = true;
 }
 
-// ---- Values (asserted in cosmofstest_rollback_floor.c) ----
+// ---- Values ----
 
-const ENOENT: i32 = 2;
-const EIO: i32 = 5;
-const EBUSY: i32 = 16;
-const EEXIST: i32 = 17;
-const EXDEV: i32 = 18;
-const EINVAL: i32 = 22;
-const EROFS: i32 = 30;
 const O_RDONLY: u32 = 0;
 const O_RDWR: u32 = 2;
 const SNAP_CREATE: u32 = 1;
@@ -322,9 +337,11 @@ unsafe fn sayCounts(test: StringView, when: StringView, orphans: bool) {
 /// `seen_not_alloc`, a block held for nobody is `alloc_not_seen` -- with the live files intact after a remount. A
 /// record whose own checksum is wrong is refused at the mount, named by the checker and removed by its repair.
 /// Safety: `reason` writable.
-@cfg("CONFIG_DEBUG")
 @export("selftest_cosmofs_rollback")
 unsafe fn selftestRollback(reason: *mut *CChar) -> bool {
+    if (cfg("!CONFIG_DEBUG")) {
+        return true; // a debug build's test
+    }
     var bd = 0 as *mut blkdev;
     if (!cfst_engine_mount(borrow mut bd as *mut *mut blkdev, 2048, reason)) {
         return false;
@@ -592,9 +609,11 @@ unsafe fn selftestRollback(reason: *mut *CChar) -> bool {
 /// on the record and the mount released it). While held, a rollback to anything but the safety snapshot is refused --
 /// it would drop the hold -- and one back to the safety snapshot is taken.
 /// Safety: `reason` writable.
-@cfg("CONFIG_DEBUG")
 @export("selftest_cosmofs_rollback_shared")
 unsafe fn selftestRollbackShared(reason: *mut *CChar) -> bool {
+    if (cfg("!CONFIG_DEBUG")) {
+        return true; // a debug build's test
+    }
     var bd = 0 as *mut blkdev;
     if (!cfst_engine_mount(borrow mut bd as *mut *mut blkdev, 2048, reason)) {
         return false;
@@ -784,9 +803,11 @@ unsafe fn selftestRollbackShared(reason: *mut *CChar) -> bool {
 /// again: each time there is either neither or both -- never a record naming a safety snapshot that is not there
 /// (`rollback_record`, which tools/b1-rollback-probe.py --old produces).
 /// Safety: `reason` writable.
-@cfg("CONFIG_DEBUG")
 @export("selftest_cosmofs_rollback_atomic")
 unsafe fn selftestRollbackAtomic(reason: *mut *CChar) -> bool {
+    if (cfg("!CONFIG_DEBUG")) {
+        return true; // a debug build's test
+    }
     var seenNeither: u32 = 0;
     var seenBoth: u32 = 0;
     for (budget in 0u32..4) {
@@ -921,9 +942,11 @@ impl Record {
 /// field; every single byte changed anywhere in it is refused (the crc's, or a field's under it); a wrong magic,
 /// version or state is refused even with a crc that matches it.
 /// Safety: `reason` writable.
-@cfg("CONFIG_DEBUG")
 @export("selftest_cosmofs_rollback_record")
 unsafe fn selftestRollbackRecord(reason: *mut *CChar) -> bool {
+    if (cfg("!CONFIG_DEBUG")) {
+        return true; // a debug build's test
+    }
     var r = Record.zero();
     var back = Record.zero();
     r.setU32(RB_STATE, ROLLBACK_PENDING);
@@ -1028,9 +1051,11 @@ unsafe fn selftestRollbackRecord(reason: *mut *CChar) -> bool {
 /// step: a clone block freed too early is `seen_not_alloc`, one kept for nobody `alloc_not_seen`. A snapshot stays
 /// read-only to symlink and rename too (they had no guard).
 /// Safety: `reason` writable.
-@cfg("CONFIG_DEBUG")
 @export("selftest_cosmofs_clone")
 unsafe fn selftestClone(reason: *mut *CChar) -> bool {
+    if (cfg("!CONFIG_DEBUG")) {
+        return true; // a debug build's test
+    }
     var bd = 0 as *mut blkdev;
     if (!cfst_engine_mount(borrow mut bd as *mut *mut blkdev, 2048, reason)) {
         return false;

@@ -6,11 +6,11 @@
 // replaced by a rename, twice without a commit, across a chain, with no early writeback thread, across a hundred
 // commits, after a failed fill, and never for a record that names a live inode. cosmofs-check-orphan-crash,
 // -many-orphans, -slot-identity and -partial: what the checker still owns. fsctl-check: the check and the scrub
-// through /dev/fsctl. All of them run in a debug build only; cosmofstest_orphan_floor.c asserts the layout this file
-// writes as constants.
+// through /dev/fsctl. All of them run in a debug build only; the layout this file writes as constants is the headers',
+// which the C compiler checks (ADR 0080).
 
 @header("kernel/blk.h", "kernel/vfs.h", "kernel/kmalloc.h", "kernel/ramblk.h", "kernel/string.h", "kernel/storage.h",
-    "kernel/cosmofs.h", "uapi/cosmo/syscall.h", "uapi/cosmo/fsctl.h")
+    "kernel/cosmofs.h", "uapi/cosmo/syscall.h", "uapi/cosmo/fsctl.h", "kernel/errno.h", "cosmofs_format.h")
 extern "C" {
     struct blkdev;
     struct mount {
@@ -97,21 +97,38 @@ extern "C" {
     fn cfst_check_why(r: *cosmofs_check_report) -> *CChar;
     fn cfst_check_file_ino() -> u64;
     fn cfst_check_teardown(bd: *mut blkdev);
+
+    // The values and layout the C compiler checks (ADR 0080 §3.1), which the floor asserted.
+    const ENOENT: i32 = 2;
+    const EEXIST: i32 = 17;
+    const EINVAL: i32 = 22;
+    const EOPNOTSUPP: i32 = 95;
+    const VFS_UMOUNT_FORCE: u32 = 1;
+    const KMEM_ZERO: u32 = 1;
+    const CFS_BLOCK: usize = 4096;
+    const CFS_ORPHANS_PER_BLOCK: u32 = 506;
+    const CFS_CHECK_NAMES: u32 = 8;
+    /// cosmofstest_orphan.cee's errno.h, syscall.h, vfs.h and kmalloc.h values
+    @cvalue("COSMO_O_RDONLY == 0 && COSMO_O_RDWR == 2")
+    const COSMOFSTEST_ORPHAN_FACT_0: bool = true;
+    /// cosmofstest_orphan.cee's cosmofs_format.h and cosmofs.h values
+    @cvalue("COSMOFS_CHECK_REPAIR == 1 && COSMOFS_CORRUPT_LEAK == 0 && COSMOFS_CORRUPT_ORPHAN == 4 && COSMOFS_CORRUPT_INO_SLOT == 8 && sizeof(struct cfs_dirent) == 64 && offsetof(struct cfs_dirent, ino) == 0 && offsetof(struct cfs_dirent, namelen) == 9 && offsetof(struct cfs_dirent, name) == 16")
+    const COSMOFSTEST_ORPHAN_FACT_1: bool = true;
+    /// cosmofstest_orphan.cee's fsctl.h values
+    @cvalue("COSMO_FSCTL_VERSION == 3 && COSMO_FSCTL_LIST == 1 && COSMO_FSCTL_CHECK == 2 && COSMO_FSCTL_SCRUB == 3 && COSMO_FSCTL_F_REPAIR == 1 && COSMO_FSCTL_CLASSES == 16 && COSMO_FSCTL_R_PARTIAL == 1 && COSMO_FSCTL_R_CLEAN == 2 && COSMO_FSCTL_R_REPAIR_REFUSED == 4")
+    const COSMOFSTEST_ORPHAN_FACT_2: bool = true;
+    /// cosmofstest_orphan.cee's fsctl.h command and result layout
+    @cvalue("sizeof(struct cosmo_fsctl) == 88 && sizeof(struct cosmo_fsctl) <= 11 * 8 && offsetof(struct cosmo_fsctl, version) == 0 && offsetof(struct cosmo_fsctl, op) == 2 && offsetof(struct cosmo_fsctl, flags) == 4 && offsetof(struct cosmo_fsctl, mount_id) == 8 && sizeof(struct cosmo_fsctl_result) == 16 && offsetof(struct cosmo_fsctl_result, kind) == 2 && offsetof(struct cosmo_fsctl_result, count) == 4 && offsetof(struct cosmo_fsctl_result, bytes) == 12")
+    const COSMOFSTEST_ORPHAN_FACT_3: bool = true;
+    /// cosmofstest_orphan.cee's fsctl.h check and scrub records
+    @cvalue("sizeof(struct cosmo_fsctl_check) == 1480 && offsetof(struct cosmo_fsctl_check, nclasses) == 0 && offsetof(struct cosmo_fsctl_check, flags) == 4 && offsetof(struct cosmo_fsctl_check, blocks_seen) == 8 && offsetof(struct cosmo_fsctl_check, inodes_seen) == 16 && offsetof(struct cosmo_fsctl_check, counted_free) == 40 && offsetof(struct cosmo_fsctl_check, class) == 72 && offsetof(struct cosmo_fsctl_class, count) == 0 && offsetof(struct cosmo_fsctl_class, repaired) == 8 && offsetof(struct cosmo_fsctl_class, name) == 16 && offsetof(struct cosmo_fsctl_class, named) == 80 && sizeof(struct cosmo_fsctl_scrub) == 32 && offsetof(struct cosmo_fsctl_scrub, blocks_read) == 0 && offsetof(struct cosmo_fsctl_scrub, unrecoverable) == 24")
+    const COSMOFSTEST_ORPHAN_FACT_4: bool = true;
 }
 
-// ---- Values (asserted in cosmofstest_orphan_floor.c) ----
+// ---- Values ----
 
-const ENOENT: i32 = 2;
-const EEXIST: i32 = 17;
-const EINVAL: i32 = 22;
-const EOPNOTSUPP: i32 = 95;
 const O_RDONLY: u32 = 0;
 const O_RDWR: u32 = 2;
-const VFS_UMOUNT_FORCE: u32 = 1;
-const KMEM_ZERO: u32 = 1;
-const CFS_BLOCK: usize = 4096;
-const CFS_ORPHANS_PER_BLOCK: u32 = 506;
-const CFS_CHECK_NAMES: u32 = 8;
 const CHECK_REPAIR: u32 = 1;
 const CORRUPT_ORPHAN: u32 = 4;
 const CORRUPT_INO_SLOT: u32 = 8;

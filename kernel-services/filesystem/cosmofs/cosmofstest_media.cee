@@ -3,11 +3,12 @@
 // cosmofs-badmap (a crafted inode's direct runs out of order), cosmofs-snapshot (history kept and released),
 // cosmofs-mirror and cosmofs-mirror-stale (two copies, a rotted one repaired, a stale one passed over) and
 // cosmofs-compress (records, and the writes that cut across them). They run in a debug build only; the shared helpers
-// are cosmofstest_lib.cee's. cosmofstest_media_floor.c asserts the layout written here as constants and is the
-// self-tests in a build without CONFIG_DEBUG.
+// are cosmofstest_lib.cee's. The layout written here as constants is the headers', which the C compiler checks, and
+// a build without CONFIG_DEBUG runs none of these tests (a `cfg` block; ADR 0080).
 
 @header("kernel/blk.h", "kernel/vfs.h", "kernel/kmalloc.h", "kernel/string.h", "kernel/storage.h", "kernel/crc32c.h",
-    "kernel/log.h", "kernel/cosmofs.h", "uapi/cosmo/syscall.h")
+    "kernel/log.h", "kernel/cosmofs.h", "uapi/cosmo/syscall.h", "kernel/errno.h", "kernel/selftest.h",
+    "cosmofs_format.h")
 extern "C" {
     struct blkdev;
     struct mount;
@@ -64,22 +65,39 @@ extern "C" {
     fn cfst_engine_unmount(bd: *mut blkdev, reason: *mut *CChar) -> bool;
     fn cfst_block_crc(block: *u8) -> u32;
     fn cfst_rot_copy(bd: *mut blkdev, blk: u64, fill: u8) -> bool;
+
+    // The values and layout the C compiler checks (ADR 0080 §3.1), which the floor asserted.
+    const EIO: i32 = 5;
+    const ENOENT: i32 = 2;
+    const EBUSY: i32 = 16;
+    const EEXIST: i32 = 17;
+    const ENODEV: i32 = 19;
+    const EROFS: i32 = 30;
+    const VFS_UMOUNT_FORCE: u32 = 1;
+    const CFS_BLOCK: usize = 4096;
+    /// cosmofstest_media.cee's errno.h, syscall.h, vfs.h and cosmofs.h values
+    @cvalue("COSMO_O_RDONLY == 0 && COSMO_O_RDWR == 2 && COSMO_O_CREAT == 0x40 && COSMOFS_SCRUB_REPAIR == 1")
+    const COSMOFSTEST_MEDIA_FACT_0: bool = true;
+    /// cosmofstest_media.cee's superblock and label offsets
+    @cvalue("CFS_MHDR_SIZE == 32 && offsetof(struct cfs_mhdr, crc) == 24 && CFS_SUPER_A == 0 && CFS_SUPER_B == 1 && offsetof(struct cfs_super, magic) == 0 && offsetof(struct cfs_super, generation) == 24 && offsetof(struct cfs_super, imap_root) == 32 && offsetof(struct cfs_super, crc) == 160 && offsetof(struct cfs_label, magic) == 0 && sizeof(((struct cfs_label *)0)->magic) == 8 && offsetof(struct cfs_label, generation) == 48 && offsetof(struct cfs_label, crc) == 72")
+    const COSMOFSTEST_MEDIA_FACT_1: bool = true;
+    /// cosmofstest_media.cee's inode and DVA layout
+    @cvalue("CFS_INODE_SIZE == 256 && CFS_INODES_PER_BLOCK == 15 && CFS_PTRS_PER_BLOCK == 508 && offsetof(struct cfs_inode, ino) == 48 && offsetof(struct cfs_inode, direct) == 56 && sizeof(struct cfs_extent) == 16 && offsetof(struct cfs_extent, count) == 8 && offsetof(struct cfs_extent, lblk) == 12 && CFS_DVA_VDEV_SHIFT == 56")
+    const COSMOFSTEST_MEDIA_FACT_2: bool = true;
+    /// cosmofstest_media.cee's struct cosmofs_stats offsets
+    @cvalue("sizeof(struct cosmofs_stats) <= 128 && offsetof(struct cosmofs_stats, generation) == 0 && offsetof(struct cosmofs_stats, free_blocks) == 8 && offsetof(struct cosmofs_stats, total_blocks) == 16 && offsetof(struct cosmofs_stats, members) == 72 && offsetof(struct cosmofs_stats, devices) == 76 && offsetof(struct cosmofs_stats, repairs) == 80 && offsetof(struct cosmofs_stats, degraded) == 88")
+    const COSMOFSTEST_MEDIA_FACT_3: bool = true;
+    /// cosmofstest_media.cee's struct cosmofs_scrub_stats offsets and struct cosmo_stat's size
+    @cvalue("sizeof(struct cosmofs_scrub_stats) <= 128 && offsetof(struct cosmofs_scrub_stats, blocks_read) == 0 && offsetof(struct cosmofs_scrub_stats, inodes) == 8 && offsetof(struct cosmofs_scrub_stats, repaired) == 16 && offsetof(struct cosmofs_scrub_stats, unrecoverable) == 24 && sizeof(struct cosmo_stat) <= 64")
+    const COSMOFSTEST_MEDIA_FACT_4: bool = true;
 }
 
-// ---- Values (asserted in cosmofstest_media_floor.c) ----
+// ---- Values ----
 
-const EIO: i32 = 5;
-const ENOENT: i32 = 2;
-const EBUSY: i32 = 16;
-const EEXIST: i32 = 17;
-const ENODEV: i32 = 19;
-const EROFS: i32 = 30;
 const O_RDONLY: u32 = 0;
 const O_RDWR: u32 = 2;
 const O_CREAT: u32 = 0x40;
-const VFS_UMOUNT_FORCE: u32 = 1;
 const SCRUB_REPAIR: u32 = 1;
-const CFS_BLOCK: usize = 4096;
 const MHDR_SIZE: usize = 32;
 const MHDR_CRC: usize = 24;
 const SUPER_A: u64 = 0;
@@ -190,9 +208,11 @@ struct Badmap {
 /// block is re-sealed). Before the direct runs were validated on the map fast path, the first block of the file read
 /// as a hole; now the inode is -EIO (Greptile on PR #22).
 /// Safety: `reason` writable.
-@cfg("CONFIG_DEBUG")
 @export("selftest_cosmofs_badmap")
 unsafe fn selftestBadmap(reason: *mut *CChar) -> bool {
+    if (cfg("!CONFIG_DEBUG")) {
+        return true; // a debug build's test
+    }
     var bd = 0 as *mut blkdev;
     if (!cfst_engine_mount(borrow mut bd as *mut *mut blkdev, 512, reason)) {
         return false;
@@ -338,9 +358,11 @@ static mut g_big: [u8; 8192] = [0; 8192];
 
 /// Snapshots: what the tree was, kept, while the live tree moves on (design.md, "Format version 3").
 /// Safety: `reason` writable.
-@cfg("CONFIG_DEBUG")
 @export("selftest_cosmofs_snapshot")
 unsafe fn selftestSnapshot(reason: *mut *CChar) -> bool {
+    if (cfg("!CONFIG_DEBUG")) {
+        return true; // a debug build's test
+    }
     var bd = 0 as *mut blkdev;
     if (!cfst_engine_mount(borrow mut bd as *mut *mut blkdev, 512, reason)) {
         return false;

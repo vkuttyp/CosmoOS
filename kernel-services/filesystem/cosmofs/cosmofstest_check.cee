@@ -5,10 +5,11 @@
 // nonce, a key rotation keeps every file, and a mount without the key still scrubs. cosmofs-badmembers: a member
 // table that cannot be true is refused. cosmofs-check-*: the structural check (docs/audit/next-subsystem-fsck.md)
 // finds each manufactured fault by name, repairs what it can prove and refuses the rest. All of them run in a debug
-// build only; cosmofstest_check_floor.c asserts the layout this file writes as constants.
+// build only; the layout this file writes as constants is the headers', which the C compiler checks (ADR 0080).
 
 @header("kernel/blk.h", "kernel/vfs.h", "kernel/kmalloc.h", "kernel/ramblk.h", "kernel/string.h", "kernel/storage.h",
-    "kernel/random.h", "kernel/timer.h", "kernel/cosmofs.h", "uapi/cosmo/syscall.h")
+    "kernel/random.h", "kernel/timer.h", "kernel/cosmofs.h", "uapi/cosmo/syscall.h", "kernel/errno.h",
+    "cosmofs_format.h")
 extern "C" {
     struct blkdev {
         sector_size: u32;
@@ -110,26 +111,40 @@ extern "C" {
     fn cfst_check_why(r: *cosmofs_check_report) -> *CChar;
     fn cfst_check_file_ino() -> u64;
     fn cfst_check_teardown(bd: *mut blkdev);
+
+    // The values and layout the C compiler checks (ADR 0080 §3.1), which the floor asserted.
+    const EIO: i32 = 5;
+    const EAGAIN: i32 = 11;
+    const EEXIST: i32 = 17;
+    const ENOTSUP: i32 = 95;
+    const ENOKEY: i32 = 126;
+    const EKEYREJECTED: i32 = 129;
+    const VFS_UMOUNT_FORCE: u32 = 1;
+    const KMEM_ZERO: u32 = 1;
+    const RANDOM_KEYGEN_WAIT_NS: u64 = 5000000000;
+    const CFS_BLOCK: usize = 4096;
+    const CFS_SUPER_A: u64 = 0;
+    const CFS_MHDR_SIZE: usize = 32;
+    const CFS_MAX_BLOCKS: u64 = 16516096;
+    const CFS_ROOT_INO: u64 = 1;
+    /// cosmofstest_check.cee's errno.h, syscall.h, vfs.h, kmalloc.h and random.h values
+    @cvalue("COSMO_O_RDONLY == 0 && COSMO_DT_DIR == 2")
+    const COSMOFSTEST_CHECK_FACT_0: bool = true;
+    /// cosmofstest_check.cee's cosmofs_format.h values and offsets
+    @cvalue("sizeof(CFS_MAGIC) == 9 && offsetof(struct cfs_mhdr, crc) == 24 && offsetof(struct cfs_super, generation) == 24 && offsetof(struct cfs_super, members) == 88 && offsetof(struct cfs_member_block, m) == 8 && sizeof(struct cfs_member) == 64 && offsetof(struct cfs_member, nblocks) == 16 && offsetof(struct cfs_member, first_usable) == 24")
+    const COSMOFSTEST_CHECK_FACT_1: bool = true;
+    /// cosmofstest_check.cee's and cosmofstest_orphan.cee's cosmofs.h values
+    @cvalue("COSMOFS_SCRUB_REPAIR == 1 && COSMOFS_CHECK_REPAIR == 1 && CFS_CHECK_NAMES == 8 && COSMOFS_CORRUPT_LEAK == 0 && COSMOFS_CORRUPT_FREE_IN_USE == 1 && COSMOFS_CORRUPT_CROSSLINK == 2 && COSMOFS_CORRUPT_NLINK == 3 && COSMOFS_CORRUPT_ORPHAN == 4 && COSMOFS_CORRUPT_DANGLING == 5 && COSMOFS_CORRUPT_DIRENT == 6 && COSMOFS_CORRUPT_COUNTER == 7 && COSMOFS_CORRUPT_INO_SLOT == 8 && COSMOFS_CORRUPT_EXTENT_ORDER == 9 && COSMOFS_CORRUPT_BAD_PTR == 10 && COSMOFS_CORRUPT_TWO_PARENTS == 11 && COSMOFS_CORRUPT_SNAP_MEMBERS == 12 && COSMOFS_CORRUPT_DUP_NAME == 13 && COSMOFS_CORRUPT_CHAIN_CYCLE == 14 && COSMOFS_CORRUPT_NAMELEN == 15 && COSMOFS_CORRUPT_EXTENT_OVERLAP == 16")
+    const COSMOFSTEST_CHECK_FACT_2: bool = true;
+    /// cosmofstest_check.cee's and cosmofstest_orphan.cee's slot sizes
+    @cvalue("sizeof(struct cosmofs_check_report) <= 256 * 8 && sizeof(struct cosmofs_stats) <= 24 * 8 && sizeof(struct cosmo_stat) <= 8 * 8 && sizeof(struct cosmofs_scrub_stats) <= 8 * 8")
+    const COSMOFSTEST_CHECK_FACT_3: bool = true;
 }
 
-// ---- Values (asserted in cosmofstest_check_floor.c) ----
+// ---- Values ----
 
-const EIO: i32 = 5;
-const EAGAIN: i32 = 11;
-const EEXIST: i32 = 17;
-const ENOTSUP: i32 = 95;
-const ENOKEY: i32 = 126;
-const EKEYREJECTED: i32 = 129;
 const O_RDONLY: u32 = 0;
-const VFS_UMOUNT_FORCE: u32 = 1;
-const KMEM_ZERO: u32 = 1;
 const DT_DIR: u32 = 2;
-const RANDOM_KEYGEN_WAIT_NS: u64 = 5000000000;
-const CFS_BLOCK: usize = 4096;
-const CFS_SUPER_A: u64 = 0;
-const CFS_MHDR_SIZE: usize = 32;
-const CFS_MAX_BLOCKS: u64 = 16516096;
-const CFS_ROOT_INO: u64 = 1;
 const MHDR_CRC: usize = 24;
 const SUPER_GENERATION: usize = 24;
 const SUPER_MEMBERS: usize = 88;

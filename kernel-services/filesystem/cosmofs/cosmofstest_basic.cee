@@ -7,11 +7,12 @@
 // algorithm. The engine tests are a debug build's.
 //
 // The pool, the statistics and the on-disk records stay C (kernel/storage.h, kernel/cosmofs.h, cosmofs_format.h);
-// what this file reads of a record it reads at offsets cosmofstest_basic_floor.c asserts, and that file is the engine
-// tests in a build without CONFIG_DEBUG.
+// what this file reads of a record it reads at offsets the C compiler checks, and a build without CONFIG_DEBUG runs
+// none of the engine tests (a `cfg` block; ADR 0080).
 
 @header("kernel/blk.h", "kernel/vfs.h", "kernel/kmalloc.h", "kernel/string.h", "kernel/storage.h", "kernel/timer.h",
-    "kernel/wait.h", "kernel/crc32c.h", "kernel/cosmofs.h", "uapi/cosmo/syscall.h", "cosmofs_internal.h")
+    "kernel/wait.h", "kernel/crc32c.h", "kernel/cosmofs.h", "uapi/cosmo/syscall.h", "cosmofs_internal.h",
+    "kernel/errno.h", "kernel/selftest.h", "cosmofs_format.h")
 extern "C" {
     struct blkdev {
         obj: kobject;
@@ -93,25 +94,38 @@ extern "C" {
     fn cfst_engine_unmount(bd: *mut blkdev, reason: *mut *CChar) -> bool;
     fn cfst_corrupt_block(bd: *mut blkdev, blkno: u64, off: u32) -> bool;
     fn cfst_block_crc(block: *u8) -> u32;
+
+    // The values and layout the C compiler checks (ADR 0080 §3.1), which the floor asserted.
+    const ENOENT: i32 = 2;
+    const EIO: i32 = 5;
+    const EEXIST: i32 = 17;
+    const EXDEV: i32 = 18;
+    const EINVAL: i32 = 22;
+    const ENOSPC: i32 = 28;
+    const ENAMETOOLONG: i32 = 36;
+    const ENOTEMPTY: i32 = 39;
+    const POOL_DVA_SHIFT: u64 = 56;
+    const MHDR_OK: u32 = 0;
+    const MHDR_ALGO: u32 = 4;
+    /// cosmofstest_basic.cee's syscall.h, storage.h and cosmofs.h values
+    @cvalue("COSMO_O_RDONLY == 0 && COSMO_O_WRONLY == 1 && COSMO_O_RDWR == 2 && COSMO_O_CREAT == 0x40 && COSMO_O_TRUNC == 0x200 && COSMO_DT_DIR == 2 && sizeof(struct cosmo_stat) <= 64 && sizeof(struct cosmofs_stats) <= 128")
+    const COSMOFSTEST_BASIC_FACT_0: bool = true;
+    /// cosmofstest_basic.cee's metadata header values
+    @cvalue("CFS_BLOCK == 4096 && CFS_MHDR_SIZE == 32 && offsetof(struct cfs_mhdr, crc) == 24 && offsetof(struct cfs_mhdr, csum_algo) == 28 && CFS_KIND_INODES == 3 && CFS_CSUM_NONE == 0 && CFS_CSUM_CRC32C == 1 && CFS_CSUM_POLY1305 == 2 && MHDR_CRC == 5")
+    const COSMOFSTEST_BASIC_FACT_1: bool = true;
+    /// cosmofstest_basic.cee's superblock and directory entry offsets
+    @cvalue("sizeof(CFS_MAGIC) - 1 == 8 && offsetof(struct cfs_super, magic) == 0 && offsetof(struct cfs_super, generation) == 24 && offsetof(struct cfs_super, imap_root) == 32 && sizeof(struct cfs_dirent) == 64 && offsetof(struct cfs_dirent, ino) == 0 && offsetof(struct cfs_dirent, namelen) == 9 && offsetof(struct cfs_dirent, name) == 16")
+    const COSMOFSTEST_BASIC_FACT_2: bool = true;
 }
 
-// ---- Values (asserted in cosmofstest_basic_floor.c) ----
+// ---- Values ----
 
-const ENOENT: i32 = 2;
-const EIO: i32 = 5;
-const EEXIST: i32 = 17;
-const EXDEV: i32 = 18;
-const EINVAL: i32 = 22;
-const ENOSPC: i32 = 28;
-const ENAMETOOLONG: i32 = 36;
-const ENOTEMPTY: i32 = 39;
 const O_RDONLY: u32 = 0;
 const O_WRONLY: u32 = 1;
 const O_RDWR: u32 = 2;
 const O_CREAT: u32 = 0x40;
 const O_TRUNC: u32 = 0x200;
 const DT_DIR: u32 = 2;
-const POOL_DVA_SHIFT: u64 = 56;
 const BLOCK: usize = 4096;
 const MHDR_SIZE: usize = 32;
 const MHDR_CRC: usize = 24;
@@ -120,8 +134,6 @@ const KIND_INODES: u32 = 3;
 const CSUM_NONE: u32 = 0;
 const CSUM_CRC32C: u32 = 1;
 const CSUM_POLY1305: u32 = 2;
-const MHDR_OK: u32 = 0;
-const MHDR_ALGO: u32 = 4;
 const MHDR_CRC_FAULT: u32 = 5;
 const SUPER_GENERATION: usize = 24;
 const SUPER_IMAP_ROOT: usize = 32;
@@ -642,9 +654,11 @@ fn eng() -> *CChar => c("/mnt/eng\0");
 
 /// Holes: a write far into a file allocates only its own block.
 /// Safety: `reason` writable.
-@cfg("CONFIG_DEBUG")
 @export("selftest_cosmofs_holes")
 unsafe fn selftestHoles(reason: *mut *CChar) -> bool {
+    if (cfg("!CONFIG_DEBUG")) {
+        return true; // a debug build's test
+    }
     var bd = 0 as *mut blkdev;
     if (!cfst_engine_mount(borrow mut bd as *mut *mut blkdev, 1024, reason)) {
         return false;
@@ -796,9 +810,11 @@ unsafe fn findBlock(bd: *mut blkdev, pattern: *u8) -> i64 {
 
 /// Checksums: a flipped byte in a data block or a directory block is -EIO.
 /// Safety: `reason` writable.
-@cfg("CONFIG_DEBUG")
 @export("selftest_cosmofs_csum")
 unsafe fn selftestCsum(reason: *mut *CChar) -> bool {
+    if (cfg("!CONFIG_DEBUG")) {
+        return true; // a debug build's test
+    }
     var bd = 0 as *mut blkdev;
     if (!cfst_engine_mount(borrow mut bd as *mut *mut blkdev, 512, reason)) {
         return false;
@@ -933,9 +949,11 @@ unsafe fn selftestCsum(reason: *mut *CChar) -> bool {
 
 /// fsync is durable: a file synced before a "crash" survives, one not synced does not.
 /// Safety: `reason` writable.
-@cfg("CONFIG_DEBUG")
 @export("selftest_cosmofs_fsync")
 unsafe fn selftestFsync(reason: *mut *CChar) -> bool {
+    if (cfg("!CONFIG_DEBUG")) {
+        return true; // a debug build's test
+    }
     var bd = 0 as *mut blkdev;
     if (!cfst_engine_mount(borrow mut bd as *mut *mut blkdev, 512, reason)) {
         return false;
@@ -993,9 +1011,11 @@ unsafe fn selftestFsync(reason: *mut *CChar) -> bool {
 
 /// The metadata reserve: a full disk can still delete and commit.
 /// Safety: `reason` writable.
-@cfg("CONFIG_DEBUG")
 @export("selftest_cosmofs_reserve")
 unsafe fn selftestReserve(reason: *mut *CChar) -> bool {
+    if (cfg("!CONFIG_DEBUG")) {
+        return true; // a debug build's test
+    }
     var bd = 0 as *mut blkdev;
     if (!cfst_engine_mount(borrow mut bd as *mut *mut blkdev, 256, reason)) {
         return false;
@@ -1109,9 +1129,11 @@ unsafe fn selftestReserve(reason: *mut *CChar) -> bool {
 
 /// The newer root's tree is unreadable: mount falls back to the older slot.
 /// Safety: `reason` writable.
-@cfg("CONFIG_DEBUG")
 @export("selftest_cosmofs_fallback")
 unsafe fn selftestFallback(reason: *mut *CChar) -> bool {
+    if (cfg("!CONFIG_DEBUG")) {
+        return true; // a debug build's test
+    }
     var bd = 0 as *mut blkdev;
     if (!cfst_engine_mount(borrow mut bd as *mut *mut blkdev, 512, reason)) {
         return false;
@@ -1219,9 +1241,11 @@ unsafe fn selftestFallback(reason: *mut *CChar) -> bool {
 
 /// The writeback thread commits on its own once the interval has passed.
 /// Safety: `reason` writable.
-@cfg("CONFIG_DEBUG")
 @export("selftest_cosmofs_writeback")
 unsafe fn selftestWriteback(reason: *mut *CChar) -> bool {
+    if (cfg("!CONFIG_DEBUG")) {
+        return true; // a debug build's test
+    }
     var bd = 0 as *mut blkdev;
     if (!cfst_engine_mount(borrow mut bd as *mut *mut blkdev, 512, reason)) {
         return false;
@@ -1284,9 +1308,11 @@ unsafe fn selftestWriteback(reason: *mut *CChar) -> bool {
 /// The metadata header declares its checksum algorithm, and an algorithm this build cannot verify is a distinct fault
 /// from a checksum that did not match.
 /// Safety: `reason` writable.
-@cfg("CONFIG_DEBUG")
 @export("selftest_cosmofs_metadata_csum_id")
 unsafe fn selftestMetadataCsumId(reason: *mut *CChar) -> bool {
+    if (cfg("!CONFIG_DEBUG")) {
+        return true; // a debug build's test
+    }
     let block = kmalloc(BLOCK, 0) as *mut u8;
     if (!(!block.isNull())) {
         return failed(reason, "check failed: block != NULL at line 1292\0");
