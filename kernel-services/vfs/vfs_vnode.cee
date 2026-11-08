@@ -110,6 +110,7 @@ extern "C" {
     fn waitqueue_wake_all(wq: *mut waitqueue) -> u32;
 
     // vfs_floor.c
+    fn vfs_mount_orphan_kick();
     fn vfs_floor_vnode_type() -> *kobject_type;
     fn vfs_floor_vnode_poison(vn: *mut vnode);
     fn vfs_floor_cwd_lock() -> *mut spinlock_t;
@@ -328,6 +329,7 @@ unsafe fn put(vn: *mut vnode) {
     let lock = borrow mut Ptr.toBorrowMut(mnt).lock as *mut spinlock_t;
     var s: usize = 0;
     if (!kobject_put_and_lock(objOf(vn), lock, borrow mut s as *mut usize)) {
+        vfs_mount_orphan_kick(); // an orphan's last user may just have let go (vfs_mount_orphaned)
         return;
     }
     if (!List.isEmpty(hashLink(vn) as *list_node)) {
@@ -338,6 +340,7 @@ unsafe fn put(vn: *mut vnode) {
     }
     spin_unlock_irqrestore(lock, s);
     kobject_release_final(objOf(vn));
+    vfs_mount_orphan_kick();
 }
 
 /// Safety: `vn` is a live vnode (its lock held, or nothing else writes it); `st` is writable.

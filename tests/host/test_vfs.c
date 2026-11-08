@@ -42,8 +42,9 @@ void *calloc(size_t n, size_t size);
 void free(void *p);
 int printf(const char *fmt, ...);
 
-/* The digest of the C (vfs.c, 2026-11-08), which the CeeSafe port gives. */
-#define VFS_DIGEST 0x4170262f9ea8d3cfull
+/* The digest of the C (vfs.c, 2026-11-08) was 0x4170262f9ea8d3cf, which the CeeSafe port gave. This one is the
+ * port's with the two bugs this test found fixed: an old root's unmount, and orphans that wait for their users. */
+#define VFS_DIGEST 0x45371c2423e2e476ull
 #define EPOCHS 12u
 #define ROUNDS 2500u   /* an epoch's */
 #define SEED 0x5F3A9C0DE2026118ull
@@ -501,6 +502,23 @@ void sched_block_current(void)
     }
     g_sleep();
 }
+
+/* ---- kernel threads: the orphan reaper is started, never run; the test reaps by hand ---- */
+
+static unsigned g_threads;
+static struct thread g_reaper;
+
+struct thread *thread_create(void (*entry)(void *arg), void *arg, const char *name, int priority)
+{
+    (void)entry;
+    (void)arg;
+    note_str(45, name, strlen(name));
+    note_rc(46, priority);
+    g_threads++;
+    return chance(3) ? NULL : &g_reaper;
+}
+
+struct list_node *vfs_floor_orphans(void);
 
 /* ---- the test's filesystem: trees of nodes and entries, every operation failing now and then ---- */
 
@@ -1261,30 +1279,7 @@ static void put_file(unsigned i)
     g_file[i] = NULL;
 }
 
-/* Whether the last of `ns` can go without freeing a mount another mount is nested on: a mount only `ns` sees is
- * unmounted with it, whoever else is mounted on it (a kernel bug, reported; the port keeps it). */
-static bool put_is_safe(const struct mount_ns *ns)
-{
-    struct mount *m;
-    list_for_each_entry(m, &g_mounts, link) {
-        unsigned mine = 0, all = 0;
-        struct mount_ns_ref *r;
-        list_for_each_entry(r, &m->ns_refs, mnt_link) {
-            all++;
-            mine += r->ns == ns;
-        }
-        if (all == 0 || mine != all)
-            continue;
-        struct mount *n;
-        list_for_each_entry(n, &g_mounts, link)
-            if (n->parent == m)
-                return false;
-    }
-    return true;
-}
-
-/* What the process holds goes before its namespace: the last namespace out unmounts what only it could see,
- * open files or not (mountns.cee's put), as the last process in it exits. */
+/* Everything the test holds, as a process that exits gives it back. */
 static void drop_all(void)
 {
     for (unsigned i = 0; i < NHELD; i++)
@@ -1767,11 +1762,6 @@ static void op_mount(void)
         unsigned uflags = pick(4) == 0 ? VFS_UMOUNT_FORCE : 0;
         struct vnode *start = some_start(NULL);
         bool absolute = pick(2);
-        /* Not from inside an old root not yet released: vfs_umount_at locks its absent mountpoint (a kernel bug,
-         * vfs.c:906, kept as it is by the port and reported). */
-        struct vnode *from = absolute || start == NULL ? g_chroot : start;
-        if (g_old_root != NULL && from != NULL && from->mnt == g_old_root)
-            break;
         rc = absolute ? vfs_umount2(path, uflags) : vfs_umount_at(start, path, uflags);
         break;
     }
@@ -1894,15 +1884,19 @@ static void op_namespaces(void)
         }
         break;
     case 2:
-        if (g_ns[k] != NULL && put_is_safe(g_ns[k])) {
+        if (g_ns[k] != NULL) {
+            /* What the test holds on a mount only this namespace sees keeps that mount, as an orphan, until it is
+             * let go (vfs_mount_orphaned). */
             if (g_proc.mntns == g_ns[k])
                 g_proc.mntns = NULL;
-            drop_all();
+            if (pick(2))
+                drop_all();
             mountns_put(g_ns[k]);
             g_ns[k] = NULL;
         }
         break;
     case 3: {
+        note(234, vfs_mount_reap_orphans());
         struct vnode *vn = some_held();
         if (vn != NULL) {
             enum vnode_type ty = pick(2) ? VNODE_REG : VNODE_LNK;
@@ -2624,8 +2618,68 @@ static void test_edges(void)
     int rc = vfs_lookup(rroot, "..", &vn);
     note_vn(392, rc, vn);
     vnode_put(vn);
+    note_rc(393, vfs_umount_at(rroot, ".", 0));   /* the old root is on no directory: not a namespace's to unmount */
+    note_rc(393, vfs_umount_at(rroot, ".", VFS_UMOUNT_FORCE));
     vnode_put(rroot);
     note_rc(396, vfs_release_old_root(old));
+    teardown();
+}
+
+/* ---- orphans: mounts a dying namespace leaves to what still uses them ---- */
+
+static void test_orphans(void)
+{
+    as_kernel();
+    g_faults = false;
+    EXPECT(vfs_mount_root("tfs", NULL, 0) == 0);
+    EXPECT(vfs_mkdir(NULL, "/o", 0755) == 0);
+    EXPECT(vfs_mkdir(NULL, "/p", 0755) == 0);
+
+    /* A file open on a mount only the namespace saw: the mount waits for it, and the file works meanwhile. */
+    struct mount_ns *ns = NULL;
+    EXPECT(mountns_create(mountns_initial(), &ns) == 0);
+    g_in_process = true;
+    g_proc.mntns = ns;
+    EXPECT(vfs_mount("/p", "tfs", &g_bd[3], 0) == 0);
+    struct file *f = NULL;
+    EXPECT(vfs_open(NULL, "/p/f", COSMO_O_RDWR | COSMO_O_CREAT, 0644, &f) == 0);
+    g_in_process = false;
+    g_proc.mntns = NULL;
+    mountns_put(ns);
+    note(400, g_threads);
+    note(401, vfs_bdev_mounted(&g_bd[3]));   /* still the orphan's */
+    static const uint8_t data[50] = { 3 };
+    note_rc(402, file_write(f, data, sizeof(data)));
+    note_rc(402, file_sync(f));
+    note(403, vfs_mount_reap_orphans());   /* nothing yet: the file is open */
+    file_put(f);
+    note(403, vfs_mount_reap_orphans());   /* the file was its last user */
+    note(401, vfs_bdev_mounted(&g_bd[3]));
+    EXPECT(list_empty(vfs_floor_orphans()));
+
+    /* A mount nested on one only another namespace sees: when that namespace goes, the outer mount waits for the
+     * nested one, whose mountpoint is one of its directories. */
+    EXPECT(vfs_mount("/o", "tfs", NULL, 0) == 0);
+    EXPECT(vfs_mkdir(NULL, "/o/d", 0755) == 0);
+    EXPECT(mountns_create(mountns_initial(), &ns) == 0);   /* sees /o */
+    EXPECT(vfs_mount("/o/d", "tfs", NULL, 0) == 0);        /* the initial namespace's alone */
+    struct vnode *inner = must_lookup("/o/d");
+    note_rc(404, vfs_umount2("/o", 0));   /* the initial namespace forgets /o; the other still sees it */
+    mountns_put(ns);                       /* /o is an orphan, and /o/d is on it */
+    note(405, vfs_mount_reap_orphans());
+    EXPECT(!list_empty(vfs_floor_orphans()));
+    struct vnode *up = NULL;
+    int urc = vfs_lookup(inner, "..", &up);   /* out of the nested mount, into the orphan */
+    note_vn(406, urc, up);
+    if (up != NULL) {
+        note_rc(407, vfs_umount_at(up, ".", 0));      /* an orphan is no namespace's to unmount */
+        vnode_put(up);
+    }
+    struct vnode *root = inner->mnt->root;
+    vnode_put(inner);
+    note_rc(408, vfs_umount_at(root, ".", 0));   /* the nested mount, from inside it */
+    note(405, vfs_mount_reap_orphans());          /* its mountpoint was the orphan's last use */
+    EXPECT(list_empty(vfs_floor_orphans()));
     teardown();
 }
 
@@ -2665,6 +2719,8 @@ static void teardown(void)
             mountns_put(g_ns[k]);
             g_ns[k] = NULL;
         }
+    note(355, vfs_mount_reap_orphans());
+    EXPECT(list_empty(vfs_floor_orphans()));
     if (g_detached != NULL) {
         note_rc(350, vfs_mount_detached_release(g_detached, false));
         g_detached = NULL;
@@ -2809,6 +2865,8 @@ static void test_vfs_sessions(void)
     teardown();
     check_clean();
     test_edges();
+    check_clean();
+    test_orphans();
     check_clean();
 
     for (unsigned e = 0; e < EPOCHS; e++) {

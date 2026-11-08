@@ -20,6 +20,8 @@
     "kernel/string.h", "kernel/vfs.h")
 extern "C" {
     struct cosmo_keyslot;
+    struct waitqueue;
+    struct thread;
     struct blkdev {
         obj: kobject;
         name: [u8; 16];
@@ -100,6 +102,9 @@ extern "C" {
         n: usize) -> i32;
     fn pagecache_set_limit(pages: u64);
     fn pagecache_dirty_init();
+    fn waitqueue_init(wq: *mut waitqueue, name: *CChar);
+    fn waitqueue_wake_all(wq: *mut waitqueue) -> u32;
+    fn thread_create(entry: extern "C" fn(*mut void), arg: *mut void, name: *CChar, priority: i32) -> *mut thread;
 
     // vfs_floor.c
     fn vfs_floor_mounts() -> *mut list_node;
@@ -114,6 +119,9 @@ extern "C" {
     fn vfs_floor_passes_wait(mnt: *mut mount);
     fn vfs_floor_passes_wake(mnt: *mut mount);
     fn vfs_floor_total_pages() -> u64;
+    fn vfs_floor_orphans() -> *mut list_node;
+    fn vfs_floor_orphan_wq() -> *mut waitqueue;
+    fn vfs_floor_orphan_wait(cond: extern "C" fn(*mut void) -> bool, arg: *mut void);
     /// The devices a mount holds beyond its own: `held`, MOUNT_HELD_MAX pointers.
     fn vfs_floor_held(mnt: *mut mount) -> *mut *mut blkdev;
 }
@@ -147,6 +155,14 @@ static mut INITIALIZED: bool = false;
 /// before that lock is taken (do_mount runs, then vfs_mount publishes), so there is no lock here to put it under.
 /// Starts at 1: zero names no mount.
 static NEXT_MOUNT_ID: AtomicU64 = AtomicU64.constant(1);
+/// Orphans waiting for their last user (vfs_mount_orphaned), and the nudges vnode_put gives the reaper while there are
+/// any. Sequentially consistent: an orphan counted before its busy check, and a put that drops a reference before it
+/// reads the count, cannot both miss each other.
+static ORPHANS: AtomicU32 = AtomicU32.constant(0);
+static KICKS: AtomicU32 = AtomicU32.constant(0);
+/// The reaper is started at the first orphan that has to wait. Under g_mounts_lock.
+static mut REAPER: bool = false;
+const SCHED_PRIO_DEFAULT: i32 = 32;
 
 /// The panic of a broken invariant (the C's KASSERT).
 fn check(ok: bool, what: StringView) {
@@ -741,13 +757,12 @@ unsafe fn teardown(mnt: *mut mount) -> i32 {
     return urc;
 }
 
-/// A mount the last namespace that could see it has let go. It is already off `g_mounts` and off its mountpoint, so
-/// nothing can reach it and there is nobody to hand a failure back to -- which is the difference from vfs_umount2,
-/// where a failed commit leaves the mount in place for the caller to retry. Here a failed commit is reported loudly
-/// and the transaction dropped: the alternative is a filesystem left open that nothing will ever close again.
-/// Safety: `mnt` is detached and no namespace can see it.
-@export("vfs_mount_orphaned")
-unsafe fn orphaned(mnt: *mut mount) {
+/// An orphan nothing uses any more, off the pending list: committed and torn down. There is nobody to hand a failure
+/// back to -- which is the difference from vfs_umount2, where a failed commit leaves the mount in place for the caller
+/// to retry. Here a failed commit is reported loudly and the transaction dropped: the alternative is a filesystem left
+/// open that nothing will ever close again.
+/// Safety: `mnt` is an orphan off the pending list with no vnode referenced beyond its own.
+unsafe fn teardownOrphan(mnt: *mut mount) {
     let fs = Ptr.toBorrow(mnt as *mount).fs;
     let name = Ptr.toBorrow(fs as *fs_type).name;
     if (!Ptr.toBorrow(fs as *fs_type).sync.isNull()) {
@@ -781,6 +796,108 @@ unsafe fn orphaned(mnt: *mut mount) {
         sayPath(LogLevel.Info, "vfs: unmounted ", name, ": no mount namespace can see it");
     }
     kobject_put(objOf(mnt));
+}
+
+/// A mount the last namespace that could see it has let go. It is already off `g_mounts` and off its mountpoint, so
+/// nothing can reach it by a path. What still uses it -- a file open on it, a process's directory in it, another
+/// namespace's mount nested on one of its directories (whose mountpoint is a vnode of this mount) -- keeps it: the
+/// mount waits on the orphans' list, whole, and is torn down when its last such reference goes, as Linux's lazy
+/// unmount is. Before this the mount was torn down at once whatever used it, and the first of those to touch it again
+/// used freed memory (found by tests/host/test_vfs.c, 2026-11-08). A namespace's last holder cannot be refused, which
+/// is why waiting, not -EBUSY, is the answer.
+/// Safety: `mnt` is detached and no namespace can see it; no lock held.
+@export("vfs_mount_orphaned")
+unsafe fn orphaned(mnt: *mut mount) {
+    let table = vfs_floor_mounts_lock();
+    mutex_lock(table);
+    List.pushBack(vfs_floor_orphans(), borrow mut Ptr.toBorrowMut(mnt).link as *mut list_node);
+    let _ = ORPHANS.fetchAddWith(1, Ordering.SequentiallyConsistent);
+    mutex_unlock(table);
+    let _ = reapOrphans();
+
+    // Still waiting: something uses it. Said once, and the reaper is there to finish it.
+    mutex_lock(table);
+    let head = vfs_floor_orphans();
+    var node = List.first(head as *list_node);
+    while (!node.isNull()) {
+        if (mountOfLink(node) == mnt) {
+            sayPath(LogLevel.Info, "vfs: ", Ptr.toBorrow(Ptr.toBorrow(mnt as *mount).fs as *fs_type).name,
+                ": no mount namespace can see it; unmounted when nothing uses it");
+            if (!REAPER) {
+                let t = thread_create(reaper, 0 as *mut void, "vfs-orphans\0".ptr as *CChar, SCHED_PRIO_DEFAULT);
+                REAPER = !t.isNull();
+                if (t.isNull()) {
+                    KernelLog.write(LogLevel.Warn,
+                        "vfs: no orphan reaper thread; a waiting orphan is unmounted at the next one's turn");
+                }
+            }
+            break;
+        }
+        node = List.next(head as *list_node, node);
+    }
+    mutex_unlock(table);
+}
+
+/// Tear down every orphan nothing uses any more: the first one found idle, then look again, since tearing one down
+/// puts its mountpoint, which can be what kept another (a mount nested in an orphan). How many.
+/// Safety: no lock held.
+@export("vfs_mount_reap_orphans")
+unsafe fn reapOrphans() -> u32 {
+    var reaped: u32 = 0;
+    let table = vfs_floor_mounts_lock();
+    loop {
+        mutex_lock(table);
+        var idle = 0 as *mut mount;
+        let head = vfs_floor_orphans();
+        var node = List.first(head as *list_node);
+        while (!node.isNull()) {
+            let cand = mountOfLink(node);
+            if (busyVnodes(cand, false, 0 as *mut u32) == 0) {
+                idle = cand;
+                break;
+            }
+            node = List.next(head as *list_node, node);
+        }
+        if (!idle.isNull()) {
+            List.remove(borrow mut Ptr.toBorrowMut(idle).link as *mut list_node);
+            List.init(borrow mut Ptr.toBorrowMut(idle).link as *mut list_node);
+            let _ = ORPHANS.fetchSubWith(1, Ordering.SequentiallyConsistent); // its teardown's own puts nudge nobody
+        }
+        mutex_unlock(table);
+        if (idle.isNull()) {
+            break;
+        }
+        teardownOrphan(idle);
+        reaped += 1;
+    }
+    return reaped;
+}
+
+/// vnode_put's nudge: while an orphan waits, every put may be its last user's.
+/// Safety: none; it reads two counters and wakes a queue.
+@export("vfs_mount_orphan_kick")
+fn orphanKick() {
+    if (ORPHANS.loadWith(LoadOrdering.SequentiallyConsistent) != 0) {
+        let _ = KICKS.fetchAddWith(1, Ordering.SequentiallyConsistent);
+        unsafe { let _ = waitqueue_wake_all(vfs_floor_orphan_wq()); }
+    }
+}
+
+/// The reaper's sleep ends at a nudge it has not acted on.
+/// Safety: `arg` is the address of the u32 nudge count the reaper last acted on.
+@callback
+unsafe fn kicked(arg: *mut void) -> bool => KICKS.loadWith(LoadOrdering.SequentiallyConsistent) != *Ptr.toBorrow(arg as *u32);
+
+/// The orphan reaper: a kernel thread, at the first orphan that has to wait. A nudge is counted before the reap reads
+/// the orphans, so one that lands during a reap wakes the next round at once.
+/// Safety: started once, by vfs_mount_orphaned.
+@callback
+unsafe fn reaper(arg: *mut void) {
+    loop {
+        var seen = KICKS.loadWith(LoadOrdering.SequentiallyConsistent);
+        let _ = reapOrphans();
+        vfs_floor_orphan_wait(kicked, borrow mut seen as *mut u32 as *mut void);
+    }
 }
 
 /// Safety: `path` is NUL-terminated.
@@ -891,6 +1008,14 @@ unsafe fn umountAt(start: *mut vnode, path: *CChar, flags: u32) -> i32 {
     if (mnt == *Ptr.toBorrow(vfs_floor_root_slot())) {
         vnode_put(rootVn);
         return -EBUSY; // the root filesystem stays
+    }
+    if (Ptr.toBorrow(mnt as *mount).mountpoint.isNull()) {
+        // The old root after vfs_switch_root, reached from a directory still inside it: on no directory and in no
+        // namespace, so not a namespace's to unmount (vfs_release_old_root releases it). The checks below lock the
+        // mountpoint first, which this mount does not have: that was a NULL dereference (found by
+        // tests/host/test_vfs.c, 2026-11-08).
+        vnode_put(rootVn);
+        return -EINVAL;
     }
     vnode_put(rootVn); // the lookup reference; the mount still holds one
 
@@ -1432,6 +1557,7 @@ unsafe fn init() {
     check(!INITIALIZED, "!g_initialized");
     mutex_init(vfs_floor_mounts_lock(), "mounts\0".ptr as *CChar);
     mutex_init(vfs_floor_claim_lock(), "mount-claims\0".ptr as *CChar);
+    waitqueue_init(vfs_floor_orphan_wq(), "vfs-orphans\0".ptr as *CChar);
     INITIALIZED = true;
     // The page cache may hold a quarter of RAM before clean pages are reclaimed (docs/kernel/security/design.md §3).
     pagecache_set_limit(vfs_floor_total_pages() / 4);

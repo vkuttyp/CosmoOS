@@ -1683,10 +1683,12 @@ io type among them), the seam's lock, queues and record, the waits the
 C wrote as macros, the call into readdir with its enum-typed callback,
 a debug build's poisoning of a freed vnode, the release builds'
 stand-ins for the seam, and the asserted constants. The test found two
-kernel bugs the port keeps as they are: `vfs_umount_at` locks the
-mountpoint of an old root that has none, and the last holder of a mount
-namespace unmounts a mount only it sees with files open on it or
-mounts nested on it.
+kernel bugs, fixed after the port (the digest moved once, to
+0x45371c2423e2e476): `vfs_umount_at` locked the mountpoint of an old
+root that has none (now -EINVAL), and the last holder of a mount
+namespace unmounted a mount only it saw with files open on it or
+mounts nested on it (now the mount waits as an orphan, reaped when its
+last user goes).
 
 Size: about 4.5x.
 

@@ -40,13 +40,21 @@ extern struct mount *g_root_mount;
  * `vfs_umount2` there is nobody to hand a failure back to: a commit
  * that fails is reported loudly and the transaction dropped, because
  * the alternative is a filesystem left open that nothing will ever
- * close.
+ * close. A mount something still uses -- an open file, a process's
+ * directory, another namespace's mount nested on it -- waits on the
+ * orphans' list, whole, until its last such reference goes, and is torn
+ * down then (by the caller, at once, when nothing does).
  */
 void vfs_mount_orphaned(struct mount *mnt);
 
 /* Take a mount off its mountpoint and out of the table, keeping the
  * count right. g_mounts_lock held; takes the mountpoint's lock. */
 void vfs_mount_detach(struct mount *mnt);
+
+/* Tear down every orphan nothing uses any more (vfs_mount.cee; its reaper
+ * thread calls it, and a test may): how many. vnode_put's nudge to it. */
+unsigned vfs_mount_reap_orphans(void);
+void vfs_mount_orphan_kick(void);
 
 /* The held-walk seam's walk half (vfs_vnode.cee; a release build's stand-in
  * in vfs_floor.c): 0 to proceed, -EINTR if the held wait was killed.

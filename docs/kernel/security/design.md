@@ -245,7 +245,16 @@ Three details that are choices rather than accidents:
   mount holds a vnode of the one below it. This is the same rule as
   everywhere else in this kernel: nothing is released while its fate is
   unknown, and a mount nobody can reach whose data was never committed
-  is exactly that.
+  is exactly that. What still uses such a mount keeps it: an open file
+  on it, a process's directory in it, another namespace's mount nested
+  on one of its directories. It waits, whole and reachable by no path,
+  on the orphans' list, and the orphan reaper (a kernel thread, started
+  at the first orphan that has to wait, nudged by every vnode put while
+  one does) tears it down when its last such reference goes, as Linux's
+  lazy unmount does. A namespace's last holder cannot be refused, so the
+  answer is to wait, not `-EBUSY`. Before 2026-11-08 the mount was torn
+  down at once, and whatever still used it then used freed memory
+  (found by `tests/host/test_vfs.c`).
 - **The root filesystem is visible everywhere.** It is not on the
   visibility machinery at all: every namespace needs a root, no
   namespace may unmount it, and a set that always has the same one

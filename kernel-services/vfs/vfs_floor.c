@@ -24,6 +24,7 @@
 #include <kernel/sched.h>
 #include <kernel/spinlock.h>
 #include <kernel/string.h>
+#include <kernel/thread.h>
 #include <kernel/timer.h>
 #include <kernel/vfs.h>
 #include <kernel/wait.h>
@@ -39,6 +40,7 @@ _Static_assert(sizeof(((struct process *)0)->pid) == 4 && sizeof(((struct proces
                    sizeof(((struct mount *)0)->nr_vnodes) == 4 && sizeof(((struct vnode *)0)->flags) == 4,
                "vfs_vnode.cee's field widths");
 
+_Static_assert(SCHED_PRIO_DEFAULT == 32, "vfs_mount.cee's thread.h value");
 _Static_assert(ENOENT == 2 && ENOMEM == 12 && EBUSY == 16 && EEXIST == 17 && ENODEV == 19 && ENOTDIR == 20 &&
                    EINVAL == 22 && ENOSPC == 28 && EOPNOTSUPP == 95 && KMEM_ZERO == 1,
                "vfs_mount.cee's errno.h and kmalloc.h values");
@@ -138,6 +140,10 @@ static LIST_HEAD(g_fs_types);
 /* The block devices mounts hold (invariant V38): a leaf lock. */
 static struct mutex g_claim_lock;
 static LIST_HEAD(g_claims);
+/* Orphans waiting for their last user (vfs_mount_orphaned), by `link`,
+ * under g_mounts_lock; the reaper sleeps on the queue. */
+static LIST_HEAD(g_orphans);
+static struct waitqueue g_orphan_wq;
 
 struct list_node *vfs_floor_mounts(void);
 struct mutex *vfs_floor_mounts_lock(void);
@@ -156,6 +162,13 @@ struct list_node *vfs_floor_fs_types(void) { return &g_fs_types; }
 struct list_node *vfs_floor_claims(void) { return &g_claims; }
 struct mutex *vfs_floor_claim_lock(void) { return &g_claim_lock; }
 struct blkdev **vfs_floor_held(struct mount *mnt) { return mnt->held; }
+
+struct list_node *vfs_floor_orphans(void);
+struct waitqueue *vfs_floor_orphan_wq(void);
+void vfs_floor_orphan_wait(bool (*cond)(void *), void *arg);
+struct list_node *vfs_floor_orphans(void) { return &g_orphans; }
+struct waitqueue *vfs_floor_orphan_wq(void) { return &g_orphan_wq; }
+void vfs_floor_orphan_wait(bool (*cond)(void *), void *arg) { wait_event(&g_orphan_wq, cond(arg)); }
 
 /* The mount's type: the release is vfs_mount.cee's. */
 void vfs_mount_release_obj(struct kobject *obj);
