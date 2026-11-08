@@ -486,7 +486,10 @@ unsafe fn mountAlloc(fs: *mut fs_type, bdev: *mut blkdev, flags: u32) -> *mut mo
 @export("vfs_root")
 unsafe fn root() -> *mut vnode {
     let r = *Ptr.toBorrow(vfs_floor_root_slot());
-    check(!r.isNull(), "g_root_mount != NULL");
+    if (r.isNull()) {
+        check(false, "g_root_mount != NULL"); // panics: the return is for the analyzer, which cannot see that
+        return 0 as *mut vnode;
+    }
     vnode_get(Ptr.toBorrow(r as *mount).root);
     return Ptr.toBorrow(r as *mount).root;
 }
