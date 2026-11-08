@@ -232,7 +232,6 @@ KERNEL_GENERIC_SRCS := \
 	kernel-services/filesystem/cosmofs/cosmofstest_check.c \
 	kernel-services/filesystem/cosmofs/cosmofstest_orphan.c \
 	kernel-services/filesystem/cosmofs/cosmofs_keytest.c \
-	kernel-services/filesystem/cosmofs/cosmofs_keytest_floor.c \
 	kernel-services/filesystem/cosmofs/cosmofscrash.c \
 	kernel-services/network/mbuf.c \
 	kernel-services/network/cksum.c \

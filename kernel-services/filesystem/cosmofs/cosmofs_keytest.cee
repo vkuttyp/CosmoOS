@@ -6,12 +6,14 @@
 // does, in user space), so a slot here only has to have a slot's shape.
 //
 // The superblock, the key slots, the reports and the requests stay C (cosmofs_format.h, kernel/cosmofs.h,
-// uapi/cosmo/). cosmofs_keytest_floor.c keeps the parts a build configuration decides -- the fault-injection build's
-// failed copy, the debug build's two-member pool -- and asserts the layout this file writes as constants.
+// uapi/cosmo/). The parts a build configuration decides -- the fault-injection build's failed copy, the debug build's
+// two-member pool -- are `cfg` blocks (ADR 0080 §3.3), and the layout this file writes as constants is the headers',
+// which the C compiler checks.
 
 @header("kernel/blk.h", "kernel/vfs.h", "kernel/kmalloc.h", "kernel/mutex.h", "kernel/string.h", "kernel/random.h",
     "kernel/ramblk.h", "kernel/storage.h", "kernel/cosmofs.h", "uapi/cosmo/fsctl.h", "uapi/cosmo/keyslot.h",
-    "cosmofs_internal.h")
+    "cosmofs_internal.h", "kernel/errno.h", "kernel/faultinject.h", "kernel/log.h", "kernel/thread.h",
+    "cosmofs_format.h")
 extern "C" {
     struct blkdev;
     struct spool;
@@ -123,34 +125,66 @@ extern "C" {
     fn memset(p: *mut void, c: i32, n: usize) -> *mut void;
     fn memcpy(dst: *mut void, src: *void, n: usize) -> *mut void;
     fn memcmp(a: *void, b: *void, n: usize) -> i32;
-    /// cosmofs_keytest_floor.c: the fault-injection build's failed copy, the debug build's two members, and the
-    /// fault rule cleared.
-    fn cfs_keytest_floor_cow(blk: *u8, reason: *mut *CChar) -> bool;
-    fn cfs_keytest_floor_labels(two: *mut *mut blkdev, slots: *cosmo_keyslot, uuid2: *u8, master2: *u8,
-        save: *mut u8, reason: *mut *CChar) -> bool;
-    fn cfs_keytest_floor_clear();
+    fn file_sync(f: *mut file) -> i32;
+    /// cosmofs_format.cee's test hook: an encrypted pool of `members` members, one device each; a debug build's only.
+    @cfg("CONFIG_DEBUG")
+    fn cosmofs_test_format_keyed_members(bd: *mut *mut blkdev, members: u32, uuid: *u8, master: *u8,
+        slots: *cosmo_keyslot) -> i32;
+    // faultinject.h's checksum-copy fault, in a fault-injection build only.
+    struct thread;
+    struct fi_stats {
+        hits: u64;
+    }
+    enum fi_kind: u32;
+    const FI_COSMOFS_CSUM_COW: fi_kind = 24;
+    @cfg("CONFIG_FAULTINJECT")
+    fn faultinject_set(kind: fi_kind, every: u32, budget: u32, only: *mut thread);
+    @cfg("CONFIG_FAULTINJECT")
+    fn faultinject_clear(kind: fi_kind);
+    @cfg("CONFIG_FAULTINJECT")
+    fn faultinject_stats(kind: fi_kind, out: *mut fi_stats);
+    fn thread_current() -> *mut thread;
+    @cvalue("COSMO_O_RDWR")
+    const O_RDWR: u32 = 2;
+    const ENOMEM: i32 = 12;
+    /// A label's CRC and its block count, where the forged label is touched.
+    @cvalue("offsetof(struct cfs_label, crc)")
+    const LABEL_CRC_AT: usize = 72;
+    @cvalue("offsetof(struct cfs_label, nblocks)")
+    const LABEL_NBLOCKS_AT: usize = 32;
+
+    // The values and layout the C compiler checks (ADR 0080 §3.1), which the floor asserted.
+    const CFS_BLOCK: usize = 4096;
+    const CFS_MHDR_SIZE: usize = 32;
+    const CFS_PTRS_PER_BLOCK: u32 = 508;
+    const CFS_SUPER_A: u64 = 0;
+    const CFS_SUPER_B: u64 = 1;
+    const CFS_FORMAT_VERSION: u32 = 11;
+    const CFS_KIND_CSUMIDX2: u32 = 18;
+    const CFS_CSUM_CRC32C: u32 = 1;
+    const VFS_UMOUNT_FORCE: u32 = 1;
+    const EEXIST: i32 = 17;
+    const EINVAL: i32 = 22;
+    const EIO: i32 = 5;
+    const EBUSY: i32 = 16;
+    const ENOKEY: i32 = 126;
+    const EKEYREJECTED: i32 = 129;
+    /// cosmofs_keytest.cee's cosmofs_format.h values and offsets
+    @cvalue("offsetof(struct cfs_mhdr, kind) == 4 && offsetof(struct cfs_mhdr, crc) == 24 && offsetof(struct cfs_mhdr, csum_algo) == 28 && offsetof(struct cfs_super, crc) == 160 && offsetof(struct cfs_super, free_blocks) == 64 && offsetof(struct cfs_member, free_blocks) == 40 && offsetof(struct cfs_member_block, m) == 8")
+    const COSMOFS_KEYTEST_FACT_0: bool = true;
+    /// cosmofs_keytest.cee's keyslot.h, fsctl.h and cosmofs.h values
+    @cvalue("COSMO_KEY_SLOTS == 8 && sizeof(struct cosmo_keyslot) == 96 && COSMO_KEYSLOT_EMPTY == 0 && COSMO_KEYSLOT_PASSPHRASE == 1 && COSMO_KEYSLOT_KEYFILE == 2 && COSMOFS_KEY_INFO == 0 && COSMOFS_KEY_LOAD == 1 && COSMOFS_KEY_SLOT == 3 && COSMO_FSCTL_KEY_F_ENCRYPTED == 1 && COSMO_FSCTL_KEY_F_UNLOCKED == 2 && COSMO_FSCTL_KEY_F_MAC == 4 && COSMO_FSCTL_DEV_F_CHECKED == 1 && COSMO_FSCTL_DEV_F_SUPER_NONE == 2 && COSMO_FSCTL_DEV_F_MOUNT_FAILED == 8 && COSMO_FSCTL_DEV_F_FELL_BACK == 16 && COSMO_FSCTL_DEV_F_LOCKED == 2048 && COSMOFS_SCRUB_REPAIR == 1")
+    const COSMOFS_KEYTEST_FACT_1: bool = true;
+    /// cosmofs_keytest.cee's vfs.h, syscall.h and errno.h values
+    @cvalue("COSMO_O_RDONLY == 0 && COSMO_O_WRONLY == 1 && COSMO_O_RDWR == 2 && COSMO_O_CREAT == 0x40 && ENOMEM == 12")
+    const COSMOFS_KEYTEST_FACT_2: bool = true;
 }
 
-// ---- Values (asserted in cosmofs_keytest_floor.c) ----
+// ---- Values ----
 
-const EEXIST: i32 = 17;
-const EINVAL: i32 = 22;
-const EIO: i32 = 5;
-const EBUSY: i32 = 16;
-const ENOKEY: i32 = 126;
-const EKEYREJECTED: i32 = 129;
 const O_RDONLY: u32 = 0;
 const O_WRONLY: u32 = 1;
 const O_CREAT: u32 = 0x40;
-const VFS_UMOUNT_FORCE: u32 = 1;
-const CFS_BLOCK: usize = 4096;
-const CFS_MHDR_SIZE: usize = 32;
-const CFS_PTRS_PER_BLOCK: u32 = 508;
-const CFS_SUPER_A: u64 = 0;
-const CFS_SUPER_B: u64 = 1;
-const CFS_FORMAT_VERSION: u32 = 11;
-const CFS_KIND_CSUMIDX2: u32 = 18;
-const CFS_CSUM_CRC32C: u32 = 1;
 const MHDR_CRC: usize = 24;
 const MHDR_CSUM_ALGO: usize = 28;
 const SUPER_CRC: usize = 160;
@@ -559,7 +593,7 @@ unsafe fn body(k: borrow mut Kt, reason: *mut *CChar) -> bool {
         return failed(reason,
             "check failed: kt_read_at(KT \"/far\", (uint64_t)KT_FAR_LBLK * CFS_BLOCK, blk, CFS_BLOCK) at line 560\0");
     }
-    if (!cfs_keytest_floor_cow(k.blk as *u8, reason)) {
+    if (!cowTest(k.blk as *u8, reason)) {
         return false;
     }
     var rootKind: u32 = 0;
@@ -828,7 +862,7 @@ unsafe fn body(k: borrow mut Kt, reason: *mut *CChar) -> bool {
     }
     k.mounted = false;
 
-    if (!cfs_keytest_floor_labels(borrow mut k.two as *mut [*mut blkdev; 2] as *mut *mut blkdev,
+    if (!labelsTest(borrow mut k.two as *mut [*mut blkdev; 2] as *mut *mut blkdev,
         k.slots as *cosmo_keyslot, borrow k.uuid2 as *[u8; 16] as *u8, borrow k.master2 as *[u8; 32] as *u8, k.save,
         reason)) {
         return false;
@@ -1041,7 +1075,7 @@ unsafe fn selftestEncryptedRoot(reason: *mut *CChar) -> bool {
     if (!k.plain.isNull()) {
         ramblk_destroy(k.plain);
     }
-    cfs_keytest_floor_clear();
+    clearFaults();
     k.master = [0u8; 32];
     k.master2 = [0u8; 32];
     k.master3 = [0u8; 32];
@@ -1054,4 +1088,110 @@ unsafe fn selftestEncryptedRoot(reason: *mut *CChar) -> bool {
     kfree(k.bad as *mut void);
     kfree(kp as *mut void);
     return ok;
+}
+
+// ---- What a build configuration decides (ADR 0080 §3.3) ----
+
+/// The far block rewritten when its mid-level index cannot be copied: the write-back is -ENOMEM and the retry
+/// commits. The failed copy used to leave the walk holding the block it had released, and its cleanup released it again
+/// (Codex on #447). Nothing without fault injection.
+/// Safety: `blk` holds CFS_BLOCK bytes; `reason` writable; /mnt/keytest is mounted.
+unsafe fn cowTest(blk: *u8, reason: *mut *CChar) -> bool {
+    if (cfg("CONFIG_FAULTINJECT")) {
+        var f = 0 as *mut file;
+        if (vfs_open(0 as *mut vnode, "/mnt/keytest/far\0".ptr as *CChar, O_RDWR, 0, borrow mut f as *mut *mut file) !=
+            0) {
+            return failed(reason, "check failed: vfs_open(NULL, KT \"/far\", COSMO_O_RDWR, 0, &f) == 0 at line 1101\0");
+        }
+        let w = file_pwrite(f, blk as *void, CFS_BLOCK, KT_FAR_LBLK * CFS_BLOCK as u64) == truncate<i64>(CFS_BLOCK);
+        faultinject_set(FI_COSMOFS_CSUM_COW, 1, 1, thread_current());
+        let first = if (w) file_sync(f) else -1;
+        var fst: fi_stats;
+        faultinject_stats(FI_COSMOFS_CSUM_COW, borrow mut fst as *mut fi_stats);
+        faultinject_clear(FI_COSMOFS_CSUM_COW);
+        let retry = file_sync(f);
+        kobject_put(f as *mut kobject); // file_put: the file's kobject is its first field
+        var buffer: [u8; 160] = [0; 160];
+        var line = TextWriter.create(mut buffer[..]);
+        line.text("selftest: cosmofs-encrypted-root: a two-level index's mid block not copied: sync ");
+        line.signed(first as i64);
+        line.text(" (hits ");
+        line.decimal(fst.hits);
+        line.text("), retry ");
+        line.signed(retry as i64);
+        KernelLog.send(LogLevel.Info, line);
+        if (!(w && fst.hits == 1 && first == -ENOMEM && retry == 0)) {
+            return failed(reason, "check failed: w && fst.hits == 1 && first == -ENOMEM && retry == 0 at line 1121\0");
+        }
+    }
+    return true;
+}
+
+/// The labels: a pool of two members, the second's label forged (the format of two members is a test hook, in a debug
+/// build only).
+/// Safety: `two` holds two devices; `slots`, `uuid2` and `master2` are the pool's; `save` holds a block; `reason`
+/// writable.
+unsafe fn labelsTest(two: *mut *mut blkdev, slots: *cosmo_keyslot, uuid2: *u8, master2: *u8, save: *mut u8,
+    reason: *mut *CChar) -> bool {
+    if (cfg("CONFIG_DEBUG")) {
+        let secret = "an encrypted root keeps this sentence off the disk";
+        let x = "/mnt/keytest/x\0".ptr as *CChar;
+        two.write(ramblk_create(1024));
+        two.add(1).write(ramblk_create(1024));
+        if (two.read().isNull() || two.add(1).read().isNull()) {
+            return failed(reason, "check failed: two[0] != NULL && two[1] != NULL at line 1139\0");
+        }
+        if (cosmofs_test_format_keyed_members(two, 2, uuid2, master2, slots) != 0) {
+            return failed(reason,
+                "check failed: cosmofs_test_format_keyed_members(two, 2, uuid2, master2, slots) == 0 at line 1143\0");
+        }
+        if (ktMountDev(two.read()) != 0) {
+            return failed(reason, "check failed: cfs_keytest_mount_dev(two[0]) == 0 at line 1146\0");
+        }
+        let w = ktWriteAt(x, 0, secret.ptr as *void, secret.length);
+        let _ = vfs_umount2(kt(), 0);
+        if (!w) {
+            return failed(reason, "check failed: w at line 1151\0");
+        }
+        if (ktLoad(two.read(), master2) != 0) {
+            return failed(reason, "check failed: cfs_keytest_load(two[0], master2) == 0 at line 1154\0");
+        }
+        if (!ktForge(two.add(1).read(), 0, LABEL_CRC_AT, false, LABEL_NBLOCKS_AT + 7, save)) {
+            return failed(reason,
+                "check failed: cfs_keytest_forge(two[1], 0, offsetof(struct cfs_label, crc), false, offsetof(struct cfs_label, nblocks) + 7, save) at line 1158\0");
+        }
+        let lrc = ktMountDev(two.read());
+        if (lrc == 0) {
+            let _ = vfs_umount2(kt(), 0);
+        }
+        if (lrc == 0) {
+            return failed(reason, "check failed: lrc != 0 at line 1165\0");
+        }
+        if (!ktPutBack(two.add(1).read(), 0, save as *u8)) {
+            return failed(reason, "check failed: cfs_keytest_put_back(two[1], 0, save) at line 1168\0");
+        }
+        if (ktMountDev(two.read()) != 0) {
+            return failed(reason, "check failed: cfs_keytest_mount_dev(two[0]) == 0 at line 1171\0");
+        }
+        let r = ktReadAt(x, 0, secret.ptr as *void, secret.length);
+        let _ = vfs_umount2(kt(), 0);
+        if (!r) {
+            return failed(reason, "check failed: r at line 1176\0");
+        }
+        var buffer: [u8; 128] = [0; 128];
+        var line = TextWriter.create(mut buffer[..]);
+        line.text("selftest: cosmofs-encrypted-root: member 1's label forged with its CRC32C recomputed: mount refused (");
+        line.signed(lrc as i64);
+        line.text(")");
+        KernelLog.send(LogLevel.Info, line);
+    }
+    return true;
+}
+
+/// The fault rule the copy test arms, cleared whatever happened.
+/// Safety: the serial self-test runner.
+unsafe fn clearFaults() {
+    if (cfg("CONFIG_FAULTINJECT")) {
+        faultinject_clear(FI_COSMOFS_CSUM_COW);
+    }
 }
