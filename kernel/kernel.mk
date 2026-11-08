@@ -225,7 +225,6 @@ KERNEL_GENERIC_SRCS := \
 	kernel-services/filesystem/cosmofs/cosmofstest_extent.c \
 	kernel-services/filesystem/cosmofs/cosmofstest_rollback.c \
 	kernel-services/filesystem/cosmofs/cosmofstest_b2.c \
-	kernel-services/filesystem/cosmofs/cosmofstest_b2_floor.c \
 	kernel-services/filesystem/cosmofs/cosmofstest_basic.c \
 	kernel-services/filesystem/cosmofs/cosmofstest_copies.c \
 	kernel-services/filesystem/cosmofs/cosmofstest_freelog.c \
