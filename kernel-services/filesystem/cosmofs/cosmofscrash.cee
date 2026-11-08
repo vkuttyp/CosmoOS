@@ -6,16 +6,24 @@
 // point with its exact contents, to walk and read without error, and to check clean.
 //
 // What the C kept in statics is one record on the heap for the run. The device's log, the reports and the stat stay C
-// (kernel/ramblk.h, kernel/cosmofs.h, uapi/cosmo/syscall.h). cosmofscrash_floor.c lists a directory through its
-// vnode's readdir, a function an operations table names, and is the self-test in a build without CONFIG_DEBUG.
+// (kernel/ramblk.h, kernel/cosmofs.h, uapi/cosmo/syscall.h). A directory is listed through its vnode's readdir, whose
+// callback takes the imported enum vnode_type (ADR 0079); a build without CONFIG_DEBUG runs no replay (a `cfg` block,
+// ADR 0080 §3.3), and the values below are the headers', which the C compiler checks.
 
 @header("kernel/blk.h", "kernel/vfs.h", "kernel/kmalloc.h", "kernel/ramblk.h", "kernel/string.h",
     "kernel/cosmofs.h", "uapi/cosmo/syscall.h")
 extern "C" {
     struct blkdev;
     struct mount;
+    enum vnode_type: u32;
+    struct vnode_ops {
+        readdir: extern "C" fn(*mut vnode, *mut u64, extern "C" fn(*mut void, *CChar, usize, u64, vnode_type) -> i32,
+            *mut void) -> i32;
+    }
     struct vnode {
         mnt: *mut mount;
+        lock: mutex;
+        ops: *vnode_ops;
     }
     struct file;
     struct ramblk_write {
@@ -81,20 +89,29 @@ extern "C" {
     fn strcmp(a: *CChar, b: *CChar) -> i32;
     fn memset(p: *mut void, c: i32, n: usize) -> *mut void;
     fn memcpy(dst: *mut void, src: *void, n: usize) -> *mut void;
-    /// cosmofscrash_floor.c: up to LIST_MAX entries of `vn`, "." and ".." left out; readdir's result.
-    fn cfs_crash_floor_list(vn: *mut vnode, names: *mut u8, isdir: *mut u8, n: *mut u32) -> i32;
+
+    // syscall.h's, vfs.h's, errno.h's and ramblk.h's values, which the C compiler checks.
+    const ENOENT: i32 = 2;
+    const EEXIST: i32 = 17;
+    const ENOTSUP: i32 = 95;
+    const VNODE_DIR: vnode_type = 2;
+    @cvalue("COSMO_O_RDONLY")
+    const O_RDONLY: u32 = 0;
+    @cvalue("COSMO_O_WRONLY")
+    const O_WRONLY: u32 = 1;
+    @cvalue("COSMO_O_CREAT")
+    const O_CREAT: u32 = 0x40;
+    @cvalue("COSMO_O_TRUNC")
+    const O_TRUNC: u32 = 0x200;
+    const VFS_UMOUNT_FORCE: u32 = 1;
+    @cvalue("sizeof(struct ramblk_write)")
+    const RAMBLK_WRITE: usize = 24;
+    @cvalue("offsetof(struct ramblk_write, nsectors)")
+    const RAMBLK_NSECTORS_AT: usize = 8;
 }
 
-// ---- Values (asserted in cosmofscrash_floor.c) ----
+// ---- Values ----
 
-const ENOENT: i32 = 2;
-const EEXIST: i32 = 17;
-const O_RDONLY: u32 = 0;
-const O_WRONLY: u32 = 1;
-const O_CREAT: u32 = 0x40;
-const O_TRUNC: u32 = 0x200;
-const VFS_UMOUNT_FORCE: u32 = 1;
-const RAMBLK_WRITE: usize = 24;
 const MNT: StringView = "/mnt/crash";
 /// A 2 MiB device.
 const NBLOCKS: u64 = 512;
@@ -317,7 +334,7 @@ unsafe fn walk(dir: *CChar, depth: u32, w: borrow mut Walk, buf: *mut u8) {
     }
     let isdir = names.add(LIST_MAX * NAME_MAX);
     var n: u32 = 0;
-    let rc = cfs_crash_floor_list(vn, names, isdir, borrow mut n as *mut u32);
+    let rc = listDir(vn, names, isdir, borrow mut n as *mut u32);
     vnode_put(vn);
     if (rc != 0) {
         w.ok = false;
@@ -719,11 +736,59 @@ unsafe fn nsectors(log: *mut ramblk_log, i: u32) -> u32 =>
     Ptr.toBorrow((Ptr.toBorrow(log as *ramblk_log).w as *mut u8).add(i as usize * RAMBLK_WRITE) as *ramblk_write)
         .nsectors;
 
-/// The self-test.
+/// What a directory listing gathers: up to LIST_MAX names of under NAME_MAX bytes, and which are directories.
+struct CrashList {
+    names: *mut u8;
+    isdir: *mut u8;
+    n: u32;
+}
+
+/// One entry to the listing: nonzero when it wants no more. "." and ".." are left out.
+/// Safety: `arg` is a CrashList whose buffers hold LIST_MAX entries; `name` holds `len` bytes.
+@callback
+unsafe fn collect(arg: *mut void, name: *CChar, len: usize, ino: u64, kind: vnode_type) -> i32 {
+    let l = Ptr.toBorrowMut(arg as *mut CrashList);
+    let bytes = name as *u8;
+    if (l.n as usize == LIST_MAX || len >= NAME_MAX) {
+        return 1;
+    }
+    if ((len == 1 && bytes.read() == '.') || (len == 2 && bytes.read() == '.' && bytes.add(1).read() == '.')) {
+        return 0;
+    }
+    let at = l.n as usize * NAME_MAX;
+    for (i in 0..len) {
+        l.names.add(at + i).write(bytes.add(i).read());
+    }
+    l.names.add(at + len).write(0);
+    l.isdir.add(l.n as usize).write(if (kind == VNODE_DIR) 1 else 0);
+    l.n += 1;
+    return 0;
+}
+
+/// Up to LIST_MAX entries of `vn`, names of under NAME_MAX bytes, "." and ".." left out, into `names` (LIST_MAX *
+/// NAME_MAX bytes) and `isdir`; readdir's result.
+/// Safety: `vn` is a live directory vnode; the buffers hold LIST_MAX entries; `n` writable.
+unsafe fn listDir(vn: *mut vnode, names: *mut u8, isdir: *mut u8, n: *mut u32) -> i32 {
+    var l = CrashList { names: names, isdir: isdir, n: 0 };
+    var pos: u64 = 0;
+    let lock = borrow mut Ptr.toBorrowMut(vn).lock as *mut mutex;
+    mutex_lock(lock);
+    let ops = Ptr.toBorrow(vn as *vnode).ops;
+    let rc = if (Ptr.toBorrow(ops).readdir.isNull()) -ENOTSUP else Ptr.toBorrow(ops).readdir(vn,
+        borrow mut pos as *mut u64, collect, borrow mut l as *mut CrashList as *mut void);
+    mutex_unlock(lock);
+    n.write(l.n);
+    return rc;
+}
+
+/// The self-test: a debug build's; another says so and passes.
 /// Safety: `reason` writable.
-@cfg("CONFIG_DEBUG")
 @export("selftest_cosmofs_replay")
 unsafe fn selftestReplay(reason: *mut *CChar) -> bool {
+    if (cfg("!CONFIG_DEBUG")) {
+        KernelLog.write(LogLevel.Info, "selftest: cosmofs-replay: debug builds only");
+        return true;
+    }
     let cp = kzalloc(layoutOf<Crash>().size) as *mut Crash;
     if (cp.isNull()) {
         return failed(reason, "check failed: the run's record at line 729\0");
