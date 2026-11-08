@@ -67,9 +67,9 @@ int vfs_walk_parent(struct vnode *start, const char *path, char *namebuf, struct
                     bool *trailing_slash);
 bool vfs_dot_name(const char *name, size_t len);
 
-/* vfs.c's files, which the open's walk makes: a file for `vn` (taking the
- * reference), its open hook run (on refusal the file is dropped); whether
- * a regular file's text is executing (vn->lock held). */
+/* The files the open's walk makes (vfs_file.cee): a file for `vn` (taking
+ * the reference), its open hook run (on refusal the file is dropped);
+ * whether a regular file's text is executing (vn->lock held). */
 struct file *vfs_file_alloc(struct vnode *vn, unsigned flags);
 int vfs_file_run_open(struct file *f);
 bool vfs_text_busy_locked(struct vnode *vn);

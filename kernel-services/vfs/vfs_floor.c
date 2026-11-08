@@ -28,6 +28,8 @@
 #include <kernel/vfs.h>
 #include <kernel/wait.h>
 
+#include <stddef.h>
+
 #include "vfs_internal.h"
 
 _Static_assert(EINTR == 4 && ETIMEDOUT == 110, "vfs_vnode.cee's errno.h values");
@@ -60,6 +62,67 @@ _Static_assert(COSMO_O_RDONLY == 0 && COSMO_O_WRONLY == 1 && COSMO_O_ACCMODE == 
                    COSMO_O_EXCL == 0x80 && COSMO_O_TRUNC == 0x200 && COSMO_O_DIRECTORY == 0x10000 &&
                    COSMO_O_NOFOLLOW == 0x20000,
                "vfs_walk.cee's syscall.h values");
+
+_Static_assert(EBADF == 9 && EFAULT == 14 && ESPIPE == 29 && VNODE_CHR == 3 && VNODE_FIFO == 4 &&
+                   COSMO_O_APPEND == 0x400 && COSMO_O_NONBLOCK == 0x800 && COSMO_IO_READABLE == 1 &&
+                   COSMO_IO_WRITABLE == 2 && COSMO_SEEK_SET == 0 && COSMO_SEEK_CUR == 1 && COSMO_SEEK_END == 2,
+               "vfs_file.cee's errno.h, vfs.h and syscall.h values");
+_Static_assert(sizeof(struct cosmo_dirent) == 16 && offsetof(struct cosmo_dirent, name) == 12 &&
+                   sizeof(((struct file *)0)->flags) == 4,
+               "vfs_file.cee's dirent layout and field widths");
+
+/* --- the file's object, a directory's listing, the driver's lock --------- */
+
+void vfs_file_release(struct kobject *obj);
+int64_t vfs_file_obj_read(struct kobject *obj, void *buf, size_t len);
+int64_t vfs_file_obj_write(struct kobject *obj, const void *buf, size_t len);
+int vfs_file_obj_flush(struct kobject *obj);
+unsigned vfs_file_obj_ready(struct kobject *obj);
+struct waitqueue *vfs_file_obj_poll_wq(struct kobject *obj, unsigned events);
+int vfs_file_obj_set_nonblock(struct kobject *obj, int on);
+int64_t vfs_file_obj_read_filled(struct kobject *obj, void *buf, size_t cap, size_t len,
+                                 int (*put)(void *ctx, const void *piece, size_t n), void *ctx);
+
+static const struct kobject_io_type file_type = {
+    .base = { .name = "file", .release = vfs_file_release, .flags = KOBJECT_TYPE_IO },
+    .read = vfs_file_obj_read,
+    .read_filled = vfs_file_obj_read_filled,
+    .write = vfs_file_obj_write,
+    .flush = vfs_file_obj_flush,
+    .ready = vfs_file_obj_ready,
+    .poll_wq = vfs_file_obj_poll_wq,
+    .set_nonblock = vfs_file_obj_set_nonblock,
+};
+
+const struct kobject_type *vfs_floor_file_type(void);
+bool vfs_floor_is_file(const struct kobject *obj);
+const struct kobject_type *vfs_floor_file_type(void) { return &file_type.base; }
+bool vfs_floor_is_file(const struct kobject *obj) { return obj->type == &file_type.base; }
+
+/* A filesystem's readdir calls back with an enum vnode_type: vfs_file.cee's
+ * emit takes it as the integer it is. */
+int vfs_readdir_emit(void *arg, const char *name, size_t len, uint64_t ino, uint32_t type);
+static int readdir_emit(void *arg, const char *name, size_t len, uint64_t ino, enum vnode_type type)
+{
+    return vfs_readdir_emit(arg, name, len, ino, (uint32_t)type);
+}
+
+int vfs_floor_readdir(struct vnode *vn, uint64_t *pos, void *ctx);
+bool vfs_floor_has_readdir(const struct vnode *vn);
+bool vfs_floor_has_readdir(const struct vnode *vn) { return vn->ops->readdir != NULL; }
+int vfs_floor_readdir(struct vnode *vn, uint64_t *pos, void *ctx)
+{
+    return vn->ops->readdir(vn, pos, readdir_emit, ctx);
+}
+
+/* A stream's driver runs with no vnode lock held (lockdep.h's assertion, a
+ * macro: nothing in a build without lockdep). */
+void vfs_floor_assert_unlocked(struct vnode *vn);
+void vfs_floor_assert_unlocked(struct vnode *vn)
+{
+    (void)vn;
+    lockdep_assert_not_held(&vn->lock, LOCKDEP_KIND_MUTEX);
+}
 
 /* --- the mount table (vfs_internal.h), the registry and the claims ------- */
 

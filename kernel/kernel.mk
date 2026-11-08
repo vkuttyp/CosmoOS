@@ -172,6 +172,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel-services/vfs/vfs_vnode.c \
 	kernel-services/vfs/vfs_mount.c \
 	kernel-services/vfs/vfs_walk.c \
+	kernel-services/vfs/vfs_file.c \
 	kernel-services/vfs/vfs_floor.c \
 	kernel-services/vfs/fsctl.c \
 	kernel-services/vfs/fsctl_floor.c \

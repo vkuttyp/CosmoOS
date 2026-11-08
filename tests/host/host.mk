@@ -100,7 +100,7 @@ HOST_FSCTL_SRCS := $(HOST_COMMON_SRCS) kernel-services/vfs/fsctl.c kernel-servic
 # The VFS core over a filesystem of the test's own: mount namespaces are the kernel's, the page cache, objects,
 # credentials, processes, devices and waits the test's.
 HOST_VFS_SRCS := $(HOST_COMMON_SRCS) kernel-services/vfs/vfs.c kernel-services/vfs/vfs_vnode.c kernel-services/vfs/vfs_mount.c \
-	kernel-services/vfs/vfs_walk.c kernel-services/vfs/vfs_floor.c kernel-services/vfs/mountns.c kernel-services/vfs/mountns_floor.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_vfs.c
+	kernel-services/vfs/vfs_walk.c kernel-services/vfs/vfs_file.c kernel-services/vfs/vfs_floor.c kernel-services/vfs/mountns.c kernel-services/vfs/mountns_floor.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_vfs.c
 # /proc: the process table, terminals, handles, scheduler, clocks, memory figures, mounts, the network stack's
 # tables and the vnode cache are the test's.
 HOST_PROCFS_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/procfs/procfs.c \

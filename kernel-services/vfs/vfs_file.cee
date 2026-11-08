@@ -1,0 +1,729 @@
+// vfs_file.cee - The VFS's open files, in CeeSafe: roadmap 2.0 SA7. tests/host/test_vfs.c holds vfs.c, which this part
+// of it was, to the digest of the C it replaced.
+//
+// An open file is a kobject over a referenced vnode: made by an open (its vnode's open hook run, a directory's opener's
+// root kept), read and written at its position under its own lock -- or, for a stream (a character device or a named
+// pipe), through the driver with no lock held and no position -- sought, synced and flushed with each write-back
+// failure reported once, listed a directory at a time, and filled in pieces by one read. The last put runs the
+// vnode's release and writes back what a closing writer left dirty.
+//
+// The files and vnodes stay C (vfs.h). vfs_floor.c keeps the file's kobject_io_type, C data whose entries are this
+// file's exports; the call into a filesystem's readdir, whose callback takes an enum vnode_type a CeeSafe function type
+// cannot spell; the lockdep assertion, a macro; and the values this file writes as its own constants, asserted.
+
+@header("kernel/errno.h", "kernel/kmalloc.h", "kernel/lockdep.h", "kernel/mutex.h", "kernel/object.h",
+    "kernel/pagecache.h", "kernel/string.h", "kernel/vfs.h")
+extern "C" {
+    struct waitqueue;
+    struct chrdev_ops {
+        fills: bool;
+    }
+    struct vnode_ops {
+        writepage: extern "C" fn(*mut vnode, u64, *void) -> i32;
+        open: extern "C" fn(*mut vnode, *mut file) -> i32;
+        release: extern "C" fn(*mut vnode, *mut file);
+        read_file: extern "C" fn(*mut vnode, *mut file, u64, *mut void, usize) -> i64;
+        write_file: extern "C" fn(*mut vnode, *mut file, u64, *void, usize) -> i64;
+        read: extern "C" fn(*mut vnode, u64, *mut void, usize) -> i64;
+        write: extern "C" fn(*mut vnode, u64, *void, usize) -> i64;
+        ready: extern "C" fn(*mut vnode, *mut file) -> u32;
+        poll_wq: extern "C" fn(*mut vnode, *mut file, u32) -> *mut waitqueue;
+        set_nonblock: extern "C" fn(*mut vnode, *mut file, i32) -> i32;
+        sync: extern "C" fn(*mut vnode) -> i32;
+    }
+    struct pagecache {
+        nr_dirty: u32;
+    }
+    struct mount {
+        flags: u32;
+    }
+    struct vnode {
+        obj: kobject;
+        mnt: *mut mount;
+        @cname("type") kind: u32;
+        size: u64;
+        mtime_ns: u64;
+        ops: *vnode_ops;
+        pc: pagecache;
+        lock: mutex;
+    }
+    struct file {
+        obj: kobject;
+        vn: *mut vnode;
+        pos: u64;
+        flags: AtomicU32;
+        lock: mutex;
+        priv: *mut void;
+        dev_open: bool;
+        wb_seq_seen: u32;
+        dir_path: *mut CChar;
+        dir_root: *mut vnode;
+    }
+    struct cosmo_stat;
+    struct cosmo_dirent {
+        ino: u64;
+        reclen: u16;
+        @cname("type") kind: u8;
+        namelen: u8;
+    }
+
+    fn kzalloc(size: usize) -> *mut void;
+    fn memcpy(dst: *mut void, src: *void, n: usize) -> *mut void;
+    fn memset(p: *mut void, c: i32, n: usize) -> *mut void;
+    fn strlen(s: *CChar) -> usize;
+    fn vnode_put(vn: *mut vnode);
+    fn vnode_stat(vn: *mut vnode, st: *mut cosmo_stat);
+    fn vfs_now_ns() -> u64;
+    fn vfs_current_root() -> *mut vnode;
+    fn ramfs_chr_ops_of(vn: *vnode) -> *chrdev_ops;
+    fn pagecache_read(vn: *mut vnode, off: u64, buf: *mut void, len: usize) -> i64;
+    fn pagecache_write(vn: *mut vnode, off: u64, buf: *void, len: usize) -> i64;
+    fn pagecache_sync(vn: *mut vnode) -> i32;
+    fn pagecache_throttle(vn: *mut vnode);
+    fn pagecache_lock(vn: *mut vnode);
+    fn pagecache_unlock(vn: *mut vnode);
+    fn pagecache_text_busy(vn: *mut vnode) -> bool;
+    fn pagecache_wb_seq(pc: *mut pagecache) -> u32;
+    fn pagecache_error_since(pc: *mut pagecache, seen: u32, err: *mut i32, now: *mut u32) -> bool;
+
+    // vfs_floor.c
+    fn vfs_floor_file_type() -> *kobject_type;
+    fn vfs_floor_is_file(obj: *kobject) -> bool;
+    fn vfs_floor_readdir(vn: *mut vnode, pos: *mut u64, ctx: *mut void) -> i32;
+    fn vfs_floor_has_readdir(vn: *vnode) -> bool;
+    fn vfs_floor_assert_unlocked(vn: *mut vnode);
+}
+
+// errno.h, vfs.h and syscall.h, which vfs_floor.c checks.
+const EBADF: i32 = 9;
+const ENOMEM: i32 = 12;
+const ENOSPC: i32 = 28;
+const EFAULT: i32 = 14;
+const ENOTDIR: i32 = 20;
+const EISDIR: i32 = 21;
+const EINVAL: i32 = 22;
+const ETXTBSY: i32 = 26;
+const ESPIPE: i32 = 29;
+const EROFS: i32 = 30;
+const EIO: i32 = 5;
+const ENOTSUP: i32 = 95;
+const VNODE_REG: u32 = 1;
+const VNODE_DIR: u32 = 2;
+const VNODE_CHR: u32 = 3;
+const VNODE_FIFO: u32 = 4;
+const MOUNT_RDONLY: u32 = 1;
+const COSMO_O_RDONLY: u32 = 0;
+const COSMO_O_WRONLY: u32 = 1;
+const COSMO_O_ACCMODE: u32 = 3;
+const COSMO_O_APPEND: u32 = 0x400;
+const COSMO_O_NONBLOCK: u32 = 0x800;
+const COSMO_IO_READABLE: u32 = 1;
+const COSMO_IO_WRITABLE: u32 = 2;
+const COSMO_SEEK_SET: i32 = 0;
+const COSMO_SEEK_CUR: i32 = 1;
+const COSMO_SEEK_END: i32 = 2;
+/// sizeof(struct cosmo_dirent) and offsetof(struct cosmo_dirent, name): the name follows the record's header.
+const DIRENT_SIZE: usize = 16;
+const DIRENT_NAME: usize = 12;
+const SLASH: u8 = 0x2F;
+
+/// The panic of a broken invariant (the C's KASSERT).
+fn check(ok: bool, what: StringView) {
+    if (!ok) {
+        var buffer: [u8; 128] = [0; 128];
+        var line = TextWriter.create(mut buffer[..]);
+        line.text("vfs: assertion failed: ");
+        line.text(what);
+        KernelLog.panic(line);
+    }
+}
+
+/// Safety: `vn` is live.
+unsafe fn lockOf(vn: *mut vnode) -> *mut mutex => borrow mut Ptr.toBorrowMut(vn).lock as *mut mutex;
+
+/// Safety: `f` is live.
+unsafe fn fileLock(f: *mut file) -> *mut mutex => borrow mut Ptr.toBorrowMut(f).lock as *mut mutex;
+
+/// Safety: `f` is live.
+unsafe fn vnOf(f: *mut file) -> *mut vnode => Ptr.toBorrow(f as *file).vn;
+
+/// Safety: `vn` is live.
+unsafe fn opsOf(vn: *mut vnode) -> *vnode_ops => Ptr.toBorrow(vn as *vnode).ops;
+
+/// Safety: `vn` is live.
+unsafe fn kindOf(vn: *mut vnode) -> u32 => Ptr.toBorrow(vn as *vnode).kind;
+
+/// Safety: `vn` is live.
+unsafe fn pcOf(vn: *mut vnode) -> *mut pagecache => borrow mut Ptr.toBorrowMut(vn).pc as *mut pagecache;
+
+/// vfs.h's file_flags: the flags as given at open, O_NONBLOCK changed since.
+/// Safety: `f` is live.
+unsafe fn flagsOf(f: *mut file) -> u32 => Ptr.toBorrow(f as *file).flags.loadWith(LoadOrdering.Relaxed);
+
+/// Safety: `f` is live; its lock held, or nothing else moves it.
+unsafe fn setPos(f: *mut file, pos: u64) {
+    let x = Ptr.toBorrowMut(f);
+    x.pos = pos;
+}
+
+/// Safety: `f` is live.
+unsafe fn posOf(f: *mut file) -> u64 => Ptr.toBorrow(f as *file).pos;
+
+// --- the file object ------------------------------------------------------------------------------------------------
+
+/// The kobject's release: the last reference is gone.
+/// Safety: `obj` is a file's object, at count zero.
+@export("vfs_file_release")
+unsafe fn release(obj: *mut kobject) {
+    let f = obj as *mut file;
+    let vn = vnOf(f);
+    let ops = opsOf(vn);
+    if (Ptr.toBorrow(f as *file).dev_open && !Ptr.toBorrow(ops).release.isNull()) {
+        Ptr.toBorrow(ops).release(vn, f); // once, on the last reference
+    }
+    if (kindOf(vn) == VNODE_REG && Ptr.toBorrow(vn as *vnode).pc.nr_dirty != 0 && !Ptr.toBorrow(ops).writepage.isNull()) {
+        mutex_lock(lockOf(vn));
+        let _ = pagecache_sync(vn);
+        mutex_unlock(lockOf(vn));
+    }
+    let x = Ptr.toBorrow(f as *file);
+    if (!x.dir_path.isNull()) {
+        kfree(x.dir_path as *mut void);
+    }
+    if (!x.dir_root.isNull()) {
+        vnode_put(x.dir_root);
+    }
+    vnode_put(vn);
+    kfree(f as *mut void);
+}
+
+/// The name is the open's own traversed name (vfs_open_named, P32): the path its walk took to this very vnode.
+/// Safety: `f` is live; `name` null or NUL-terminated.
+@export("file_set_dir_path")
+unsafe fn setDirPath(f: *mut file, name: *CChar) {
+    if (kindOf(vnOf(f)) != VNODE_DIR || !Ptr.toBorrow(f as *file).dir_path.isNull() || name.isNull() ||
+        *Ptr.toBorrow(name as *u8) != SLASH) {
+        return;
+    }
+    let n = strlen(name) + 1;
+    let p = kmalloc(n, 0) as *mut CChar;
+    if (p.isNull()) {
+        return;
+    }
+    let _ = memcpy(p as *mut void, name as *void, n);
+    let x = Ptr.toBorrowMut(f);
+    x.dir_path = p;
+}
+
+/// Safety: `obj` is a file's object.
+@export("vfs_file_obj_read")
+unsafe fn objRead(obj: *mut kobject, buf: *mut void, len: usize) -> i64 => read(obj as *mut file, buf, len);
+
+/// Safety: `obj` is a file's object.
+@export("vfs_file_obj_write")
+unsafe fn objWrite(obj: *mut kobject, buf: *void, len: usize) -> i64 => write(obj as *mut file, buf, len);
+
+/// Safety: `obj` is a file's object.
+@export("vfs_file_obj_flush")
+unsafe fn objFlush(obj: *mut kobject) -> i32 => flush(obj as *mut file);
+
+/// Readiness through the vnode, when it has an opinion (a FIFO, a device that implements it); otherwise a file is
+/// always ready, never changes and cannot be made non-blocking, which is the truth of a regular file and was the file
+/// type's only answer before the named-pipes unit.
+/// Safety: `obj` is a file's object.
+@export("vfs_file_obj_ready")
+unsafe fn objReady(obj: *mut kobject) -> u32 {
+    let f = obj as *mut file;
+    let ops = opsOf(vnOf(f));
+    if (!Ptr.toBorrow(ops).ready.isNull()) {
+        return Ptr.toBorrow(ops).ready(vnOf(f), f);
+    }
+    return COSMO_IO_READABLE | COSMO_IO_WRITABLE;
+}
+
+/// Safety: `obj` is a file's object.
+@export("vfs_file_obj_poll_wq")
+unsafe fn objPollWq(obj: *mut kobject, events: u32) -> *mut waitqueue {
+    let f = obj as *mut file;
+    let ops = opsOf(vnOf(f));
+    return if (Ptr.toBorrow(ops).poll_wq.isNull()) 0 as *mut waitqueue
+        else Ptr.toBorrow(ops).poll_wq(vnOf(f), f, events);
+}
+
+/// Safety: `obj` is a file's object.
+@export("vfs_file_obj_set_nonblock")
+unsafe fn objSetNonblock(obj: *mut kobject, on: i32) -> i32 {
+    let f = obj as *mut file;
+    let ops = opsOf(vnOf(f));
+    return if (Ptr.toBorrow(ops).set_nonblock.isNull()) -ENOTSUP
+        else Ptr.toBorrow(ops).set_nonblock(vnOf(f), f, on);
+}
+
+/// A regular file, or a device whose reads are always whole (/dev/zero): a large read is filled as one read
+/// (kobject_io_type.read_filled). A regular file's position lock, f->lock, is held across every piece and its copy to
+/// the caller, as Linux holds f_pos_lock, so a second reader or a seek on the same open file waits for the whole read;
+/// the order is f->lock before vn->lock (file_pread) and before what a fault in `put` takes, and no fault path takes
+/// an open file's lock. The position moves by what `put` accepted: a fault after some pieces returns those bytes, as
+/// Linux does, and the next read starts after them. A device has no position and no lock (file_read).
+/// Safety: `obj` is a file's object; `buf` holds `cap` bytes; `put` copies a piece out.
+@export("vfs_file_obj_read_filled")
+unsafe fn objReadFilled(obj: *mut kobject, buf: *mut void, cap: usize, len: usize,
+    put: extern "C" fn(*mut void, *void, usize) -> i32, ctx: *mut void) -> i64 {
+    let f = obj as *mut file;
+    let vn = vnOf(f);
+    let reg = kindOf(vn) == VNODE_REG;
+    if (!reg) {
+        let chr = if (kindOf(vn) == VNODE_CHR) ramfs_chr_ops_of(vn as *vnode) else 0 as *chrdev_ops;
+        if (chr.isNull() || !Ptr.toBorrow(chr).fills) {
+            return -ENOTSUP as i64;
+        }
+    }
+    if (reg) {
+        mutex_lock(fileLock(f));
+    }
+    var done: usize = 0;
+    var rc: i64 = 0;
+    while (done < len) {
+        let n = if (len - done < cap) len - done else cap;
+        rc = if (reg) pread(f, buf, n, posOf(f) + done as u64) else read(f, buf, n);
+        check(rc <= truncate<i64>(n), "rc <= (int64_t)n");
+        if (rc > truncate<i64>(n)) {
+            rc = -EIO as i64;
+        }
+        if (rc <= 0) {
+            break;
+        }
+        let got = truncate<usize>(rc);
+        if (put(ctx, buf as *void, got) != 0) {
+            rc = -EFAULT as i64;
+            break;
+        }
+        done += got;
+        if (got < n) {
+            break;
+        }
+    }
+    if (reg) {
+        setPos(f, posOf(f) + done as u64);
+        mutex_unlock(fileLock(f));
+    }
+    return if (done > 0) truncate<i64>(done) else rc;
+}
+
+/// Is this file's text shared with a process that is executing it?
+///
+/// Every path that changes a regular file's contents asks this, not just the write: a truncate removes or zeroes the
+/// very pages a running program is executing, which is the same harm by another name. Called with `vn->lock` held,
+/// and takes the cache lock inside it -- the documented order is vnode -> pagecache
+/// (docs/audit/next-subsystem-elf-shared-text.md).
+/// Safety: `vn` is a regular file whose lock is held.
+@export("vfs_text_busy_locked")
+unsafe fn textBusyLocked(vn: *mut vnode) -> bool {
+    pagecache_lock(vn);
+    let busy = pagecache_text_busy(vn);
+    pagecache_unlock(vn);
+    return busy;
+}
+
+/// A stream: no position, no seek, the driver's own read and write.
+/// Safety: `vn` is live.
+unsafe fn isStream(vn: *mut vnode) -> bool => kindOf(vn) == VNODE_CHR || kindOf(vn) == VNODE_FIFO;
+
+/// Safety: `f` is live.
+@export("file_nonblocking")
+unsafe fn nonblocking(f: *file) -> bool => (flagsOf(f as *mut file) & COSMO_O_NONBLOCK) != 0;
+
+/// 1/0 sets, -1 asks; returns the previous value.
+/// Safety: `f` is live.
+@export("file_set_nonblock")
+unsafe fn setNonblock(f: *mut file, on: i32) -> i32 {
+    var old = flagsOf(f);
+    if (on >= 0) {
+        let flags = borrow Ptr.toBorrow(f as *file).flags;
+        if (on != 0) {
+            old = flags.fetchOrWith(COSMO_O_NONBLOCK, Ordering.Relaxed);
+        } else {
+            old = flags.fetchAndWith(COSMO_O_NONBLOCK ^ 0xFFFFFFFF, Ordering.Relaxed);
+        }
+    }
+    return if ((old & COSMO_O_NONBLOCK) != 0) 1 else 0;
+}
+
+/// Safety: `obj` is a live kobject.
+@export("file_from_kobject")
+unsafe fn fromKobject(obj: *mut kobject) -> *mut file =>
+    if (vfs_floor_is_file(obj as *kobject)) obj as *mut file else 0 as *mut file;
+
+/// Run the vnode's per-open hook, if any. On refusal the file is dropped (its release hook does not run, since open
+/// never succeeded) and the caller's vnode reference goes with it.
+/// Safety: `f` is a file vfs_file_alloc made, not yet published.
+@export("vfs_file_run_open")
+unsafe fn runOpen(f: *mut file) -> i32 {
+    let vn = vnOf(f);
+    let ops = opsOf(vn);
+    if (Ptr.toBorrow(ops).open.isNull()) {
+        return 0;
+    }
+    let rc = Ptr.toBorrow(ops).open(vn, f);
+    if (rc != 0) {
+        kobject_put(borrow mut Ptr.toBorrowMut(f).obj as *mut kobject);
+        return rc;
+    }
+    let x = Ptr.toBorrowMut(f);
+    x.dev_open = true;
+    return 0;
+}
+
+/// A file for `vn`, taking the caller's reference.
+/// Safety: `vn` is a vnode the caller holds a reference on.
+@export("vfs_file_alloc")
+unsafe fn alloc(vn: *mut vnode, flags: u32) -> *mut file {
+    let f = kzalloc(layoutOf<file>().size) as *mut file;
+    if (f.isNull()) {
+        return f;
+    }
+    kobject_init(borrow mut Ptr.toBorrowMut(f).obj as *mut kobject, vfs_floor_file_type());
+    {
+        let x = Ptr.toBorrowMut(f);
+        x.vn = vn; // takes the caller's reference
+        x.flags.storeWith(flags, StoreOrdering.Relaxed);
+    }
+    mutex_init(fileLock(f), "file\0".ptr as *CChar);
+    let seq = pagecache_wb_seq(pcOf(vn)); // a failure before this open is not this file's
+    {
+        let x = Ptr.toBorrowMut(f);
+        x.wb_seq_seen = seq;
+    }
+    if (kindOf(vn) == VNODE_DIR) {
+        let root = vfs_current_root(); // the opener's: see file_dir_base_ok
+        let x = Ptr.toBorrowMut(f);
+        x.dir_root = root;
+    }
+    return f;
+}
+
+/// Safety: `f` is live.
+@export("file_dir_base_ok")
+unsafe fn dirBaseOk(f: *file) -> bool {
+    let dirRoot = Ptr.toBorrow(f).dir_root;
+    if (dirRoot.isNull()) {
+        return true;
+    }
+    let root = vfs_current_root();
+    let ok = root == dirRoot;
+    vnode_put(root);
+    return ok;
+}
+
+// --- reads, writes and the position ---------------------------------------------------------------------------------
+
+/// Safety: `f` is live; `buf` holds `len` bytes; no vnode lock held.
+@export("file_pread")
+unsafe fn pread(f: *mut file, buf: *mut void, len: usize, off: u64) -> i64 {
+    let vn = vnOf(f);
+    if ((flagsOf(f) & COSMO_O_ACCMODE) == COSMO_O_WRONLY) {
+        return -EBADF as i64;
+    }
+    if (kindOf(vn) == VNODE_DIR) {
+        return -EISDIR as i64;
+    }
+    if (len == 0) {
+        return 0;
+    }
+    if (isStream(vn)) {
+        // No vn->lock across a driver (a FIFO's ring is one too). It guards nothing on this path and a device may
+        // sleep for an unbounded time inside it (tty_read waits for a line), while this is the lock every other opener
+        // of the node needs: ramfs_lookup hands out one vnode per device node. The VFS already calls a device's other
+        // entry points outside it, ops->open from file_run_open and ops->release from file_release
+        // (docs/audit/next-subsystem-chrdev-vnode-lock.md).
+        //
+        // Nor f->lock, the open file's own, since the device-readiness unit: a stream's read may wait (a FIFO for
+        // bytes, the tap for a frame, the terminal for a line), and a reader that held the open file's lock while it
+        // waited deadlocked a writer on the same open file. The open file's lock is the position's lock, and a stream
+        // has no position; a stream's per-open state is the driver's to protect. file_read and file_write therefore
+        // call a stream's driver with no lock held, as the pipe and socket objects are called.
+        vfs_floor_assert_unlocked(vn);
+        let ops = opsOf(vn);
+        return if (!Ptr.toBorrow(ops).read_file.isNull()) Ptr.toBorrow(ops).read_file(vn, f, off, buf, len)
+            else if (!Ptr.toBorrow(ops).read.isNull()) Ptr.toBorrow(ops).read(vn, off, buf, len)
+            else -ENOTSUP as i64;
+    }
+    mutex_lock(lockOf(vn));
+    let n = pagecache_read(vn, off, buf, len);
+    mutex_unlock(lockOf(vn));
+    return n;
+}
+
+/// The dirty bound (MEM-9): a writer to a cached file sleeps here, if it must, before it takes the open file's lock or
+/// the vnode's. file_sync cleans pages holding the open file's lock, so a writer asleep under it would wait for what
+/// that lock holds up (pagecache_throttle).
+/// Safety: `f` is live; no lock held.
+@export("file_throttle")
+unsafe fn throttle(f: *mut file) {
+    let vn = vnOf(f);
+    if (kindOf(vn) == VNODE_REG && !isStream(vn)) {
+        pagecache_throttle(vn);
+    }
+}
+
+/// Safety: `f` is live; `buf` holds `len` bytes; no lock held.
+@export("file_pwrite")
+unsafe fn pwrite(f: *mut file, buf: *void, len: usize, off: u64) -> i64 {
+    throttle(f);
+    return pwriteHeld(f, buf, len, off);
+}
+
+/// Safety: `f` is live; `buf` holds `len` bytes; no vnode lock held.
+@export("file_pwrite_held")
+unsafe fn pwriteHeld(f: *mut file, buf: *void, len: usize, off: u64) -> i64 {
+    let vn = vnOf(f);
+    if ((flagsOf(f) & COSMO_O_ACCMODE) == COSMO_O_RDONLY) {
+        return -EBADF as i64;
+    }
+    if (kindOf(vn) == VNODE_DIR) {
+        return -EISDIR as i64;
+    }
+    if ((Ptr.toBorrow(Ptr.toBorrow(vn as *vnode).mnt as *mount).flags & MOUNT_RDONLY) != 0) {
+        return -EROFS as i64;
+    }
+    if (len == 0) {
+        return 0;
+    }
+    let ops = opsOf(vn);
+    if (isStream(vn)) {
+        // As in file_pread: the driver runs with no filesystem lock and no file lock.
+        vfs_floor_assert_unlocked(vn);
+        return if (!Ptr.toBorrow(ops).write_file.isNull()) Ptr.toBorrow(ops).write_file(vn, f, off, buf, len)
+            else if (!Ptr.toBorrow(ops).write.isNull()) Ptr.toBorrow(ops).write(vn, off, buf, len)
+            else -ENOTSUP as i64;
+    }
+    mutex_lock(lockOf(vn));
+    // A file somebody is executing does not change underneath them. Shared text means the running program's
+    // instructions *are* these pages, so a write here would rewrite them in every process at once; POSIX names the
+    // refusal and this is where it belongs, under the lock the write itself holds, with the cache lock taken inside it
+    // (the order is vnode -> pagecache) (docs/audit/next-subsystem-elf-shared-text.md).
+    if (textBusyLocked(vn)) {
+        mutex_unlock(lockOf(vn));
+        return -ETXTBSY as i64;
+    }
+    var n = pagecache_write(vn, off, buf, len);
+    if (n == -ENOSPC as i64 && !Ptr.toBorrow(ops).sync.isNull()) {
+        // The filesystem charges a dirty page for the block it will take (MEM-9); blocks the open transaction has
+        // replaced are free only once it commits. Commit, as file_sync does, and ask once more before the writer is
+        // told.
+        if (pagecache_sync(vn) == 0 && Ptr.toBorrow(ops).sync(vn) == 0) {
+            n = pagecache_write(vn, off, buf, len);
+        }
+    }
+    if (n > 0) {
+        let now = vfs_now_ns(); // vnode state, so it stays inside
+        let x = Ptr.toBorrowMut(vn);
+        x.mtime_ns = now;
+    }
+    mutex_unlock(lockOf(vn));
+    return n;
+}
+
+/// Safety: `f` is live; `buf` holds `len` bytes; no lock held.
+@export("file_read")
+unsafe fn read(f: *mut file, buf: *mut void, len: usize) -> i64 {
+    if (isStream(vnOf(f))) {
+        return pread(f, buf, len, 0); // no position, and no lock a waiting read could hold
+    }
+    mutex_lock(fileLock(f));
+    let n = pread(f, buf, len, posOf(f));
+    if (n > 0) {
+        setPos(f, posOf(f) + truncate<u64>(n));
+    }
+    mutex_unlock(fileLock(f));
+    return n;
+}
+
+/// Safety: `f` is live; `buf` holds `len` bytes; no lock held.
+@export("file_write")
+unsafe fn write(f: *mut file, buf: *void, len: usize) -> i64 {
+    if (isStream(vnOf(f))) {
+        return pwrite(f, buf, len, 0);
+    }
+    throttle(f);
+    mutex_lock(fileLock(f));
+    var off = posOf(f);
+    if ((flagsOf(f) & COSMO_O_APPEND) != 0) {
+        off = Ptr.toBorrow(vnOf(f) as *vnode).size;
+    }
+    let n = pwriteHeld(f, buf, len, off);
+    if (n > 0) {
+        setPos(f, off + truncate<u64>(n));
+    }
+    mutex_unlock(fileLock(f));
+    return n;
+}
+
+const INT64_MAX: i64 = 0x7FFFFFFFFFFFFFFF;
+
+/// Safety: `f` is live; no lock held.
+@export("file_seek")
+unsafe fn seek(f: *mut file, off: i64, whence: i32) -> i64 {
+    if (isStream(vnOf(f))) {
+        return -ESPIPE as i64;
+    }
+    mutex_lock(fileLock(f));
+    var base: i64 = 0;
+    if (whence == COSMO_SEEK_SET) {
+        base = 0;
+    } else if (whence == COSMO_SEEK_CUR) {
+        base = truncate<i64>(posOf(f));
+    } else if (whence == COSMO_SEEK_END) {
+        base = truncate<i64>(Ptr.toBorrow(vnOf(f) as *vnode).size);
+    } else {
+        mutex_unlock(fileLock(f));
+        return -EINVAL as i64;
+    }
+    if (off > INT64_MAX - base || base + off < 0) {
+        mutex_unlock(fileLock(f));
+        return -EINVAL as i64;
+    }
+    setPos(f, truncate<u64>(base + off));
+    let pos = truncate<i64>(posOf(f));
+    mutex_unlock(fileLock(f));
+    return pos;
+}
+
+/// Safety: `f` is live; `st` writable; no vnode lock held.
+@export("file_stat")
+unsafe fn stat(f: *mut file, st: *mut cosmo_stat) -> i32 {
+    let vn = vnOf(f);
+    mutex_lock(lockOf(vn));
+    vnode_stat(vn, st);
+    mutex_unlock(lockOf(vn));
+    return 0;
+}
+
+/// f->lock held. A write-back failure recorded since this file last heard -- this attempt's own (just recorded by
+/// pagecache_sync) or a neighbour's -- is reported once: the file advances to the current sequence as it reports, so
+/// the next successful call returns 0.
+/// Safety: `f` is live, its lock held.
+unsafe fn reportOnce(f: *mut file, rcIn: i32) -> i32 {
+    var err: i32 = 0;
+    var now: u32 = 0;
+    let newer = pagecache_error_since(pcOf(vnOf(f)), Ptr.toBorrow(f as *file).wb_seq_seen, borrow mut err as *mut i32,
+        borrow mut now as *mut u32);
+    {
+        let x = Ptr.toBorrowMut(f);
+        x.wb_seq_seen = now;
+    }
+    return if (rcIn == 0 && newer) err else rcIn;
+}
+
+/// Safety: `f` is live; no lock held.
+@export("file_sync")
+unsafe fn sync(f: *mut file) -> i32 {
+    let vn = vnOf(f);
+    var rc: i32 = 0;
+    mutex_lock(fileLock(f)); // before vn->lock: the order every file operation uses
+    mutex_lock(lockOf(vn));
+    if (kindOf(vn) == VNODE_REG) {
+        rc = pagecache_sync(vn);
+    }
+    let ops = opsOf(vn);
+    if (rc == 0 && !Ptr.toBorrow(ops).sync.isNull()) {
+        rc = Ptr.toBorrow(ops).sync(vn);
+    }
+    mutex_unlock(lockOf(vn));
+    if (kindOf(vn) == VNODE_REG) {
+        rc = reportOnce(f, rc);
+    }
+    mutex_unlock(fileLock(f));
+    return rc;
+}
+
+/// Safety: `f` is live; no lock held.
+@export("file_flush")
+unsafe fn flush(f: *mut file) -> i32 {
+    let vn = vnOf(f);
+    if (kindOf(vn) != VNODE_REG) {
+        return 0;
+    }
+    var rc: i32 = 0;
+    mutex_lock(fileLock(f));
+    mutex_lock(lockOf(vn));
+    if (Ptr.toBorrow(vn as *vnode).pc.nr_dirty != 0 && !Ptr.toBorrow(opsOf(vn)).writepage.isNull()) {
+        rc = pagecache_sync(vn);
+    }
+    mutex_unlock(lockOf(vn));
+    rc = reportOnce(f, rc);
+    mutex_unlock(fileLock(f));
+    return rc;
+}
+
+// --- listing a directory --------------------------------------------------------------------------------------------
+
+/// What one readdir has filled.
+struct ReaddirCtx {
+    buf: *mut u8;
+    len: usize;
+    used: usize;
+    emitted: u32;
+    /// The first entry did not fit.
+    tooSmall: bool;
+}
+
+/// One entry into the caller's buffer, as a cosmo_dirent of `reclen` bytes, 8-aligned, the name NUL-terminated: 0, or
+/// 1 when it does not fit (the position stays before it).
+/// Safety: `arg` is the ReaddirCtx of a file_readdir in progress; `name` holds `len` bytes.
+@export("vfs_readdir_emit")
+unsafe fn emit(arg: *mut void, name: *CChar, len: usize, ino: u64, kind: u32) -> i32 {
+    let c = Ptr.toBorrowMut(arg as *mut ReaddirCtx);
+    let reclen = (DIRENT_SIZE + len + 1 + 7) & (7 ^ 0xFFFFFFFFFFFFFFFF);
+    if (c.used + reclen > c.len) {
+        if (c.emitted == 0) {
+            c.tooSmall = true;
+        }
+        return 1; // buffer full: stop, position stays before this entry
+    }
+    let d = c.buf.add(c.used);
+    let _ = memset(d as *mut void, 0, reclen);
+    {
+        let rec = Ptr.toBorrowMut(d as *mut cosmo_dirent);
+        rec.ino = ino;
+        rec.reclen = truncate<u16>(reclen);
+        rec.kind = truncate<u8>(kind);
+        rec.namelen = truncate<u8>(len);
+    }
+    let _ = memcpy(d.add(DIRENT_NAME) as *mut void, name as *void, len);
+    c.used += reclen;
+    c.emitted += 1;
+    return 0;
+}
+
+/// Safety: `f` is live; `buf` holds `len` bytes; no lock held.
+@export("file_readdir")
+unsafe fn readdir(f: *mut file, buf: *mut void, len: usize) -> i64 {
+    let vn = vnOf(f);
+    if (kindOf(vn) != VNODE_DIR) {
+        return -ENOTDIR as i64;
+    }
+    if (!vfs_floor_has_readdir(vn as *vnode)) {
+        return -ENOTSUP as i64;
+    }
+    if (len < DIRENT_SIZE + 2) {
+        return -EINVAL as i64;
+    }
+    var c = ReaddirCtx { buf: buf as *mut u8, len: len, used: 0, emitted: 0, tooSmall: false };
+    mutex_lock(fileLock(f));
+    mutex_lock(lockOf(vn));
+    var pos = posOf(f);
+    let rc = vfs_floor_readdir(vn, borrow mut pos as *mut u64, borrow mut c as *mut ReaddirCtx as *mut void);
+    mutex_unlock(lockOf(vn));
+    if (rc == 0) {
+        setPos(f, pos);
+    }
+    mutex_unlock(fileLock(f));
+    if (rc != 0) {
+        return rc as i64;
+    }
+    if (c.used == 0 && c.tooSmall) {
+        return -EINVAL as i64; // the next entry needs a larger buffer
+    }
+    return truncate<i64>(c.used);
+}

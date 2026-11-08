@@ -192,6 +192,9 @@ PORTS = [
     ("kernel-services/vfs/vfs_walk.cee", "kernel-services/vfs/vfs_walk.c",
      "The VFS's path walk: permissions, attributes and owners, links expanded, lookups and an open's walk (vfs.h)",
      None, True),
+    ("kernel-services/vfs/vfs_file.cee", "kernel-services/vfs/vfs_file.c",
+     "The VFS's open files: the object, reads and writes, streams, seeks, syncs and flushes, listings and fills "
+     "(vfs.h)", None, True),
     ("kernel-services/vfs/fsctl.cee", "kernel-services/vfs/fsctl.c",
      "/dev/fsctl: mount listing, checks, scrubs, snapshots, pools and keys, and /proc/mounts (vfs.h, fsctl.h)", None,
      True),
