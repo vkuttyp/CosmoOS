@@ -52,35 +52,12 @@ void vfs_mount_orphaned(struct mount *mnt);
 void vfs_mount_detach(struct mount *mnt);
 
 /* Tear down every orphan nothing uses any more (vfs_mount.cee; its reaper
- * thread calls it, and a test may): how many. vnode_put's nudge to it. */
+ * thread calls it, and a test may): how many. */
 unsigned vfs_mount_reap_orphans(void);
-void vfs_mount_orphan_kick(void);
 
 /* The held-walk seam's walk half (vfs_vnode.cee; a release build's stand-in
  * in vfs_floor.c): 0 to proceed, -EINTR if the held wait was killed.
  * `start` is a relative walk's directory, read and not yet referenced. */
 int vfs_cwd_hold_walk(struct vnode *start);
-
-/* The mount covering `dir` in any namespace, or in `ns`; whether `vn`,
- * which may be one of the two directories a rename holds, is a mountpoint
- * (vfs_mount.cee). The caller holds dir->lock for the first two. */
-struct mount_ns;
-struct mount *vfs_covering_mount(const struct vnode *dir);
-struct mount *vfs_covering_mount_ns(const struct vnode *dir, const struct mount_ns *ns);
-bool vfs_entry_is_mountpoint(struct vnode *vn, struct vnode *held1, struct vnode *held2);
-
-/* The walk to the parent of `path`'s last component, which is copied into
- * `namebuf` (VFS_NAME_MAX + 1 bytes; empty for the root): *parent is
- * referenced on success (vfs_walk.cee). Whether `name` is "." or "..". */
-int vfs_walk_parent(struct vnode *start, const char *path, char *namebuf, struct vnode **parent, size_t *last_len,
-                    bool *trailing_slash);
-bool vfs_dot_name(const char *name, size_t len);
-
-/* The files the open's walk makes (vfs_file.cee): a file for `vn` (taking
- * the reference), its open hook run (on refusal the file is dropped);
- * whether a regular file's text is executing (vn->lock held). */
-struct file *vfs_file_alloc(struct vnode *vn, unsigned flags);
-int vfs_file_run_open(struct file *f);
-bool vfs_text_busy_locked(struct vnode *vn);
 
 #endif /* VFS_INTERNAL_H */

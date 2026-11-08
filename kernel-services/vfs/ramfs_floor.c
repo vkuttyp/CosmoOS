@@ -35,10 +35,7 @@ int ramfs_create(struct vnode *dir, const char *name, size_t len, uint32_t mode,
 int ramfs_mkdir(struct vnode *dir, const char *name, size_t len, uint32_t mode, struct vnode **out);
 int ramfs_mknod(struct vnode *dir, const char *name, size_t len, uint32_t mode, uint32_t type, struct vnode **out);
 
-/* mknod's type is an enum vnode_type, which a CeeSafe function cannot
- * spell: the table's entry has the enum, and passes it on as the integer
- * it is (a call through a pointer of another type is what UBSan's
- * function check refuses, CI's clang 19, 2026-11-08). */
+/* mknod's enum vnode_type, which a CeeSafe function cannot spell (UBSan's function check). */
 static int ramfs_mknod_op(struct vnode *dir, const char *name, size_t len, uint32_t mode, enum vnode_type type,
                           struct vnode **out)
 {

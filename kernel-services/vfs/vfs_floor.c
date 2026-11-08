@@ -121,8 +121,7 @@ int vfs_floor_readdir(struct vnode *vn, uint64_t *pos, void *ctx)
     return vn->ops->readdir(vn, pos, readdir_emit, ctx);
 }
 
-/* A filesystem's mknod takes an enum vnode_type: called here, with the
- * type vfs_dir.cee passes as the integer it is. */
+/* A filesystem's mknod, whose type takes an enum vnode_type. */
 int vfs_floor_mknod(struct vnode *dir, const char *name, size_t len, uint32_t mode, uint32_t type,
                     struct vnode **out);
 int vfs_floor_mknod(struct vnode *dir, const char *name, size_t len, uint32_t mode, uint32_t type,
