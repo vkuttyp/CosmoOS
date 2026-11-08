@@ -15,7 +15,7 @@
 //
 // The mounts, the commands and the records stay C (vfs.h, cosmofs.h, fsctl.h). fsctl_floor.c keeps a file's state, a
 // struct round a struct mutex whose size the build's lock debugging decides, the operation table, and the spinlock
-// /proc/mounts is rendered under; vfs.c's mount table lock and root mount come from mountns_floor.c.
+// /proc/mounts is rendered under; the VFS's mount table lock and root mount come from mountns_floor.c.
 
 @header("kernel/blk.h", "kernel/cosmofs.h", "kernel/cred.h", "kernel/errno.h", "kernel/kmalloc.h", "kernel/log.h",
     "kernel/mountns.h", "kernel/mutex.h", "kernel/spinlock.h", "kernel/string.h", "kernel/vfs.h",
@@ -326,7 +326,7 @@ extern "C" {
     fn blk_find(name: *CChar) -> *mut blkdev;
     fn ramfs_mkchr(path: *CChar, mode: u32, ops: *chrdev_ops, priv: *mut void, out: *mut *mut vnode) -> i32;
 
-    // mountns_floor.c: vfs.c's mount table lock and root mount (vfs_internal.h).
+    // mountns_floor.c: the VFS's mount table lock and root mount (vfs_internal.h).
     fn mountns_floor_mounts_lock() -> *mut mutex;
     fn mountns_floor_root() -> *mut mount;
 

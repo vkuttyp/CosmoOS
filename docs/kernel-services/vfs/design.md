@@ -460,7 +460,7 @@ native `SYS_link` ask.
 
 ## Boot composition
 
-Roadmap M2 moved two decisions out of the VFS (`vfs.c` names no
+Roadmap M2 moved two decisions out of the VFS (`vfs_*.cee` name no
 filesystem): which filesystems exist, and which is the root. Both are
 made in `kernel/core/bootfs.c`, called from `kernel_main`:
 

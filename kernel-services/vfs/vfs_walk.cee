@@ -58,7 +58,7 @@ extern "C" {
     fn vfs_current_root() -> *mut vnode;
     fn vfs_cwd_hold_walk(start: *mut vnode) -> i32;
     fn vfs_covering_mount_ns(dir: *vnode, ns: *mount_ns) -> *mut mount;
-    // vfs.c's files, until they are this tree's
+    // vfs_file.cee's
     fn vfs_file_alloc(vn: *mut vnode, flags: u32) -> *mut file;
     fn vfs_file_run_open(f: *mut file) -> i32;
     fn vfs_text_busy_locked(vn: *mut vnode) -> bool;

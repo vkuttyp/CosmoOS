@@ -1,10 +1,11 @@
 /*
- * vfs_internal.h - What mountns.cee may touch inside vfs.c.
+ * vfs_internal.h - What the VFS's own files may touch of one another.
  *
- * The mount table is private to vfs.c and stays that way; this is the
- * narrow surface the namespace code needs, and it exists so that code
- * can live in its own file without the mount table becoming public.
- * Nothing outside kernel-services/vfs/ includes this.
+ * The mount table is private to the VFS and stays that way: its data is
+ * vfs_floor.c's, vfs_mount.cee changes it, and mountns.cee and fsctl
+ * read it through this narrow surface. The rest is what the VFS's
+ * CeeSafe parts (vfs_*.cee) call between their files. Nothing outside
+ * kernel-services/vfs/ includes this.
  */
 
 #ifndef VFS_INTERNAL_H

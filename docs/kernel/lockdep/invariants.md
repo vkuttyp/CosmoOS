@@ -47,9 +47,9 @@ if it ever can, it gets one.
 
 | Annotation | Site | Justification |
 |---|---|---|
-| `VNODE_NESTED_CHILD` on `victim->lock` | `vfs.c` `remove_entry` | the parent is locked first; the child cannot be a parent of anything locked here |
+| `VNODE_NESTED_CHILD` on `victim->lock` | `vfs_dir.cee` `removeEntry` | the parent is locked first; the child cannot be a parent of anything locked here |
 | `VNODE_NESTED_CHILD` on `replaced->lock` | `ramfs.cee` `ramfs_rename` | both parents are locked (subclass 0 and 1); the replaced entry is a child of the second |
-| `VNODE_NESTED_PARENT2` on the second parent | `vfs.c` `vfs_rename` | under `rename_lock` the ancestor is locked first; two unrelated directories are locked in address order, which no other path contradicts (parent-then-child needs an ancestry; other renames are excluded) |
+| `VNODE_NESTED_PARENT2` on the second parent | `vfs_dir.cee` `vfs_rename` | under `rename_lock` the ancestor is locked first; two unrelated directories are locked in address order, which no other path contradicts (parent-then-child needs an ancestry; other renames are excluded) |
 | subclass 1 on the second futex bucket | `futex.c` `futex_requeue` (milestone 10) | the two buckets are locked in address order, and no other path takes two futex bucket locks |
 | subclass `nests` on `epoll-ready` and on the `epoll` wait queue | `epoll.c` `hook_wake` / `set_wake_nested` (the epoll-callback unit) | a set's wake runs the callbacks of the sets it is a member of, each taking its own ready-list lock and queue lock inside the inner set's queue lock; the subclass is the chain depth below the set, recorded by the inner set under its queue lock while it wakes (Linux's `ep_poll_safewake`), so a chain of five sets uses subclasses 0..4 and never two equal ones; the loop check refuses a loop (which would be an unbounded chain) and a chain longer than `EPOLL_MAX_NESTS` (5, Linux's limit and the subclass count) |
 

@@ -168,7 +168,7 @@ expose them (`docs/kernel/syscall/api.md`).
 - Concurrency: CAS without the lock while the count is above 1; the
   caller of `kobject_release_final` must be able to block. Panics on
   underflow, and `kobject_release_final` on a nonzero count.
-- Caller today: `vnode_put` (`kernel-services/vfs/vfs.c`).
+- Caller today: `vnode_put` (`kernel-services/vfs/vfs_vnode.cee`).
 
 ### `uint32_t kobject_refcount(const struct kobject *obj)`
 Acquire load; for tests and diagnostics only.

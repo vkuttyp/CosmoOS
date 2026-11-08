@@ -1667,6 +1667,27 @@ fault-injection seams and the release builds' stand-ins for the tests
 that need injection or the AIO test body, and asserts the constants and
 stack-slot sizes.
 
+`vfs_*.cee`, the VFS core, ported out of `vfs.c` (now gone) in five
+parts against one host test: `tests/host/test_vfs.c` runs twelve epochs
+of random histories on a filesystem of the test's own whose every
+operation fails now and then, with the real mount namespaces, plus
+scripted cases for what the histories reach too rarely
+(0x4170262f9ea8d3cf, clang and gcc; every line but five places no
+single thread reaches). `vfs_vnode.cee` (vnodes, the held-walk seam),
+`vfs_mount.cee` (registry, mounts, the root switch, sync, device claims,
+init, formats, passes), `vfs_walk.cee` (permissions, the walk, lookups,
+an open's walk), `vfs_file.cee` (open files) and `vfs_dir.cee` (the
+namespace operations). `vfs_floor.c` keeps the mount table and its
+locks, the registry's and claims' lists, the kobject types (the file's
+io type among them), the seam's lock, queues and record, the waits the
+C wrote as macros, the call into readdir with its enum-typed callback,
+a debug build's poisoning of a freed vnode, the release builds'
+stand-ins for the seam, and the asserted constants. The test found two
+kernel bugs the port keeps as they are: `vfs_umount_at` locks the
+mountpoint of an old root that has none, and the last holder of a mount
+namespace unmounts a mount only it sees with files open on it or
+mounts nested on it.
+
 Size: about 4.5x.
 
 ### SA8 The Linux personality and the system-call layer

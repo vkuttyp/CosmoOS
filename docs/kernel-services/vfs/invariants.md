@@ -4,7 +4,7 @@ Rules that must not be broken without changing this document and the
 code together. Each names how it is checked today and what is not yet
 covered.
 
-**V1. The VFS depends on no filesystem.** `kernel-services/vfs/vfs.c`
+**V1. The VFS depends on no filesystem.** `kernel-services/vfs/vfs_*.cee`
 and `pagecache.cee` include no filesystem header and call filesystems only
 through `struct fs_type` and `struct vnode_ops`; ramfs is registered by
 name like any other filesystem. Check: review of includes; `vfs-ramfs`

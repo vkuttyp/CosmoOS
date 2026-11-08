@@ -14,7 +14,7 @@ storage pool.
    user process        open/read/write/stat/mkdir/unlink/rename/getdents/lseek/sync/mount
         │              (kernel/syscall/native.c → handles → struct file)
         ▼
-   kernel-services/vfs/     vfs.c        mounts, path walk, vnodes, files, the fs_type registry
+   kernel-services/vfs/     vfs_*.cee    mounts, path walk, vnodes, files, the fs_type registry
                             pagecache.cee  per-vnode page cache: read-through, dirty pages, writeback
                             ramfs.cee    in-memory filesystem (the root, /tmp, /boot from the archive)
         │

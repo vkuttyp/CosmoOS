@@ -84,7 +84,7 @@ live-object count is the same before and after.
 address 0x68: `ramfs_new` allocates the vnode and then its private data,
 and when the second allocation failed it dropped a vnode whose `ops` was
 still NULL; `vnode_release` called `ops->writepage`. `vnode_release` now
-guards both calls on `ops` (`kernel-services/vfs/vfs.c`); the file loop
+guards both calls on `ops` (`kernel-services/vfs/vfs_vnode.cee`); the file loop
 is the regression test (attempt 2 hits exactly that allocation).
 
 `fault-blk`:

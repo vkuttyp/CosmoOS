@@ -71,6 +71,10 @@ _Static_assert(sizeof(struct cosmo_dirent) == 16 && offsetof(struct cosmo_dirent
                    sizeof(((struct file *)0)->flags) == 4,
                "vfs_file.cee's dirent layout and field widths");
 
+_Static_assert(EXDEV == 18 && EMLINK == 31 && VNODE_NESTED_PARENT2 == 1 && MOUNT_CACHE_IS_STORE == 2 &&
+                   VFS_LINK_MAX == 65000 && PAGE_SIZE == 4096,
+               "vfs_dir.cee's errno.h, lockdep.h, vfs.h and types.h values");
+
 /* --- the file's object, a directory's listing, the driver's lock --------- */
 
 void vfs_file_release(struct kobject *obj);

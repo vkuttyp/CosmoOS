@@ -55,7 +55,7 @@ every size from namespaces whose paths need escaping. Every call, result and byt
 copy as it is freed (its key wiped), are in the digest; every mount and device reference is given back. Every line
 runs; clang and gcc give the same digest, for the C and for the port.
 
-`tests/host/test_vfs.c` holds the VFS core (`vfs.c`, roadmap 2.0 SA7) to a digest recorded from the C over twelve
+`tests/host/test_vfs.c` holds the VFS core (`vfs_*.cee`, roadmap 2.0 SA7) to a digest recorded from the `vfs.c` it replaced, over twelve
 epochs of random histories, each from a fresh root, on a filesystem of the test's own whose every operation fails now
 and then, with the real mount namespaces: filesystems registered, mounted and unmounted from devices whose
 partitions overlap, in two namespaces, with maintenance passes held across an unmount's drain; paths of every shape
@@ -68,7 +68,8 @@ call into the kernel, every result, name, inode number and log line are in the d
 allocation is given back after each epoch. Every line runs but five places no single thread reaches: the swapper's
 second look under its lock and a link target losing its last name (races), an unmount whose own namespace is dropped
 by another holder during its drain, the over-long piece a release build's filled read refuses (a debug build's
-assertion stops first) and an exit of `open_walk` that holds no base. clang and gcc give the same digest.
+assertion stops first) and an exit of `open_walk` that holds no base. clang and gcc give the same digest, for the C
+and for the port.
 
 `tests/host/test_mountns.c` holds mount namespaces (`mountns.cee`, roadmap 2.0 SA7) to a digest recorded from the C,
 over random histories: mounts made and seen by some namespaces, namespaces copied from one another while the

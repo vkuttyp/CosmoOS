@@ -127,7 +127,7 @@ drops by CAS without the lock while the count is above 1 and takes
 held only when that drop reached 0 under the lock, so the caller unlinks
 and then calls `kobject_release_final` after unlocking. A lookup under
 the same lock may then use a plain `kobject_get`. `vnode_put`
-(`kernel-services/vfs/vfs.c`, the vnode hash under `mnt->lock`) is the
+(`kernel-services/vfs/vfs_vnode.cee`, the vnode hash under `mnt->lock`) is the
 caller today. The process table uses the other form: a process leaves
 it inside its release, so `process_lookup` uses `kobject_tryget`.
 

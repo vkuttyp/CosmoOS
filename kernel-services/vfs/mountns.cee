@@ -9,7 +9,7 @@
 // it, and a dying namespace asks itself what it can see.
 //
 // The mounts, the namespaces and their refs stay C (vfs.h, mountns.h). mountns_floor.c keeps what C names as data:
-// the initial namespace, a static whose list head points into itself, and vfs.c's mount table, its lock and the
+// the initial namespace, a static whose list head points into itself, and the VFS's mount table, its lock and the
 // root mount (vfs_internal.h), which it hands over by address.
 
 @header("kernel/errno.h", "kernel/kmalloc.h", "kernel/log.h", "kernel/mountns.h", "kernel/panic.h",

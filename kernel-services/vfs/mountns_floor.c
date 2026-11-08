@@ -1,7 +1,7 @@
 /*
  * mountns_floor.c - The C under mountns.cee (roadmap 2.0 SA7): the
  * namespace the system boots in, a static whose list head points into
- * itself; vfs.c's mount table, its lock and the root mount
+ * itself; the VFS's mount table, its lock and the root mount
  * (vfs_internal.h), C globals handed over by address; and the values
  * mountns.cee writes as its own constants, asserted. Mount namespaces
  * themselves are CeeSafe (mountns.cee, generated into mountns.c).
