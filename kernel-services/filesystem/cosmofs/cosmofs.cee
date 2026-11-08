@@ -8,7 +8,7 @@
 //
 // struct cfs, the vnodes, the entries and the snapshot entries stay C (cosmofs_internal.h, cosmofs_format.h). The
 // entry helpers cosmofs_format.h has as inline functions -- the free run, the put and the clear -- are written out
-// here. cosmofs_floor.c keeps the vnode operation tables.
+// here. The vnode operation tables are cosmofs_vnode.cee's.
 
 @header("kernel/vfs.h", "kernel/kmalloc.h", "kernel/mutex.h", "kernel/string.h", "cosmofs_internal.h")
 extern "C" {

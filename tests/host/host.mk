@@ -238,16 +238,14 @@ HOST_CFSFILE_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/cosm
 	kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_cfsfile.c
 # cosmofs's vnodes: the cache, the inodes and the operation tables are the test's.
 HOST_CFSVNODE_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/cosmofs_vnode.c \
-	kernel-services/filesystem/cosmofs/cosmofs_vnode_floor.c \
 	kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_cfsvnode.c
 # cosmofs's directory blocks, .snapshots and tree locks with the real entry decoders: the rest is the test's.
 HOST_CFSDIRBLK_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/cosmofs.c \
-	kernel-services/filesystem/cosmofs/cosmofs_floor.c \
 	kernel-services/filesystem/cosmofs/cfsparse.c kernel/core/crc32c.c kernel/ceesafe/ceesafe_rt_core.c \
 	tests/host/ceesafe_panic.c tests/host/test_cfsdirblk.c
 # cosmofs's directory operations with the real directory helpers and entry decoders: the rest is the test's.
 HOST_CFSDIR_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/cosmofs_dir.c \
-	kernel-services/filesystem/cosmofs/cosmofs.c kernel-services/filesystem/cosmofs/cosmofs_floor.c \
+	kernel-services/filesystem/cosmofs/cosmofs.c \
 	kernel-services/filesystem/cosmofs/cfsparse.c kernel/core/crc32c.c kernel/ceesafe/ceesafe_rt_core.c \
 	tests/host/ceesafe_panic.c tests/host/test_cfsdir.c
 HOST_CFSPARSE_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/cfsparse.c kernel/core/crc32c.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_cfsparse.c

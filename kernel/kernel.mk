@@ -215,7 +215,6 @@ KERNEL_GENERIC_SRCS := \
 	kernel-services/filesystem/cosmofs/cosmofs_file.c \
 	kernel-services/filesystem/cosmofs/cosmofs_file_floor.c \
 	kernel-services/filesystem/cosmofs/cosmofs_vnode.c \
-	kernel-services/filesystem/cosmofs/cosmofs_vnode_floor.c \
 	kernel-services/filesystem/cosmofs/cosmofs_dir.c \
 	kernel-services/filesystem/cosmofs/cosmofs_reach.c \
 	kernel-services/filesystem/cosmofs/cosmofs_rollback.c \
@@ -229,7 +228,6 @@ KERNEL_GENERIC_SRCS := \
 	kernel-services/filesystem/cosmofs/cosmofs_crypt.c \
 	kernel-services/filesystem/cosmofs/cosmofs_crypt_floor.c \
 	kernel-services/filesystem/cosmofs/cosmofs.c \
-	kernel-services/filesystem/cosmofs/cosmofs_floor.c \
 	kernel-services/filesystem/cosmofs/cosmofstest_lib.c \
 	kernel-services/filesystem/cosmofs/cosmofstest_lib_floor.c \
 	kernel-services/filesystem/cosmofs/cosmofstest_media.c \

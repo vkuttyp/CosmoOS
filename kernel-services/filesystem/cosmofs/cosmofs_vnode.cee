@@ -6,13 +6,35 @@
 // buffer cache always holds the complete pre-commit state and vnode eviction has nothing to flush but pages.
 //
 // struct cfs, the vnode and its state stay C (cosmofs_internal.h, kernel/vfs.h). A vnode's type, a field whose name
-// CeeSafe reserves, is read and written at its offset, which the test checks. cosmofs_vnode_floor.c keeps the
-// addresses of the operation tables, and the inode's fault seam.
+// CeeSafe reserves, is read and written at its offset, which the test checks. The operation tables are this file's,
+// C data cosmofs_internal.h declares `extern const` (ADR 0080 §3.2).
 
-@header("kernel/vfs.h", "kernel/kmalloc.h", "cosmofs_internal.h")
+@header("kernel/faultinject.h", "kernel/vfs.h", "kernel/kmalloc.h", "cosmofs_internal.h")
 extern "C" {
     struct mount;
-    struct vnode_ops;
+    enum vnode_type: u32;
+    /// vfs.h's operations, the members the tables below set.
+    struct vnode_ops {
+        lookup: extern "C" fn(*mut vnode, *CChar, usize, *mut *mut vnode) -> i32;
+        create: extern "C" fn(*mut vnode, *CChar, usize, u32, *mut *mut vnode) -> i32;
+        symlink: extern "C" fn(*mut vnode, *CChar, usize, *CChar, *mut *mut vnode) -> i32;
+        readlink: extern "C" fn(*mut vnode, *mut CChar, usize) -> i32;
+        mkdir: extern "C" fn(*mut vnode, *CChar, usize, u32, *mut *mut vnode) -> i32;
+        unlink: extern "C" fn(*mut vnode, *CChar, usize, *mut vnode) -> i32;
+        link: extern "C" fn(*mut vnode, *CChar, usize, *mut vnode) -> i32;
+        rmdir: extern "C" fn(*mut vnode, *CChar, usize, *mut vnode) -> i32;
+        rename: extern "C" fn(*mut vnode, *CChar, usize, *mut vnode, *mut vnode, *CChar, usize, *mut vnode) -> i32;
+        readdir: extern "C" fn(*mut vnode, *mut u64, extern "C" fn(*mut void, *CChar, usize, u64, vnode_type) -> i32,
+            *mut void) -> i32;
+        readpage: extern "C" fn(*mut vnode, u64, *mut void) -> i32;
+        writepage: extern "C" fn(*mut vnode, u64, *void) -> i32;
+        writepages: extern "C" fn(*mut vnode, u64, **mut void, u32, *mut u32) -> i32;
+        dirty_check: extern "C" fn(*mut vnode, u64, u32) -> i32;
+        truncate: extern "C" fn(*mut vnode, u64) -> i32;
+        sync: extern "C" fn(*mut vnode) -> i32;
+        evict: extern "C" fn(*mut vnode);
+        setattr: extern "C" fn(*mut vnode) -> i32;
+    }
     struct vnode {
         ino: u64;
         mode: u32;
@@ -61,10 +83,66 @@ extern "C" {
     fn cfs_inode_write(fs: *mut cfs, ino: u64, inode: *cfs_inode) -> i32;
     fn cfs_inode_prepare(fs: *mut cfs, ino: u64) -> i32;
     fn cfs_fail(fs: *mut cfs, rc: i32);
-    /// cosmofs_vnode_floor.c: the operations of a vnode of `type`, and the inode's fault seam.
-    fn cfs_vnode_floor_ops(kind: u32) -> *vnode_ops;
-    fn cfs_vnode_floor_inode_nomem() -> bool;
+    // The operations the tables name: cosmofs_dir.cee's and cosmofs_file.cee's exports.
+    fn cfs_lookup(dir: *mut vnode, name: *CChar, len: usize, out: *mut *mut vnode) -> i32;
+    fn cfs_create(dir: *mut vnode, name: *CChar, len: usize, mode: u32, out: *mut *mut vnode) -> i32;
+    fn cfs_symlink(dir: *mut vnode, name: *CChar, len: usize, target: *CChar, out: *mut *mut vnode) -> i32;
+    fn cfs_readlink(vn: *mut vnode, buf: *mut CChar, len: usize) -> i32;
+    fn cfs_mkdir(dir: *mut vnode, name: *CChar, len: usize, mode: u32, out: *mut *mut vnode) -> i32;
+    fn cfs_link(dir: *mut vnode, name: *CChar, len: usize, target: *mut vnode) -> i32;
+    fn cfs_unlink(dir: *mut vnode, name: *CChar, len: usize, victim: *mut vnode) -> i32;
+    fn cfs_rmdir(dir: *mut vnode, name: *CChar, len: usize, victim: *mut vnode) -> i32;
+    fn cfs_rename(odir: *mut vnode, oname: *CChar, olen: usize, victim: *mut vnode, ndir: *mut vnode, nname: *CChar,
+        nlen: usize, replaced: *mut vnode) -> i32;
+    fn cfs_readdir(dir: *mut vnode, pos: *mut u64,
+        cb: extern "C" fn(*mut void, *CChar, usize, u64, vnode_type) -> i32, arg: *mut void) -> i32;
+    fn cfs_readpage(vn: *mut vnode, index: u64, buf: *mut void) -> i32;
+    fn cfs_writepage(vn: *mut vnode, index: u64, buf: *void) -> i32;
+    fn cfs_writepages(vn: *mut vnode, index: u64, pages: **mut void, n: u32, done: *mut u32) -> i32;
+    fn cfs_dirty_check(vn: *mut vnode, index: u64, dirty: u32) -> i32;
+    fn cfs_truncate(vn: *mut vnode, size: u64) -> i32;
+    fn cfs_vnode_sync(vn: *mut vnode) -> i32;
+    fn cfs_evict(vn: *mut vnode);
+    fn cfs_vnode_setattr(vn: *mut vnode) -> i32;
+    /// faultinject.h's seam (cosmofs-nomem): the inode's map path cannot be had.
+    enum fi_kind: u32;
+    const FI_COSMOFS_INODE_NOMEM: fi_kind = 23;
+    fn faultinject_should_fail(kind: fi_kind) -> bool;
 }
+
+/// A directory's operations, `extern const struct vnode_ops cfs_dir_ops` (cosmofs_internal.h).
+@export("cfs_dir_ops")
+static DIR_OPS: vnode_ops = vnode_ops {
+    lookup: cfs_lookup,
+    create: cfs_create,
+    symlink: cfs_symlink,
+    mkdir: cfs_mkdir,
+    unlink: cfs_unlink,
+    link: cfs_link,
+    rmdir: cfs_rmdir,
+    rename: cfs_rename,
+    readdir: cfs_readdir,
+    sync: cfs_vnode_sync,
+    evict: cfs_evict,
+    setattr: cfs_vnode_setattr,
+};
+
+/// A regular file's operations.
+@export("cfs_file_ops")
+static FILE_OPS: vnode_ops = vnode_ops {
+    readpage: cfs_readpage,
+    writepage: cfs_writepage,
+    writepages: cfs_writepages,
+    dirty_check: cfs_dirty_check,
+    truncate: cfs_truncate,
+    sync: cfs_vnode_sync,
+    evict: cfs_evict,
+    setattr: cfs_vnode_setattr,
+};
+
+/// A link's: never a page, its target read from its block directly; setattr is lchown.
+@export("cfs_lnk_ops")
+static LNK_OPS: vnode_ops = vnode_ops { readlink: cfs_readlink, evict: cfs_evict, setattr: cfs_vnode_setattr };
 
 // ---- errno.h, vfs.h and cosmofs_format.h values (asserted in tests/host/test_cfsvnode.c) ----
 
@@ -103,7 +181,8 @@ unsafe fn fillVnode(vn: *mut vnode, inp: *cfs_inode) {
     v.size = i.size;
     v.mtime_ns = i.mtime_ns;
     v.ctime_ns = i.ctime_ns;
-    v.ops = cfs_vnode_floor_ops(t);
+    v.ops = if (t == VNODE_DIR) borrow DIR_OPS as *vnode_ops else if (t == VNODE_LNK) borrow LNK_OPS as *vnode_ops else
+        borrow FILE_OPS as *vnode_ops;
 }
 
 /// A vnode made with state `cv` (its inode read) under key `key`, filled and put in the cache; `cv` freed if not.
@@ -218,7 +297,7 @@ unsafe fn vnodeInodeSync(fs: *mut cfs, vn: *mut vnode) -> i32 {
 @export("cfs_vnode_prepare")
 unsafe fn vnodePrepare(fs: *mut cfs, vn: *mut vnode) -> i32 {
     // The test seam (cosmofs-nomem): the inode's map path cannot be had.
-    if (cfs_vnode_floor_inode_nomem()) {
+    if (faultinject_should_fail(FI_COSMOFS_INODE_NOMEM)) {
         return -ENOMEM;
     }
     return cfs_inode_prepare(fs, Ptr.toBorrow(vn as *vnode).ino);

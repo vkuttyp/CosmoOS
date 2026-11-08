@@ -269,36 +269,6 @@ bool cfs_snapshot_find(struct cfs *fs, const char *name, struct cfs_snapshot *ou
 
 /* ---- the operations the tables name: never reached here ---- */
 
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wunused-parameter"
-#define NEVER()                                                                                                     \
-    {                                                                                                               \
-        EXPECT(false);                                                                                              \
-        return -EIO;                                                                                                \
-    }
-int cfs_lookup(struct vnode *d, const char *n, size_t l, struct vnode **o) NEVER()
-int cfs_create(struct vnode *d, const char *n, size_t l, uint32_t m, struct vnode **o) NEVER()
-int cfs_symlink(struct vnode *d, const char *n, size_t l, const char *t, struct vnode **o) NEVER()
-int cfs_readlink(struct vnode *v, char *b, size_t l) NEVER()
-int cfs_mkdir(struct vnode *d, const char *n, size_t l, uint32_t m, struct vnode **o) NEVER()
-int cfs_link(struct vnode *d, const char *n, size_t l, struct vnode *t) NEVER()
-int cfs_unlink(struct vnode *d, const char *n, size_t l, struct vnode *v) NEVER()
-int cfs_rmdir(struct vnode *d, const char *n, size_t l, struct vnode *v) NEVER()
-int cfs_rename(struct vnode *od, const char *on, size_t ol, struct vnode *v, struct vnode *nd, const char *nn,
-               size_t nl, struct vnode *r) NEVER()
-int cfs_readdir(struct vnode *d, uint64_t *p, vfs_dirent_cb cb, void *a) NEVER()
-int cfs_readpage(struct vnode *v, uint64_t i, void *b) NEVER()
-int cfs_dirty_check(struct vnode *v, uint64_t i, unsigned d) NEVER()
-int cfs_writepage(struct vnode *v, uint64_t i, const void *b) NEVER()
-int cfs_writepages(struct vnode *v, uint64_t i, void *const *p, unsigned n, unsigned *d) NEVER()
-int cfs_truncate(struct vnode *v, uint64_t s) NEVER()
-int cfs_vnode_setattr(struct vnode *v) NEVER()
-int cfs_vnode_sync(struct vnode *v) NEVER()
-void cfs_evict(struct vnode *v)
-{
-    EXPECT(false);
-}
-#pragma GCC diagnostic pop
 
 /* ---- a round ---- */
 
@@ -476,8 +446,6 @@ static void test_digest(void)
     harness_klog_min = KLOG_WARN;
     printf("  dirblk digest 0x%016llx over %u rounds\n", (unsigned long long)g_digest, ROUNDS);
     EXPECT(g_digest == DIRBLK_DIGEST);
-    EXPECT(cfs_dir_ops.lookup == cfs_lookup && cfs_file_ops.writepages == cfs_writepages &&
-           cfs_lnk_ops.readlink == cfs_readlink);
 }
 
 int main(void)
