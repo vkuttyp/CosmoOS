@@ -1,24 +1,29 @@
 // memdev.cee - /dev/null and /dev/zero (roadmap M3: a shell redirects to /dev/null, and BusyBox ash gives a background
 // job's stdin /dev/null), in CeeSafe: roadmap 2.0 SA7. tests/host/test_memdev.c holds it to the digest of the C it
 // replaced. Character devices on the ramfs /dev, like /dev/console: null reads end-of-file and swallows writes, zero
-// reads zeros and swallows writes. memdev_floor.c keeps the operation tables, C data naming the operations by address,
-// and the warning's format.
+// reads zeros and swallows writes. The operation tables are C data this file defines (ADR 0080 §3.2).
 
 @header("kernel/log.h", "kernel/string.h", "kernel/vfs.h")
 extern "C" {
     struct vnode;
-    struct chrdev_ops;
+    /// vfs.h's character device operations, the members these devices set.
+    struct chrdev_ops {
+        read: extern "C" fn(*mut vnode, u64, *mut void, usize) -> i64;
+        write: extern "C" fn(*mut vnode, u64, *void, usize) -> i64;
+        fills: bool;
+    }
     fn memset(p: *mut void, c: i32, n: usize) -> *mut void;
+    fn strlen(s: *CChar) -> usize;
     fn ramfs_mkchr(path: *CChar, mode: u32, ops: *chrdev_ops, priv: *mut void, out: *mut *mut vnode) -> i32;
-
-    // memdev_floor.c
-    fn memdev_floor_ops(which: u32) -> *chrdev_ops;
-    fn memdev_floor_warn(path: *CChar, rc: i32);
 }
 
-// memdev_floor_ops's tables.
+// The two devices' tables.
 const OPS_NULL: u32 = 0;
 const OPS_ZERO: u32 = 1;
+
+/// /dev/null's and /dev/zero's operations: zero's reads fill the buffer.
+static mut NULL_OPS: chrdev_ops = chrdev_ops { read: nullRead, write: sinkWrite };
+static mut ZERO_OPS: chrdev_ops = chrdev_ops { read: zeroRead, write: sinkWrite, fills: true };
 
 // rw-rw-rw-: anyone may read and write either device.
 const MODE: u32 = 0x1B6;
@@ -57,9 +62,16 @@ unsafe fn zeroRead(vn: *mut vnode, off: u64, buf: *mut void, len: usize) -> i64 
 /// One device in /dev, or a warning that it could not be made.
 /// Safety: `path` is a NUL-terminated string; the ramfs root exists.
 unsafe fn make(path: *CChar, which: u32) {
-    let rc = ramfs_mkchr(path, MODE, memdev_floor_ops(which), 0 as *mut void, 0 as *mut *mut vnode);
+    let ops = if (which == OPS_NULL) borrow mut NULL_OPS as *mut chrdev_ops else borrow mut ZERO_OPS as *mut chrdev_ops;
+    let rc = ramfs_mkchr(path, MODE, ops as *chrdev_ops, 0 as *mut void, 0 as *mut *mut vnode);
     if (rc != 0) {
-        memdev_floor_warn(path, rc);
+        var buffer: [u8; 96] = [0; 96];
+        var line = TextWriter.create(mut buffer[..]);
+        line.text("memdev: ");
+        line.bytes(Slice.fromRaw(path as *u8, strlen(path)));
+        line.text(": ");
+        line.signed(rc as i64);
+        KernelLog.send(LogLevel.Warn, line);
     }
 }
 
