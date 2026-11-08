@@ -472,9 +472,10 @@ unsafe fn renameLocked(odir: *mut vnode, oname: *CChar, olen: usize, ndir: *mut 
             rc = -EINVAL; // a directory may not be moved under itself
             break;
         }
+        let two = odir != ndir; // two parents to lock
         var first = odir;
-        var second = 0 as *mut vnode;
-        if (odir != ndir) {
+        var second = ndir;
+        if (two) {
             if (isAncestor(odir, ndir)) {
                 first = odir;
                 second = ndir;
@@ -489,7 +490,7 @@ unsafe fn renameLocked(odir: *mut vnode, oname: *CChar, olen: usize, ndir: *mut 
 
         // Phase 2: the parents, then the entries under them.
         mutex_lock(lockOf(first));
-        if (!second.isNull()) {
+        if (two) {
             mutex_lock_nested(lockOf(second), VNODE_NESTED_PARENT2);
         }
 
@@ -536,7 +537,7 @@ unsafe fn renameLocked(odir: *mut vnode, oname: *CChar, olen: usize, ndir: *mut 
         if (!victim.isNull()) {
             vnode_put(victim);
         }
-        if (!second.isNull()) {
+        if (two) {
             mutex_unlock(lockOf(second));
         }
         mutex_unlock(lockOf(first));
