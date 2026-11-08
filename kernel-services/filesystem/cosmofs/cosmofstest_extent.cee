@@ -3,12 +3,12 @@
 // cosmofs-extent-bound, cosmofs-extent-rebuild and cosmofs-extent-raw (CFS-32: the bound on an inode's runs, met at
 // the write and never at the commit) and cosmofs-extent-fail (CF16, CF17: a set_extent that fails leaves every mapped
 // block under its own checksum). They run in a debug build only; the shared helpers are cosmofstest_lib.cee's.
-// cosmofstest_extent_floor.c arms and clears the faults cosmofs-extent-fail injects, which only a build with
-// CONFIG_FAULTINJECT has, asserts the layout written here as constants, and is the self-tests in a build without
-// CONFIG_DEBUG.
+// The faults cosmofs-extent-fail injects, which only a build with CONFIG_FAULTINJECT has, are armed and cleared in
+// `cfg` blocks (ADR 0080 §3.3), and the layout written here as constants is the headers', which the C compiler checks.
 
-@header("kernel/blk.h", "kernel/vfs.h", "kernel/kmalloc.h", "kernel/string.h", "kernel/pagecache.h",
-    "kernel/random.h", "kernel/log.h", "kernel/cosmofs.h", "uapi/cosmo/syscall.h")
+@header("kernel/blk.h", "kernel/vfs.h", "kernel/kmalloc.h", "kernel/string.h", "kernel/pagecache.h", "kernel/random.h",
+    "kernel/log.h", "kernel/cosmofs.h", "uapi/cosmo/syscall.h", "kernel/errno.h", "kernel/faultinject.h",
+    "kernel/thread.h", "cosmofs_format.h")
 extern "C" {
     struct cosmofs_stats;
     struct blkdev;
@@ -70,26 +70,86 @@ extern "C" {
     fn cfst_fill_incompressible(buf: *mut u8, len: usize, seed: u32);
     fn cfst_engine_mount(bdp: *mut *mut blkdev, nblocks: u64, reason: *mut *CChar) -> bool;
     fn cfst_engine_unmount(bd: *mut blkdev, reason: *mut *CChar) -> bool;
-    /// cosmofstest_extent_floor.c: whether this build injects faults (CONFIG_FAULTINJECT).
-    fn cfst_extent_floor_faults() -> bool;
-    /// Fault `k` (FAIL_NOMEM or FAIL_FBIG) armed for this thread: the `every`th hit fails, `count` times.
-    fn cfst_extent_floor_set(k: u32, every: u32, count: u32);
-    /// Fault `k`'s hits since it was armed; then it is cleared.
-    fn cfst_extent_floor_clear(k: u32) -> u64;
-    /// Fault `k`'s name, as faultinject_kind_name gives it.
-    fn cfst_extent_floor_name(k: u32) -> *CChar;
+    // faultinject.h's set-extent faults, armed only in a fault-injection build (ADR 0080 §3.3).
+    struct thread;
+    struct fi_stats {
+        hits: u64;
+    }
+    enum fi_kind: u32;
+    const FI_COSMOFS_EXTENT_NOMEM: fi_kind = 20;
+    const FI_COSMOFS_EXTENT_FBIG: fi_kind = 21;
+    @cfg("CONFIG_FAULTINJECT")
+    fn faultinject_set(kind: fi_kind, every: u32, budget: u32, only: *mut thread);
+    @cfg("CONFIG_FAULTINJECT")
+    fn faultinject_clear(kind: fi_kind);
+    @cfg("CONFIG_FAULTINJECT")
+    fn faultinject_stats(kind: fi_kind, out: *mut fi_stats);
+    @cfg("CONFIG_FAULTINJECT")
+    fn faultinject_kind_name(kind: fi_kind) -> *CChar;
+    fn thread_current() -> *mut thread;
+
+    // The values and layout the C compiler checks (ADR 0080 §3.1), which the floor asserted.
+    const EFBIG: i32 = 27;
+    const ENOMEM: i32 = 12;
+    const EEXIST: i32 = 17;
+    const VFS_UMOUNT_FORCE: u32 = 1;
+    /// cosmofstest_extent.cee's errno.h, syscall.h, vfs.h, cosmofs.h and cosmofs_format.h values
+    @cvalue("COSMO_O_RDONLY == 0 && COSMO_O_RDWR == 2 && COSMO_O_CREAT == 0x40 && COSMO_O_TRUNC == 0x200 && COSMOFS_SCRUB_REPAIR == 1 && CFS_RECORD_BLOCKS == 8")
+    const COSMOFSTEST_EXTENT_FACT_0: bool = true;
+    /// cosmofstest_extent.cee's report, stats and page cache stats sizes and offsets
+    @cvalue("sizeof(struct cosmofs_check_report) <= 1536 && sizeof(struct cosmofs_stats) <= 128 && offsetof(struct cosmofs_stats, free_blocks) == 8 && offsetof(struct cosmofs_stats, csum_failures) == 64 && sizeof(struct cosmofs_scrub_stats) <= 128 && offsetof(struct cosmofs_scrub_stats, unrecoverable) == 24 && sizeof(struct pagecache_stats) <= 128 && offsetof(struct pagecache_stats, wb_errors) == 48 && offsetof(struct pagecache_stats, dropped_dirty) == 56")
+    const COSMOFSTEST_EXTENT_FACT_1: bool = true;
 }
 
-// ---- Values (asserted in cosmofstest_extent_floor.c) ----
+/// Whether this build injects faults (CONFIG_FAULTINJECT).
+fn faultsOn() -> bool {
+    var on = false;
+    if (cfg("CONFIG_FAULTINJECT")) {
+        on = true;
+    }
+    return on;
+}
 
-const EFBIG: i32 = 27;
-const ENOMEM: i32 = 12;
-const EEXIST: i32 = 17;
+/// The fault numbers this file uses: 0, a failed allocation; 1, a map that would not fit.
+fn extentKind(k: u32) -> fi_kind => if (k == 0) FI_COSMOFS_EXTENT_NOMEM else FI_COSMOFS_EXTENT_FBIG;
+
+/// Fault `k` armed for this thread: the `every`th hit fails, `count` times. Nothing without fault injection.
+/// Safety: the serial self-test runner.
+unsafe fn faultSet(k: u32, every: u32, count: u32) {
+    if (cfg("CONFIG_FAULTINJECT")) {
+        faultinject_set(extentKind(k), every, count, thread_current());
+    }
+}
+
+/// Fault `k`'s hits since it was armed; then it is cleared. 0 without fault injection.
+/// Safety: as faultSet.
+unsafe fn faultClear(k: u32) -> u64 {
+    var hits: u64 = 0;
+    if (cfg("CONFIG_FAULTINJECT")) {
+        var fst: fi_stats;
+        faultinject_stats(extentKind(k), borrow mut fst as *mut fi_stats);
+        faultinject_clear(extentKind(k));
+        hits = fst.hits;
+    }
+    return hits;
+}
+
+/// Fault `k`'s name, as faultinject_kind_name gives it; empty without fault injection.
+/// Safety: as faultSet.
+unsafe fn faultName(k: u32) -> *CChar {
+    var name = "\0".ptr as *CChar;
+    if (cfg("CONFIG_FAULTINJECT")) {
+        name = faultinject_kind_name(extentKind(k));
+    }
+    return name;
+}
+
+// ---- Values ----
+
 const O_RDONLY: u32 = 0;
 const O_RDWR: u32 = 2;
 const O_CREAT: u32 = 0x40;
 const O_TRUNC: u32 = 0x200;
-const VFS_UMOUNT_FORCE: u32 = 1;
 const SCRUB_REPAIR: u32 = 1;
 const RECORD_BLOCKS: u64 = 8;
 /// A record's bytes.
@@ -103,7 +163,7 @@ const ST_CSUM_FAILURES: usize = 64;
 const SC_UNRECOVERABLE: usize = 24;
 const PC_WB_ERRORS: usize = 48;
 const PC_DROPPED_DIRTY: usize = 56;
-/// cosmofstest_extent_floor.c's fault numbers.
+/// The fault numbers extentKind takes.
 const FAIL_NOMEM: u32 = 0;
 const FAIL_FBIG: u32 = 1;
 
@@ -895,7 +955,7 @@ struct Ef {
 @cfg("CONFIG_DEBUG")
 @export("selftest_cosmofs_extent_fail")
 unsafe fn selftestExtentFail(reason: *mut *CChar) -> bool {
-    if (!cfst_extent_floor_faults()) {
+    if (!faultsOn()) {
         return true;
     }
     var cases: u32 = 0;
@@ -927,7 +987,7 @@ unsafe fn extentFailCase(kind: u32, layout: u32, reason: *mut *CChar) -> bool {
         rep: 0 as *mut u8, bd: 0 as *mut blkdev, mounted: false,
     };
     if (!efCase(mut s, kind, layout, reason)) {
-        let _ = cfst_extent_floor_clear(kind);
+        let _ = faultClear(kind);
         if (!s.f.isNull()) {
             filePut(s.f);
         }
@@ -1032,10 +1092,10 @@ unsafe fn efCase(s: borrow mut Ef, kind: u32, layout: u32, reason: *mut *CChar) 
     if (file_pwrite(f, b.add(off) as *void, wlen, off as u64) != truncate<i64>(wlen)) {
         return failed(reason, "check failed: file_pwrite(f, b + off, wlen, off) == (int64_t)wlen at line 1031\0");
     }
-    cfst_extent_floor_set(kind, every, 1);
+    faultSet(kind, every, 1);
     let src = file_sync(f);
-    let hits = cfst_extent_floor_clear(kind);
-    let name = cfst_extent_floor_name(kind);
+    let hits = faultClear(kind);
+    let name = faultName(kind);
     var buffer = [0u8; 160];
     var line = TextWriter.create(mut buffer[..]);
     line.text("selftest: cosmofs-extent-fail: ");
@@ -1084,10 +1144,10 @@ unsafe fn efCase(s: borrow mut Ef, kind: u32, layout: u32, reason: *mut *CChar) 
         // before, the inode was stored only after a write that succeeded, so a vnode gone before the retry took the
         // map with it: the four new blocks were nobody's and the four they replaced were freed under the committed
         // inode.
-        cfst_extent_floor_set(kind, 1, 1 << 20);
+        faultSet(kind, 1, 1 << 20);
         filePut(f);
         s.f = 0 as *mut file;
-        let rhits = cfst_extent_floor_clear(kind);
+        let rhits = faultClear(kind);
         if (vfs_sync() != 0) {
             return failed(reason, "check failed: vfs_sync() == 0 at line 1090\0");
         }
