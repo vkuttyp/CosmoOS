@@ -144,7 +144,7 @@ HOST_RAMBLK_SRCS := $(HOST_COMMON_SRCS) kernel/block/ramblk.c kernel/ceesafe/cee
 HOST_BLK_SRCS := $(HOST_COMMON_SRCS) kernel/block/blk.c kernel/core/printf.c kernel/ceesafe/ceesafe_rt_core.c \
 	tests/host/ceesafe_panic.c tests/host/test_blk.c
 # The storage pool alone: the block layer's synchronous I/O, the references and the allocator are the test's.
-HOST_POOL_SRCS := $(HOST_COMMON_SRCS) kernel-services/storage/pool.c kernel-services/storage/pool_floor.c kernel/ceesafe/ceesafe_rt_core.c \
+HOST_POOL_SRCS := $(HOST_COMMON_SRCS) kernel-services/storage/pool.c kernel/ceesafe/ceesafe_rt_core.c \
 	tests/host/ceesafe_panic.c tests/host/test_pool.c
 HOST_GPT_SRCS := $(HOST_COMMON_SRCS) kernel/block/gpt.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c kernel/core/cmdline.c tests/host/test_gpt.c
 HOST_CPUTIME_SRCS := $(HOST_COMMON_SRCS) kernel/process/cputime.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_cputime.c
@@ -176,10 +176,10 @@ HOST_CFSCRYPT_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/cos
 	tests/host/test_cfscrypt.c
 # cosmofs's resilver and pool commands: the pool's operations, the labels, the holds and the devices are the test's.
 HOST_CFSRESILVER_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/cosmofs_resilver.c \
-	kernel-services/storage/pool_floor.c kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_cfsresilver.c
+	kernel/ceesafe/ceesafe_rt_core.c tests/host/ceesafe_panic.c tests/host/test_cfsresilver.c
 # cosmofs's members with the real label and table checks: the devices, the pool, the buffers and the allocator are the test's.
 HOST_CFSMEMBER_SRCS := $(HOST_COMMON_SRCS) kernel-services/filesystem/cosmofs/cosmofs_member.c \
-	kernel-services/filesystem/cosmofs/cosmofs_member_floor.c kernel-services/storage/pool_floor.c \
+	kernel-services/filesystem/cosmofs/cosmofs_member_floor.c \
 	kernel-services/filesystem/cosmofs/cfsparse.c kernel/core/crc32c.c kernel/core/printf.c kernel/ceesafe/ceesafe_rt_core.c \
 	tests/host/ceesafe_panic.c tests/host/test_cfsmember.c
 # cosmofs's structural check with the real entry decoders: the blocks, the trees, the lists, the mount and the device are the test's.

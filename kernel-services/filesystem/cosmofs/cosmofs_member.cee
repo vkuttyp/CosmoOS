@@ -44,6 +44,7 @@ extern "C" {
         m: *mut spool_member;
         nmembers: u32;
         nspares: u32;
+        spare: [*mut blkdev; 4];
     }
     struct cfs_mac {
         on: bool;
@@ -147,7 +148,6 @@ extern "C" {
     fn pool_mark_missed(p: *mut spool, dva: u64);
     fn pool_copy_csum_error(p: *mut spool, dva: u64, c: u32);
     fn pool_copy_state_name(s: u32) -> *CChar;
-    fn pool_floor_spare(p: *mut spool, i: u32) -> *mut *mut blkdev;
     fn blk_nth(i: u32) -> *mut blkdev;
     fn cfs_label_crc(block: *u8) -> u32;
     fn cfs_label_crc_ok(block: *u8) -> bool;
@@ -1533,7 +1533,7 @@ unsafe fn holdsSyncWith(fs: *mut cfs, extra: *mut blkdev) -> i32 {
         if (n >= MOUNT_HELD_MAX) {
             break;
         }
-        held[n as usize] = pool_floor_spare(p, i).read(); // and its spares (roadmap 1.2 B3)
+        held[n as usize] = Ptr.toBorrow(p as *spool).spare[i as usize]; // and its spares (roadmap 1.2 B3)
         n += 1;
     }
     if (!extra.isNull()) {

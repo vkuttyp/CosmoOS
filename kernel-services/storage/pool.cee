@@ -11,8 +11,9 @@
 // (docs/kernel-services/filesystem/cosmofs/design.md, "Format version 13"). The pool keeps both in memory; the
 // filesystem writes them into its own format.
 //
-// struct spool, its members and their copies stay C (storage.h): cosmofs reads and fills them. pool_floor.c keeps
-// g_pool_fault_errors, the sysctl's C variable, and the module exports.
+// struct spool, its members and their copies stay C (storage.h): cosmofs reads and fills them. g_pool_fault_errors, the
+// sysctl's variable, is this file's, C data the sysctl reads and writes atomically, and the values below are the
+// headers', which the C compiler checks (ADR 0080 §3.1–§3.2).
 
 @header("kernel/blk.h", "kernel/kmalloc.h", "kernel/storage.h", "kernel/string.h")
 extern "C" {
@@ -58,13 +59,9 @@ extern "C" {
         notify: extern "C" fn(*mut void);
         notify_arg: *mut void;
         nspares: u32;
+        spare: [*mut blkdev; 4];
+        spare_tag: [u64; 4];
     }
-
-    /// pool_floor.c: the address of g_pool_fault_errors (sysctl fs.fault_errors), read and written atomically.
-    fn pool_floor_fault_errors() -> *mut u32;
-    /// pool_floor.c: the address of the pool's spare slot `i` (struct blkdev *spare[POOL_MAX_SPARES]) and of its tag.
-    fn pool_floor_spare(p: *mut spool, i: u32) -> *mut *mut blkdev;
-    fn pool_floor_spare_tag(p: *mut spool, i: u32) -> *mut u64;
     fn blk_read(bd: *mut blkdev, sector: u64, nsectors: u32, buf: *mut void) -> i32;
     fn blk_write(bd: *mut blkdev, sector: u64, nsectors: u32, buf: *void) -> i32;
     fn blk_write_flags(bd: *mut blkdev, sector: u64, nsectors: u32, buf: *void, flags: u32) -> i32;
@@ -73,36 +70,45 @@ extern "C" {
     fn memcpy(dst: *mut void, src: *void, n: usize) -> *mut void;
     fn memset(p: *mut void, c: i32, n: usize) -> *mut void;
     fn strlen(s: *CChar) -> usize;
+
+    // errno.h, blk.h and storage.h's values, which the C compiler checks.
+    const EINVAL: i32 = 22;
+    const ENOSPC: i32 = 28;
+    const EEXIST: i32 = 17;
+    const ENODEV: i32 = 19;
+    const EIO: i32 = 5;
+    const ENOMEM: i32 = 12;
+    const EAGAIN: i32 = 11;
+    const EBUSY: i32 = 16;
+    const ENOENT: i32 = 2;
+    const BIO_PREFLUSH: u32 = 1;
+    const BIO_FUA: u32 = 2;
+    const POOL_BLOCK: u32 = 4096;
+    const POOL_MAX_MEMBERS: u32 = 255;
+    const POOL_MAX_COPIES: u32 = 4;
+    const POOL_MAX_SPARES: u32 = 4;
+    const POOL_WRITE_ONLINE: u32 = 0x80000000;
+    const POOL_DVA_SHIFT: u64 = 56;
+    const POOL_DVA_BLK_MASK: u64 = 0x00FFFFFFFFFFFFFF;
+    const POOL_DIRTY_BYTES: usize = 944;
+    const POOL_DIRTY_BITS: u64 = 7552;
+    @cvalue("POOL_COPY_ONLINE")
+    const ONLINE: u32 = 0;
+    @cvalue("POOL_COPY_MISSING")
+    const MISSING: u32 = 1;
+    @cvalue("POOL_COPY_OFFLINE")
+    const OFFLINE: u32 = 2;
+    @cvalue("POOL_COPY_FAULTED")
+    const FAULTED: u32 = 3;
+    @cvalue("POOL_COPY_RESILVERING")
+    const RESILVERING: u32 = 4;
+    @cvalue("POOL_COPY_NSTATES")
+    const NSTATES: u32 = 5;
+    /// A copy fits the stack slot it is swapped through (COPY_WORDS words).
+    @cvalue("sizeof(struct pool_copy) <= 16 * 8")
+    const COPY_FITS: bool = true;
 }
 
-// ---- errno.h, blk.h and storage.h values (asserted in tests/host/test_pool.c and pool_floor.c) ----
-
-const EINVAL: i32 = 22;
-const ENOSPC: i32 = 28;
-const EEXIST: i32 = 17;
-const ENODEV: i32 = 19;
-const EIO: i32 = 5;
-const ENOMEM: i32 = 12;
-const EAGAIN: i32 = 11;
-const EBUSY: i32 = 16;
-const ENOENT: i32 = 2;
-const BIO_PREFLUSH: u32 = 1;
-const BIO_FUA: u32 = 2;
-const POOL_BLOCK: u32 = 4096;
-const POOL_MAX_MEMBERS: u32 = 255;
-const POOL_MAX_COPIES: u32 = 4;
-const POOL_MAX_SPARES: u32 = 4;
-const POOL_WRITE_ONLINE: u32 = 0x80000000;
-const POOL_DVA_SHIFT: u64 = 56;
-const POOL_DVA_BLK_MASK: u64 = 0x00FFFFFFFFFFFFFF;
-const POOL_DIRTY_BYTES: usize = 944;
-const POOL_DIRTY_BITS: u64 = 7552;
-const ONLINE: u32 = 0;
-const MISSING: u32 = 1;
-const OFFLINE: u32 = 2;
-const FAULTED: u32 = 3;
-const RESILVERING: u32 = 4;
-const NSTATES: u32 = 5;
 /// The stack slot a copy is swapped through, in words (checked against its C size).
 const COPY_WORDS: usize = 16;
 
@@ -132,10 +138,12 @@ unsafe fn devOf(cp: *mut pool_copy) -> *mut blkdev => Ptr.toBorrow(cp as *pool_c
 /// Safety: `cp` is a copy slot.
 unsafe fn dirtyOf(cp: *mut pool_copy) -> *mut u8 => Ptr.toBorrow(cp as *pool_copy).dirty;
 
+/// g_pool_fault_errors (storage.h), the sysctl's variable (fs.fault_errors): the failures that fault a copy.
+@export("g_pool_fault_errors")
+static FAULT_ERRORS: AtomicU32 = AtomicU32.constant(16);
+
 /// The sysctl's failure count, read as the C read it.
-/// Safety: pool_floor_fault_errors returns the address of a static uint32_t.
-unsafe fn faultErrors() -> u32 =>
-    Ptr.toBorrow(pool_floor_fault_errors() as *AtomicU32).loadWith(LoadOrdering.Relaxed);
+fn faultErrors() -> u32 => FAULT_ERRORS.loadWith(LoadOrdering.Relaxed);
 
 /// Safety: `bd` is a blkdev.
 unsafe fn blkdevGet(bd: *mut blkdev) { kobject_get(borrow mut Ptr.toBorrowMut(bd).obj as *mut kobject); }
@@ -505,7 +513,7 @@ unsafe fn swapCopies(p: *mut spool, vdev: u32, a: u32, b: u32) {
     }
     let size = layoutOf<pool_copy>().size;
     if (size > COPY_WORDS * 8) {
-        return; // pool_floor.c asserts that it fits
+        return; // COPY_FITS: C checks that it fits
     }
     let m = memberAt(p, vdev);
     var slot = [0u64; 16];
@@ -630,7 +638,7 @@ unsafe fn close(p: *mut spool) {
         kfree(Ptr.toBorrow(m as *spool_member).recent as *mut void);
     }
     for (i in 0u32..Ptr.toBorrow(p as *spool).nspares) {
-        blkdevPut(pool_floor_spare(p, i).read());
+        blkdevPut(Ptr.toBorrow(p as *spool).spare[i as usize]);
     }
     kfree(Ptr.toBorrow(p as *spool).m as *mut void);
     kfree(p as *mut void);
@@ -1245,7 +1253,7 @@ unsafe fn addSpare(p: *mut spool, bd: *mut blkdev, tag: u64) -> i32 {
     }
     let n = Ptr.toBorrow(p as *spool).nspares;
     for (i in 0u32..n) {
-        if (pool_floor_spare(p, i).read() == bd) {
+        if (Ptr.toBorrow(p as *spool).spare[i as usize] == bd) {
             return -EEXIST;
         }
     }
@@ -1253,8 +1261,14 @@ unsafe fn addSpare(p: *mut spool, bd: *mut blkdev, tag: u64) -> i32 {
         return -ENOSPC;
     }
     blkdevGet(bd);
-    pool_floor_spare(p, n).write(bd);
-    pool_floor_spare_tag(p, n).write(tag);
+    {
+        let slots = Ptr.toBorrowMut(p);
+        slots.spare[n as usize] = bd;
+    }
+    {
+        let slots = Ptr.toBorrowMut(p);
+        slots.spare_tag[n as usize] = tag;
+    }
     let pool = Ptr.toBorrowMut(p);
     pool.nspares = n + 1;
     return 0;
@@ -1266,14 +1280,26 @@ unsafe fn spareDrop(p: *mut spool, i: u32) {
     let n = Ptr.toBorrow(p as *spool).nspares;
     var k = i;
     while (k + 1 < n) {
-        pool_floor_spare(p, k).write(pool_floor_spare(p, k + 1).read());
-        pool_floor_spare_tag(p, k).write(pool_floor_spare_tag(p, k + 1).read());
+        {
+            let slots = Ptr.toBorrowMut(p);
+            slots.spare[k as usize] = Ptr.toBorrow(p as *spool).spare[(k + 1) as usize];
+        }
+        {
+            let slots = Ptr.toBorrowMut(p);
+            slots.spare_tag[k as usize] = Ptr.toBorrow(p as *spool).spare_tag[(k + 1) as usize];
+        }
         k += 1;
     }
     let pool = Ptr.toBorrowMut(p);
     pool.nspares = n - 1;
-    pool_floor_spare(p, n - 1).write(0 as *mut blkdev);
-    pool_floor_spare_tag(p, n - 1).write(0);
+    {
+        let slots = Ptr.toBorrowMut(p);
+        slots.spare[(n - 1) as usize] = 0 as *mut blkdev;
+    }
+    {
+        let slots = Ptr.toBorrowMut(p);
+        slots.spare_tag[(n - 1) as usize] = 0;
+    }
 }
 
 /// storage.h's pool_remove_spare.
@@ -1281,7 +1307,7 @@ unsafe fn spareDrop(p: *mut spool, i: u32) {
 @export("pool_remove_spare")
 unsafe fn removeSpare(p: *mut spool, bd: *mut blkdev) -> i32 {
     for (i in 0u32..Ptr.toBorrow(p as *spool).nspares) {
-        if (pool_floor_spare(p, i).read() == bd) {
+        if (Ptr.toBorrow(p as *spool).spare[i as usize] == bd) {
             spareDrop(p, i);
             blkdevPut(bd);
             return 0;
@@ -1298,12 +1324,12 @@ unsafe fn takeSpare(p: *mut spool, vdev: u32, tag: *mut u64) -> *mut blkdev {
         return 0 as *mut blkdev;
     }
     for (i in 0u32..Ptr.toBorrow(p as *spool).nspares) {
-        let bd = pool_floor_spare(p, i).read();
+        let bd = Ptr.toBorrow(p as *spool).spare[i as usize];
         if (goneOf(bd) || fits(memberAt(p, vdev), bd) != 0) {
             continue;
         }
         if (!tag.isNull()) {
-            tag.write(pool_floor_spare_tag(p, i).read());
+            tag.write(Ptr.toBorrow(p as *spool).spare_tag[i as usize]);
         }
         spareDrop(p, i);
         return bd;

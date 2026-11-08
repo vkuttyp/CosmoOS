@@ -50,6 +50,7 @@ extern "C" {
         notify: extern "C" fn(*mut void);
         notify_arg: *mut void;
         nspares: u32;
+        spare: [*mut blkdev; 4];
     }
     struct cfs_mac {
         on: bool;
@@ -143,7 +144,6 @@ extern "C" {
     fn pool_remove_spare(p: *mut spool, bd: *mut blkdev) -> i32;
     fn pool_take_spare(p: *mut spool, v: u32, tag: *mut u64) -> *mut blkdev;
     fn pool_find_dev(p: *spool, bd: *blkdev, v: *mut u32, c: *mut u32) -> bool;
-    fn pool_floor_spare(p: *mut spool, i: u32) -> *mut *mut blkdev;
     fn cfs_label_write_dev(fs: *mut cfs, bd: *mut blkdev, vdev: u32, flags: u64, tag: u64, nblocks: u64) -> i32;
     fn cfs_label_write(
         pool: *mut spool,
@@ -1133,7 +1133,7 @@ unsafe fn newDevice(fs: *mut cfs, name: *CChar, v: i32, out: *mut *mut blkdev) -
         if (rc != 0) {
             break;
         }
-        if (pool_floor_spare(p, i).read() == bd) {
+        if (Ptr.toBorrow(p as *spool).spare[i as usize] == bd) {
             rc = -EEXIST;
         }
     }
@@ -1513,7 +1513,7 @@ unsafe fn status(fs: *mut cfs, req: *mut cosmofs_pool_req) {
         o.member = 0xffff;
         o.copy = 0xffff;
         o.state = COSMOFS_COPY_SPARE;
-        let spare = pool_floor_spare(p, i).read();
+        let spare = Ptr.toBorrow(p as *spool).spare[i as usize];
         let d = devOf(spare);
         o.blocks = d.capacity / (POOL_BLOCK / (d.sector_size as u64));
         copyName(borrow mut o.dev as *mut [u8; 16] as *mut u8, borrow d.name as *[u8; 16] as *CChar);

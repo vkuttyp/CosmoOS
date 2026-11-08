@@ -205,9 +205,6 @@ const char *pool_copy_state_name(enum pool_copy_state s)
 
 uint32_t g_pool_fault_errors = 16;
 
-/* pool_floor.c's, for cosmofs_member.cee: the shim is this target's pool. */
-struct blkdev **pool_floor_spare(struct spool *p, uint32_t i);
-struct blkdev **pool_floor_spare(struct spool *p, uint32_t i) { return &p->spare[i]; }
 
 bool pool_copy_online(const struct spool *p, unsigned vdev, unsigned c)
 {
