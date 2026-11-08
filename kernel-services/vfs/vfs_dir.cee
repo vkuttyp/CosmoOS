@@ -7,7 +7,7 @@
 // in the order the rest of the VFS uses -- parent before child, the ancestor first, unrelated ones by address -- under
 // the mount's rename lock, which keeps the ancestry it decided that order by.
 //
-// The vnodes stay C (vfs.h). vfs_floor.c asserts the values this file writes as its own constants.
+// The vnodes stay C (vfs.h). The values this file writes as its own constants are the headers', which C checks.
 
 @header("kernel/cred.h", "kernel/errno.h", "kernel/lockdep.h", "kernel/mutex.h", "kernel/string.h",
     "kernel/types.h", "kernel/vfs.h")
@@ -79,41 +79,43 @@ extern "C" {
     fn vfs_text_busy_locked(vn: *mut vnode) -> bool;
     fn vfs_covering_mount(dir: *vnode) -> *mut mount;
     fn vfs_entry_is_mountpoint(vn: *mut vnode, held1: *mut vnode, held2: *mut vnode) -> bool;
+
+    // The values and layout the C compiler checks (ADR 0080 §3.1), which the floor asserted.
+    const VNODE_REG: u32 = 1;
+    const VNODE_DIR: u32 = 2;
+    const VNODE_DEAD: u32 = 2;
+    const ENOENT: i32 = 2;
+    const EBUSY: i32 = 16;
+    const EEXIST: i32 = 17;
+    const ENOTDIR: i32 = 20;
+    const EINVAL: i32 = 22;
+    const VNODE_NESTED_CHILD: u32 = 2;
+    const MOUNT_RDONLY: u32 = 1;
+    const VFS_NAME_MAX: u32 = 255;
+    const VFS_PATH_MAX: usize = 1024;
+    const EPERM: i32 = 1;
+    const EACCES: i32 = 13;
+    const EISDIR: i32 = 21;
+    const ETXTBSY: i32 = 26;
+    const EROFS: i32 = 30;
+    const ENAMETOOLONG: i32 = 36;
+    const ENOTSUP: i32 = 95;
+    const VNODE_SOCK: u32 = 5;
+    const VNODE_LNK: u32 = 6;
+    const VFS_MAX_COMPONENTS: u32 = 40;
+    const VFS_MAY_EXEC: u32 = 1;
+    const VFS_MAY_WRITE: u32 = 2;
+    const PRIV_SYS_ADMIN: u32 = 2;
+    const VNODE_FIFO: u32 = 4;
+    const EXDEV: i32 = 18;
+    const EMLINK: i32 = 31;
+    const VNODE_NESTED_PARENT2: u32 = 1;
+    const MOUNT_CACHE_IS_STORE: u32 = 2;
+    const VFS_LINK_MAX: u32 = 65000;
+    const PAGE_SIZE: u32 = 4096;
 }
 
-// errno.h, vfs.h, lockdep.h, cred.h and types.h, which vfs_floor.c checks.
-const EPERM: i32 = 1;
-const ENOENT: i32 = 2;
-const EACCES: i32 = 13;
-const EBUSY: i32 = 16;
-const EEXIST: i32 = 17;
-const EXDEV: i32 = 18;
-const ENOTDIR: i32 = 20;
-const EISDIR: i32 = 21;
-const EINVAL: i32 = 22;
-const ETXTBSY: i32 = 26;
-const EROFS: i32 = 30;
-const EMLINK: i32 = 31;
-const ENAMETOOLONG: i32 = 36;
-const ENOTSUP: i32 = 95;
-const VNODE_REG: u32 = 1;
-const VNODE_DIR: u32 = 2;
-const VNODE_FIFO: u32 = 4;
-const VNODE_SOCK: u32 = 5;
-const VNODE_LNK: u32 = 6;
-const VNODE_DEAD: u32 = 2;
-const VNODE_NESTED_PARENT2: u32 = 1;
-const VNODE_NESTED_CHILD: u32 = 2;
-const MOUNT_RDONLY: u32 = 1;
-const MOUNT_CACHE_IS_STORE: u32 = 2;
-const VFS_NAME_MAX: u32 = 255;
-const VFS_PATH_MAX: usize = 1024;
-const VFS_MAX_COMPONENTS: u32 = 40;
-const VFS_LINK_MAX: u32 = 65000;
-const VFS_MAY_EXEC: u32 = 1;
-const VFS_MAY_WRITE: u32 = 2;
-const PRIV_SYS_ADMIN: u32 = 2;
-const PAGE_SIZE: u32 = 4096;
+// errno.h, vfs.h, lockdep.h, cred.h and types.h's.
 
 /// Safety: `vn` is live.
 unsafe fn lockOf(vn: *mut vnode) -> *mut mutex => borrow mut Ptr.toBorrowMut(vn).lock as *mut mutex;

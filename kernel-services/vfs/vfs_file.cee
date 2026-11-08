@@ -7,8 +7,9 @@
 // failure reported once, listed a directory at a time, and filled in pieces by one read. The last put runs the
 // vnode's release and writes back what a closing writer left dirty.
 //
-// The files and vnodes stay C (vfs.h). vfs_floor.c keeps the file's kobject_io_type, C data whose entries are this
-// file's exports; the lockdep assertion, a macro; and the values this file writes as its own constants, asserted.
+// The files and vnodes stay C (vfs.h). The file's kobject_io_type is C data this file defines, its entries this file's
+// exports (ADR 0080 §3.2); the lockdep assertion is a `cfg` block (§3.3), and the values this file writes as its own
+// constants are the headers', which C checks.
 
 @header("kernel/errno.h", "kernel/kmalloc.h", "kernel/lockdep.h", "kernel/mutex.h", "kernel/object.h",
     "kernel/pagecache.h", "kernel/string.h", "kernel/vfs.h")
@@ -87,40 +88,92 @@ extern "C" {
     fn pagecache_wb_seq(pc: *mut pagecache) -> u32;
     fn pagecache_error_since(pc: *mut pagecache, seen: u32, err: *mut i32, now: *mut u32) -> bool;
 
-    // vfs_floor.c
-    fn vfs_floor_file_type() -> *kobject_type;
-    fn vfs_floor_is_file(obj: *kobject) -> bool;
-    fn vfs_floor_assert_unlocked(vn: *mut vnode);
+    /// object.h's I/O type: a kobject_type first, then the operations a file has.
+    struct kobject_io_type {
+        base: kobject_type;
+        read: extern "C" fn(*mut kobject, *mut void, usize) -> i64;
+        write: extern "C" fn(*mut kobject, *void, usize) -> i64;
+        ready: extern "C" fn(*mut kobject) -> u32;
+        set_nonblock: extern "C" fn(*mut kobject, i32) -> i32;
+        flush: extern "C" fn(*mut kobject) -> i32;
+        poll_wq: extern "C" fn(*mut kobject, u32) -> *mut waitqueue;
+        read_filled: extern "C" fn(*mut kobject, *mut void, usize, usize, extern "C" fn(*mut void, *void, usize) -> i32,
+            *mut void) -> i64;
+    }
+    const KOBJECT_TYPE_IO: u32 = 1;
+    /// A kobject's type is its first member (object.h).
+    @cvalue("offsetof(struct kobject, type)")
+    const KOBJECT_TYPE_AT: usize = 0;
+    /// lockdep.h: whether this thread holds `lock`, in a lockdep build only.
+    @cfg("CONFIG_LOCKDEP")
+    fn lockdep_is_held(lock: *void, kind: u32) -> bool;
+    const LOCKDEP_KIND_MUTEX: u32 = 1;
+
+    // The values and layout the C compiler checks (ADR 0080 §3.1), which the floor asserted.
+    const VNODE_REG: u32 = 1;
+    const VNODE_DIR: u32 = 2;
+    const ENOMEM: i32 = 12;
+    const ENOTDIR: i32 = 20;
+    const EINVAL: i32 = 22;
+    const ENOSPC: i32 = 28;
+    const MOUNT_RDONLY: u32 = 1;
+    const EIO: i32 = 5;
+    const EISDIR: i32 = 21;
+    const ETXTBSY: i32 = 26;
+    const EROFS: i32 = 30;
+    const ENOTSUP: i32 = 95;
+    const COSMO_O_RDONLY: u32 = 0;
+    const COSMO_O_WRONLY: u32 = 1;
+    const COSMO_O_ACCMODE: u32 = 3;
+    const EBADF: i32 = 9;
+    const EFAULT: i32 = 14;
+    const ESPIPE: i32 = 29;
+    const VNODE_CHR: u32 = 3;
+    const VNODE_FIFO: u32 = 4;
+    const COSMO_O_APPEND: u32 = 0x400;
+    const COSMO_O_NONBLOCK: u32 = 0x800;
+    const COSMO_IO_READABLE: u32 = 1;
+    const COSMO_IO_WRITABLE: u32 = 2;
+    const COSMO_SEEK_SET: i32 = 0;
+    const COSMO_SEEK_CUR: i32 = 1;
+    const COSMO_SEEK_END: i32 = 2;
 }
 
-// errno.h, vfs.h and syscall.h, which vfs_floor.c checks.
-const EBADF: i32 = 9;
-const ENOMEM: i32 = 12;
-const ENOSPC: i32 = 28;
-const EFAULT: i32 = 14;
-const ENOTDIR: i32 = 20;
-const EISDIR: i32 = 21;
-const EINVAL: i32 = 22;
-const ETXTBSY: i32 = 26;
-const ESPIPE: i32 = 29;
-const EROFS: i32 = 30;
-const EIO: i32 = 5;
-const ENOTSUP: i32 = 95;
-const VNODE_REG: u32 = 1;
-const VNODE_DIR: u32 = 2;
-const VNODE_CHR: u32 = 3;
-const VNODE_FIFO: u32 = 4;
-const MOUNT_RDONLY: u32 = 1;
-const COSMO_O_RDONLY: u32 = 0;
-const COSMO_O_WRONLY: u32 = 1;
-const COSMO_O_ACCMODE: u32 = 3;
-const COSMO_O_APPEND: u32 = 0x400;
-const COSMO_O_NONBLOCK: u32 = 0x800;
-const COSMO_IO_READABLE: u32 = 1;
-const COSMO_IO_WRITABLE: u32 = 2;
-const COSMO_SEEK_SET: i32 = 0;
-const COSMO_SEEK_CUR: i32 = 1;
-const COSMO_SEEK_END: i32 = 2;
+// ---- The file's object type, and the driver's lock (ADR 0080) ----
+
+/// An open file's kobject_io_type, whose entries are this file's.
+static mut FILE_TYPE: kobject_io_type = kobject_io_type {
+    base: kobject_type { name: "file\0".ptr as *CChar, release: release, flags: KOBJECT_TYPE_IO },
+    read: objRead,
+    read_filled: objReadFilled,
+    write: objWrite,
+    flush: objFlush,
+    ready: objReady,
+    poll_wq: objPollWq,
+    set_nonblock: objSetNonblock,
+};
+
+/// Safety: the type is never written.
+unsafe fn fileType() -> *kobject_type => borrow mut FILE_TYPE.base as *mut kobject_type as *kobject_type;
+
+/// Whether `obj` is an open file: its type is this one.
+/// Safety: `obj` is a live kobject.
+unsafe fn isFile(obj: *kobject) -> bool => ((obj as *u8).add(KOBJECT_TYPE_AT) as **kobject_type).read() == fileType();
+
+/// A stream's driver runs with no vnode lock held: lockdep_assert_not_held, which only a lockdep build makes.
+/// Safety: `vn` is a live vnode.
+unsafe fn assertUnlocked(vn: *mut vnode) {
+    if (cfg("CONFIG_LOCKDEP")) {
+        if (lockdep_is_held(borrow mut Ptr.toBorrowMut(vn).lock as *mut mutex as *void, LOCKDEP_KIND_MUTEX)) {
+            var buffer: [u8; 96] = [0; 96];
+            var line = TextWriter.create(mut buffer[..]);
+            line.text("assertion failed: !lockdep_is_held(&vn->lock) (vfs_file.cee, assertUnlocked)");
+            KernelLog.panic(line);
+        }
+    }
+}
+
+// errno.h, vfs.h and syscall.h's.
 /// sizeof(struct cosmo_dirent) and offsetof(struct cosmo_dirent, name): the name follows the record's header.
 const DIRENT_SIZE: usize = 16;
 const DIRENT_NAME: usize = 12;
@@ -351,7 +404,7 @@ unsafe fn setNonblock(f: *mut file, on: i32) -> i32 {
 /// Safety: `obj` is a live kobject.
 @export("file_from_kobject")
 unsafe fn fromKobject(obj: *mut kobject) -> *mut file =>
-    if (vfs_floor_is_file(obj as *kobject)) obj as *mut file else 0 as *mut file;
+    if (isFile(obj as *kobject)) obj as *mut file else 0 as *mut file;
 
 /// Run the vnode's per-open hook, if any. On refusal the file is dropped (its release hook does not run, since open
 /// never succeeded) and the caller's vnode reference goes with it.
@@ -381,7 +434,7 @@ unsafe fn alloc(vn: *mut vnode, flags: u32) -> *mut file {
     if (f.isNull()) {
         return f;
     }
-    kobject_init(borrow mut Ptr.toBorrowMut(f).obj as *mut kobject, vfs_floor_file_type());
+    kobject_init(borrow mut Ptr.toBorrowMut(f).obj as *mut kobject, fileType());
     {
         let x = Ptr.toBorrowMut(f);
         x.vn = vn; // takes the caller's reference
@@ -441,7 +494,7 @@ unsafe fn pread(f: *mut file, buf: *mut void, len: usize, off: u64) -> i64 {
         // waited deadlocked a writer on the same open file. The open file's lock is the position's lock, and a stream
         // has no position; a stream's per-open state is the driver's to protect. file_read and file_write therefore
         // call a stream's driver with no lock held, as the pipe and socket objects are called.
-        vfs_floor_assert_unlocked(vn);
+        assertUnlocked(vn);
         let ops = opsOf(vn);
         return if (!Ptr.toBorrow(ops).read_file.isNull()) Ptr.toBorrow(ops).read_file(vn, f, off, buf, len)
             else if (!Ptr.toBorrow(ops).read.isNull()) Ptr.toBorrow(ops).read(vn, off, buf, len)
@@ -491,7 +544,7 @@ unsafe fn pwriteHeld(f: *mut file, buf: *void, len: usize, off: u64) -> i64 {
     let ops = opsOf(vn);
     if (isStream(vn)) {
         // As in file_pread: the driver runs with no filesystem lock and no file lock.
-        vfs_floor_assert_unlocked(vn);
+        assertUnlocked(vn);
         return if (!Ptr.toBorrow(ops).write_file.isNull()) Ptr.toBorrow(ops).write_file(vn, f, off, buf, len)
             else if (!Ptr.toBorrow(ops).write.isNull()) Ptr.toBorrow(ops).write(vn, off, buf, len)
             else -ENOTSUP as i64;

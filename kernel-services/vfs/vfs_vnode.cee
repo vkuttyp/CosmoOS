@@ -10,9 +10,10 @@
 // with its starting directory read and not yet referenced, until the thread inside process_chdir has put the old
 // directory, so the regression test of the cwd-reference unit can show the walk still holds it.
 //
-// The vnodes and mounts stay C (vfs.h). vfs_floor.c keeps the kobject type the release is reached through, the
-// seam's lock, wait queues and record, the timed killable wait (wait.h's macro), a debug build's poisoning of a freed
-// vnode, and a release build's stand-ins for the seam's exports.
+// The vnodes and mounts stay C (vfs.h). The kobject type the release is reached through and the seam's lock, wait
+// queues and record are this file's statics (ADR 0080 §3.2); the timed killable wait is wait.h's
+// wait_floor_until_killable_timeout; a debug build's poisoning of a freed vnode and a release build's idle seam are
+// `cfg` blocks (§3.3).
 
 @header("kernel/errno.h", "kernel/kmalloc.h", "kernel/list.h", "kernel/log.h", "kernel/mutex.h",
     "kernel/object.h", "kernel/pagecache.h", "kernel/process.h", "kernel/string.h", "kernel/thread.h",
@@ -109,30 +110,59 @@ extern "C" {
     fn waitqueue_init(wq: *mut waitqueue, name: *CChar);
     fn waitqueue_wake_all(wq: *mut waitqueue) -> u32;
 
-    // vfs_floor.c
     fn vfs_mount_orphan_kick();
-    fn vfs_floor_vnode_type() -> *kobject_type;
-    fn vfs_floor_vnode_poison(vn: *mut vnode);
-    fn vfs_floor_cwd_lock() -> *mut spinlock_t;
-    fn vfs_floor_cwd_held_wq() -> *mut waitqueue;
-    fn vfs_floor_cwd_swap_wq() -> *mut waitqueue;
-    fn vfs_floor_cwd_record() -> *mut vfs_cwd_hold_record;
-    fn vfs_floor_wait_killable_timeout(
-        wq: *mut waitqueue,
-        cond: extern "C" fn(*mut void) -> bool,
-        arg: *mut void,
-        ns: u64,
-    ) -> i32;
+    /// wait.h's wait_event_killable_timeout, for a condition a callback tests: 0, -EINTR when the process is being
+    /// killed, -ETIMEDOUT after `ns`.
+    fn wait_floor_until_killable_timeout(wq: *mut waitqueue, cond: extern "C" fn(*mut void) -> bool, arg: *mut void,
+        ns: u64) -> i32;
+
+    // The values and layout the C compiler checks (ADR 0080 §3.1), which the floor asserted.
+    const EINTR: i32 = 4;
+    const ETIMEDOUT: i32 = 110;
+    const VNODE_REG: u32 = 1;
+    const VNODE_DIR: u32 = 2;
+    const VNODE_DEAD: u32 = 2;
+    const VNODE_HASH: u64 = 64;
+    const PROCESS_NAME_MAX: usize = 32;
 }
 
-// errno.h, vfs.h and process.h, which vfs_floor.c checks.
-const EINTR: i32 = 4;
-const ETIMEDOUT: i32 = 110;
-const VNODE_REG: u32 = 1;
-const VNODE_DIR: u32 = 2;
-const VNODE_DEAD: u32 = 2;
-const VNODE_HASH: u64 = 64;
-const PROCESS_NAME_MAX: usize = 32;
+// ---- The vnode's type, and the held-walk seam's C data (ADR 0080 §3.2) ----
+
+/// The vnode's kobject type: the release is this file's.
+static mut VNODE_TYPE: kobject_type = kobject_type { name: "vnode\0".ptr as *CChar, release: release };
+
+/// The seam's lock, its two wait queues -- the walk waits on the first for the put, the swapper on the second for the
+/// hold -- and its record, in every build: the helpers that reach them are compiled in a release build too, where
+/// nothing calls them (docs/audit/next-subsystem-cwd-hold.md).
+static mut CWD_LOCK: spinlock_t = SPINLOCK_INIT("vfs-cwd-hold\0".ptr as *CChar);
+static mut CWD_HELD_WQ: waitqueue = waitqueue {};
+static mut CWD_SWAP_WQ: waitqueue = waitqueue {};
+static mut CWD_REC: vfs_cwd_hold_record = vfs_cwd_hold_record {};
+
+/// Safety: the seam's data is used under its lock.
+unsafe fn cwdLock() -> *mut spinlock_t => borrow mut CWD_LOCK as *mut spinlock_t;
+
+/// Safety: as cwdLock.
+unsafe fn cwdHeldWq() -> *mut waitqueue => borrow mut CWD_HELD_WQ as *mut waitqueue;
+
+/// Safety: as cwdLock.
+unsafe fn cwdSwapWq() -> *mut waitqueue => borrow mut CWD_SWAP_WQ as *mut waitqueue;
+
+/// Safety: as cwdLock.
+unsafe fn cwdRecord() -> *mut vfs_cwd_hold_record => borrow mut CWD_REC as *mut vfs_cwd_hold_record;
+
+/// A freed vnode that still looks like a directory hides a use-after-free; one full of 0x5a does not. The pmm
+/// poisons freed frames for the same reason and the slab poisons nothing, so the cwd-ref unit's regression test passed
+/// on a broken kernel every time until this existed (docs/audit/next-subsystem-cwd-hold.md, "Measured"). A debug
+/// build's.
+/// Safety: `vn` is a vnode being freed.
+unsafe fn poison(vn: *mut vnode) {
+    if (cfg("CONFIG_DEBUG")) {
+        let _ = memset(vn as *mut void, 0x5a, layoutOf<vnode>().size);
+    }
+}
+
+// errno.h, vfs.h and process.h's.
 
 /// The panic of a broken invariant (the C's KASSERT).
 fn check(ok: bool, what: StringView) {
@@ -218,7 +248,7 @@ unsafe fn release(obj: *mut kobject) {
     }
     // A freed vnode that still looks like a directory hides a use-after-free; one full of 0x5a does not (a debug
     // build's, in the floor: docs/audit/next-subsystem-cwd-hold.md, "Measured").
-    vfs_floor_vnode_poison(vn);
+    poison(vn);
     kfree(vn as *mut void);
 }
 
@@ -239,7 +269,7 @@ unsafe fn alloc(mnt: *mut mount, ino: u64) -> *mut vnode {
     if (vn.isNull()) {
         return vn;
     }
-    kobject_init(objOf(vn), vfs_floor_vnode_type());
+    kobject_init(objOf(vn), borrow mut VNODE_TYPE as *mut kobject_type as *kobject_type);
     {
         let v = Ptr.toBorrowMut(vn);
         v.mnt = mnt;
@@ -386,14 +416,16 @@ static mut WQ_READY: bool = false;
 unsafe fn me() -> u64 => thread_current() as usize as u64;
 
 /// Safety: `processName` is NUL-terminated.
-@cfg("CONFIG_DEBUG")
 @export("vfs_test_cwd_hold_arm")
 unsafe fn holdArm(processName: *CChar) {
-    let lock = vfs_floor_cwd_lock();
+    if (cfg("!CONFIG_DEBUG")) {
+        return; // a release build has no seam
+    }
+    let lock = cwdLock();
     let s = spin_lock_irqsave(lock);
     if (!WQ_READY) {
-        waitqueue_init(vfs_floor_cwd_held_wq(), "vfs-cwd-hold-walk\0".ptr as *CChar);
-        waitqueue_init(vfs_floor_cwd_swap_wq(), "vfs-cwd-hold-swap\0".ptr as *CChar);
+        waitqueue_init(cwdHeldWq(), "vfs-cwd-hold-walk\0".ptr as *CChar);
+        waitqueue_init(cwdSwapWq(), "vfs-cwd-hold-swap\0".ptr as *CChar);
         WQ_READY = true;
     }
     let _ = strlcpy(borrow mut NAME as *mut [u8; 32] as *mut CChar, processName, PROCESS_NAME_MAX);
@@ -402,30 +434,39 @@ unsafe fn holdArm(processName: *CChar) {
     SWAPPER.storeWith(0, StoreOrdering.Relaxed);
     HELD_VN = 0;
     PUT_DONE.storeWith(false, StoreOrdering.Relaxed);
-    let _ = memset(vfs_floor_cwd_record() as *mut void, 0, layoutOf<vfs_cwd_hold_record>().size);
+    let _ = memset(cwdRecord() as *mut void, 0, layoutOf<vfs_cwd_hold_record>().size);
     STATE.storeWith(1, StoreOrdering.Relaxed);
     spin_unlock_irqrestore(lock, s);
 }
 
-@cfg("CONFIG_DEBUG")
 @export("vfs_test_cwd_hold_state")
-fn holdState() -> u32 => STATE.loadWith(LoadOrdering.Acquire);
+fn holdState() -> u32 {
+    if (cfg("!CONFIG_DEBUG")) {
+        return 0; // a release build has no seam
+    }
+    return STATE.loadWith(LoadOrdering.Acquire);
+}
 
 /// Safety: `out` is null or a writable record.
-@cfg("CONFIG_DEBUG")
 @export("vfs_test_cwd_hold_disarm")
 unsafe fn holdDisarm(out: *mut vfs_cwd_hold_record) {
-    let lock = vfs_floor_cwd_lock();
+    if (cfg("!CONFIG_DEBUG")) {
+        if (!out.isNull()) {
+            let _ = memset(out as *mut void, 0, layoutOf<vfs_cwd_hold_record>().size);
+        }
+        return; // a release build has no seam
+    }
+    let lock = cwdLock();
     let s = spin_lock_irqsave(lock);
     if (!out.isNull()) {
-        let _ = memcpy(out as *mut void, vfs_floor_cwd_record() as *void, layoutOf<vfs_cwd_hold_record>().size);
+        let _ = memcpy(out as *mut void, cwdRecord() as *void, layoutOf<vfs_cwd_hold_record>().size);
     }
     let parked = STATE.loadWith(LoadOrdering.Relaxed) == 2 && !PUT_DONE.loadWith(LoadOrdering.Relaxed);
     STATE.storeWith(0, StoreOrdering.Relaxed);
     PUT_DONE.storeWith(true, StoreOrdering.Relaxed); // nothing stays parked past a disarm
     spin_unlock_irqrestore(lock, s);
     if (parked) {
-        let _ = waitqueue_wake_all(vfs_floor_cwd_held_wq());
+        let _ = waitqueue_wake_all(cwdHeldWq());
     }
 }
 
@@ -471,14 +512,16 @@ fn altHex(line: borrow mut TextWriter, v: u64) {
 /// The walk half. `start` is the pointer the caller read and has not yet dereferenced. Returns 0 to proceed, -EINTR
 /// if the held wait was interrupted by a kill.
 /// Safety: `start` is a live directory the caller is about to reference; no lock held.
-@cfg("CONFIG_DEBUG")
 @export("vfs_cwd_hold_walk")
 unsafe fn holdWalk(start: *mut vnode) -> i32 {
+    if (cfg("!CONFIG_DEBUG")) {
+        return 0; // a release build has no seam
+    }
     let st = STATE.loadWith(LoadOrdering.Acquire);
     if (st != 1 && st != 4) {
         return 0; // the one load every relative walk pays in a debug build
     }
-    let lock = vfs_floor_cwd_lock();
+    let lock = cwdLock();
     var s = spin_lock_irqsave(lock);
     let now = STATE.loadWith(LoadOrdering.Relaxed);
     let take = (now == 1 || now == 4) && mineLocked() && me() != SWAPPER.loadWith(LoadOrdering.Relaxed);
@@ -488,15 +531,15 @@ unsafe fn holdWalk(start: *mut vnode) -> i32 {
         HOLDER = me();
         HELD_VN = start as usize as u64;
         {
-            let r = Ptr.toBorrowMut(vfs_floor_cwd_record());
+            let r = Ptr.toBorrowMut(cwdRecord());
             r.held = true;
         }
         {
-            let r = Ptr.toBorrowMut(vfs_floor_cwd_record());
+            let r = Ptr.toBorrowMut(cwdRecord());
             r.ref_at_hold = kobject_refcount(objOf(start) as *kobject);
         }
         {
-            let r = Ptr.toBorrowMut(vfs_floor_cwd_record());
+            let r = Ptr.toBorrowMut(cwdRecord());
             r.t_hold_ns = clock_now_ns();
         }
     }
@@ -504,9 +547,9 @@ unsafe fn holdWalk(start: *mut vnode) -> i32 {
     if (!take) {
         return 0;
     }
-    let _ = waitqueue_wake_all(vfs_floor_cwd_swap_wq());
+    let _ = waitqueue_wake_all(cwdSwapWq());
 
-    let rc = vfs_floor_wait_killable_timeout(vfs_floor_cwd_held_wq(), putDone, 0 as *mut void, 5000000000);
+    let rc = wait_floor_until_killable_timeout(cwdHeldWq(), putDone, 0 as *mut void, 5000000000);
     // The liveness check, on the pointer read before the wait and with nothing but the code under test keeping it
     // alive. VNODE_DEAD is not judged: an unlinked directory a walk still references is what pass 2 produces on a
     // correct kernel.
@@ -530,21 +573,21 @@ unsafe fn holdWalk(start: *mut vnode) -> i32 {
     }
     s = spin_lock_irqsave(lock);
     {
-        let r = Ptr.toBorrowMut(vfs_floor_cwd_record());
+        let r = Ptr.toBorrowMut(cwdRecord());
         r.ref_at_resume = refs; // recorded; not what released_after_put is derived from
     }
     {
-        let r = Ptr.toBorrowMut(vfs_floor_cwd_record());
+        let r = Ptr.toBorrowMut(cwdRecord());
         r.resumed_dead = (Ptr.toBorrow(start as *vnode).flags & VNODE_DEAD) != 0;
     }
     if (rc == -EINTR) {
         {
-            let r = Ptr.toBorrowMut(vfs_floor_cwd_record());
+            let r = Ptr.toBorrowMut(cwdRecord());
             r.interrupted = true;
         }
     } else if (rc == -ETIMEDOUT) {
         {
-            let r = Ptr.toBorrowMut(vfs_floor_cwd_record());
+            let r = Ptr.toBorrowMut(cwdRecord());
             r.walk_timed_out = true;
         }
     }
@@ -556,9 +599,11 @@ unsafe fn holdWalk(start: *mut vnode) -> i32 {
 }
 
 /// Safety: called from a thread, no lock held.
-@cfg("CONFIG_DEBUG")
 @export("vfs_cwd_hold_swapper_enter")
 unsafe fn swapperEnter() {
+    if (cfg("!CONFIG_DEBUG")) {
+        return; // a release build has no seam
+    }
     if (STATE.loadWith(LoadOrdering.Acquire) == 0) {
         return;
     }
@@ -571,13 +616,13 @@ unsafe fn swapperEnter() {
         LoadOrdering.Acquire) < 2) {
         return;
     }
-    let lock = vfs_floor_cwd_lock();
+    let lock = cwdLock();
     let s = spin_lock_irqsave(lock);
     if (mineLocked()) {
         SWAPPER.storeWith(me(), StoreOrdering.Relaxed);
         if (STATE.loadWith(LoadOrdering.Relaxed) == 2 && HOLDER == me()) {
             {
-                let r = Ptr.toBorrowMut(vfs_floor_cwd_record());
+                let r = Ptr.toBorrowMut(cwdRecord());
                 r.swapper_was_held = true; // a held walk that reached chdir: its own timeout let it
             }
         }
@@ -586,41 +631,43 @@ unsafe fn swapperEnter() {
 }
 
 /// Safety: called from a thread, no lock held.
-@cfg("CONFIG_DEBUG")
 @export("vfs_cwd_hold_swap_wait")
 unsafe fn swapWait() {
+    if (cfg("!CONFIG_DEBUG")) {
+        return; // a release build has no seam
+    }
     if (STATE.loadWith(LoadOrdering.Acquire) == 0 || SWAPPER.loadWith(LoadOrdering.Acquire) != me()) {
         return;
     }
     {
-        let r = Ptr.toBorrowMut(vfs_floor_cwd_record());
+        let r = Ptr.toBorrowMut(cwdRecord());
         r.t_swap_wait_ns = clock_now_ns();
     }
     // Visible to the racer as debug.cwd_hold == 4: "the swapper is inside chdir and waiting", which the swap-first
     // pass uses to start its walker only once the swapper is provably ahead of it.
     let _ = STATE.compareExchangeWith(1, 4, Ordering.AcquireRelease);
-    let rc = vfs_floor_wait_killable_timeout(vfs_floor_cwd_swap_wq(), held, 0 as *mut void, 2000000000);
+    let rc = wait_floor_until_killable_timeout(cwdSwapWq(), held, 0 as *mut void, 2000000000);
     {
-        let r = Ptr.toBorrowMut(vfs_floor_cwd_record());
+        let r = Ptr.toBorrowMut(cwdRecord());
         r.t_swap_done_ns = clock_now_ns();
     }
     {
-        let r = Ptr.toBorrowMut(vfs_floor_cwd_record());
+        let r = Ptr.toBorrowMut(cwdRecord());
         r.swap_rc = rc;
     }
     if (rc == 0) {
         return;
     }
-    let lock = vfs_floor_cwd_lock();
+    let lock = cwdLock();
     let s = spin_lock_irqsave(lock);
     if (rc == -EINTR) {
         {
-            let r = Ptr.toBorrowMut(vfs_floor_cwd_record());
+            let r = Ptr.toBorrowMut(cwdRecord());
             r.interrupted = true;
         }
     } else {
         {
-            let r = Ptr.toBorrowMut(vfs_floor_cwd_record());
+            let r = Ptr.toBorrowMut(cwdRecord());
             r.swap_timed_out = true;
         }
     }
@@ -628,13 +675,15 @@ unsafe fn swapWait() {
 }
 
 /// Safety: called from a thread, no lock held.
-@cfg("CONFIG_DEBUG")
 @export("vfs_cwd_hold_swapper_leave")
 unsafe fn swapperLeave() {
+    if (cfg("!CONFIG_DEBUG")) {
+        return; // a release build has no seam
+    }
     if (SWAPPER.loadWith(LoadOrdering.Acquire) != me()) {
         return; // the cheap answer for every call that never registered
     }
-    let lock = vfs_floor_cwd_lock();
+    let lock = cwdLock();
     let s = spin_lock_irqsave(lock);
     // Asked again under the lock: another thread may have registered in between, and its registration and its held
     // walk are not this failure's to clear (found in review).
@@ -649,26 +698,28 @@ unsafe fn swapperLeave() {
     }
     spin_unlock_irqrestore(lock, s);
     if (release) {
-        let _ = waitqueue_wake_all(vfs_floor_cwd_held_wq());
+        let _ = waitqueue_wake_all(cwdHeldWq());
     }
 }
 
 /// Safety: `old` is null or a live vnode; no lock held.
-@cfg("CONFIG_DEBUG")
 @export("vfs_cwd_hold_before_put")
 unsafe fn beforePut(old: *mut vnode) {
+    if (cfg("!CONFIG_DEBUG")) {
+        return; // a release build has no seam
+    }
     if (SWAPPER.loadWith(LoadOrdering.Acquire) != me()) {
         return;
     }
-    let lock = vfs_floor_cwd_lock();
+    let lock = cwdLock();
     let s = spin_lock_irqsave(lock);
     if (STATE.loadWith(LoadOrdering.Relaxed) == 2 && !old.isNull()) {
         {
-            let r = Ptr.toBorrowMut(vfs_floor_cwd_record());
+            let r = Ptr.toBorrowMut(cwdRecord());
             r.held_matches_old = HELD_VN == old as usize as u64;
         }
         {
-            let r = Ptr.toBorrowMut(vfs_floor_cwd_record());
+            let r = Ptr.toBorrowMut(cwdRecord());
             r.ref_before_put = kobject_refcount(objOf(old) as *kobject);
         }
     }
@@ -676,13 +727,15 @@ unsafe fn beforePut(old: *mut vnode) {
 }
 
 /// Safety: `old` is null or a vnode the held walk keeps alive; no lock held.
-@cfg("CONFIG_DEBUG")
 @export("vfs_cwd_hold_after_put")
 unsafe fn afterPut(old: *mut vnode) {
+    if (cfg("!CONFIG_DEBUG")) {
+        return; // a release build has no seam
+    }
     if (SWAPPER.loadWith(LoadOrdering.Acquire) != me()) {
         return;
     }
-    let lock = vfs_floor_cwd_lock();
+    let lock = cwdLock();
     let s = spin_lock_irqsave(lock);
     let release = STATE.loadWith(LoadOrdering.Relaxed) == 2;
     if (release) {
@@ -691,13 +744,13 @@ unsafe fn afterPut(old: *mut vnode) {
         // instead, from the count it read on resume, the release-before-put mutation SURVIVED -- the woken walk loses
         // the race to the put a few instructions later every time. `old` is alive here on a correct kernel because
         // the held walk holds it; on a broken one that walk is about to panic on this same object.
-        let r = Ptr.toBorrowMut(vfs_floor_cwd_record());
+        let r = Ptr.toBorrowMut(cwdRecord());
         r.ref_at_release = if (old.isNull()) 0 else kobject_refcount(objOf(old) as *kobject);
         r.released_after_put = r.ref_before_put != 0 && r.ref_at_release + 1 == r.ref_before_put;
         PUT_DONE.storeWith(true, StoreOrdering.Relaxed);
     }
     spin_unlock_irqrestore(lock, s);
     if (release) {
-        let _ = waitqueue_wake_all(vfs_floor_cwd_held_wq());
+        let _ = waitqueue_wake_all(cwdHeldWq());
     }
 }

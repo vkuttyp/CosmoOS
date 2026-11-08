@@ -482,6 +482,16 @@ unsigned waitqueue_wake_all(struct waitqueue *wq)
 
 void waitqueue_prepare(struct waitqueue *wq, struct wait_entry *e) { (void)wq; (void)e; }
 void waitqueue_finish(struct waitqueue *wq, struct wait_entry *e) { (void)wq; (void)e; }
+/* The kernel's wait helpers (kernel/scheduler/wait_floor.c) that the VFS calls, over this test's waitqueue fakes, as
+ * vfs_floor.c expanded wait.h's macros here before the VFS's waits were CeeSafe's. */
+void wait_floor_until(struct waitqueue *wq, bool (*cond)(void *), void *arg)
+{
+    wait_event(wq, cond(arg));
+}
+int wait_floor_until_killable_timeout(struct waitqueue *wq, bool (*cond)(void *), void *arg, uint64_t ns)
+{
+    return wait_event_killable_timeout(wq, cond(arg), ns);
+}
 void wait_timeout_init(struct wait_timeout *wt, struct waitqueue *wq) { (void)wt; (void)wq; g_expired = false; }
 void wait_timeout_fired(struct timer *t, void *arg) { (void)t; (void)arg; }
 bool wait_timeout_expired(const struct wait_timeout *wt) { (void)wt; return g_expired; }
@@ -518,7 +528,7 @@ struct thread *thread_create(void (*entry)(void *arg), void *arg, const char *na
     return chance(3) ? NULL : &g_reaper;
 }
 
-struct list_node *vfs_floor_orphans(void);
+extern struct list_node vfs_orphans; /* vfs_mount.cee's */
 
 /* ---- the test's filesystem: trees of nodes and entries, every operation failing now and then ---- */
 
@@ -2655,7 +2665,7 @@ static void test_orphans(void)
     file_put(f);
     note(403, vfs_mount_reap_orphans());   /* the file was its last user */
     note(401, vfs_bdev_mounted(&g_bd[3]));
-    EXPECT(list_empty(vfs_floor_orphans()));
+    EXPECT(list_empty(&vfs_orphans));
 
     /* A mount nested on one only another namespace sees: when that namespace goes, the outer mount waits for the
      * nested one, whose mountpoint is one of its directories. */
@@ -2667,7 +2677,7 @@ static void test_orphans(void)
     note_rc(404, vfs_umount2("/o", 0));   /* the initial namespace forgets /o; the other still sees it */
     mountns_put(ns);                       /* /o is an orphan, and /o/d is on it */
     note(405, vfs_mount_reap_orphans());
-    EXPECT(!list_empty(vfs_floor_orphans()));
+    EXPECT(!list_empty(&vfs_orphans));
     struct vnode *up = NULL;
     int urc = vfs_lookup(inner, "..", &up);   /* out of the nested mount, into the orphan */
     note_vn(406, urc, up);
@@ -2679,7 +2689,7 @@ static void test_orphans(void)
     vnode_put(inner);
     note_rc(408, vfs_umount_at(root, ".", 0));   /* the nested mount, from inside it */
     note(405, vfs_mount_reap_orphans());          /* its mountpoint was the orphan's last use */
-    EXPECT(list_empty(vfs_floor_orphans()));
+    EXPECT(list_empty(&vfs_orphans));
     teardown();
 }
 
@@ -2720,7 +2730,7 @@ static void teardown(void)
             g_ns[k] = NULL;
         }
     note(355, vfs_mount_reap_orphans());
-    EXPECT(list_empty(vfs_floor_orphans()));
+    EXPECT(list_empty(&vfs_orphans));
     if (g_detached != NULL) {
         note_rc(350, vfs_mount_detached_release(g_detached, false));
         g_detached = NULL;

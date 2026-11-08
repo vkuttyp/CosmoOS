@@ -9,15 +9,16 @@
 // one mount's); the VFS's initialisation, the root mount, the internal and detached mounts; formats; and the passes
 // that name a mount by its id.
 //
-// The mounts, the filesystem types and the namespaces stay C (vfs.h, mountns.h). vfs_floor.c keeps what C names as
-// data: the mount table, its lock, the leaf lock of the namespaces' lists and the root mount (vfs_internal.h, which
-// mountns_floor.c reads too), the registry's and the claims' lists and the claims' lock, the mount's kobject type,
-// the wait a drain sleeps in and the passes' wait queue, the page count the cache's limit comes from, and the
-// values asserted that this file writes as its own constants.
+// The mounts, the filesystem types and the namespaces stay C (vfs.h, mountns.h). What C names as data is this file's
+// (ADR 0080 §3.2): the mount table, its lock, the leaf lock of the namespaces' lists and the root mount, exported as
+// vfs_internal.h declares them (mountns.cee and fsctl.cee import them), the registry's and the claims' lists and the
+// claims' lock, the orphans, and the mount's kobject type; the drain and the reaper wait through wait.h's
+// wait_floor_until, and the values this file writes as its own constants are the headers', which C checks.
 
 @header("kernel/blk.h", "kernel/errno.h", "kernel/kmalloc.h", "kernel/list.h", "kernel/log.h", "kernel/mountns.h",
-    "kernel/mutex.h", "kernel/object.h", "kernel/pagecache.h", "kernel/part.h", "kernel/printf.h",
-    "kernel/string.h", "kernel/vfs.h")
+    "kernel/mutex.h", "kernel/object.h", "kernel/pagecache.h", "kernel/part.h", "kernel/printf.h", "kernel/string.h",
+    "kernel/vfs.h", "kernel/cred.h", "kernel/lockdep.h", "kernel/pmm.h", "kernel/process.h", "kernel/sched.h",
+    "kernel/spinlock.h", "kernel/thread.h", "kernel/timer.h", "kernel/wait.h", "vfs_internal.h")
 extern "C" {
     struct cosmo_keyslot;
     struct waitqueue;
@@ -67,6 +68,10 @@ extern "C" {
         nr_vnodes: u32;
         next_ino: u64;
         passes_running: u64;
+        /// The passes' wait queue, which an unmount's drain sleeps on.
+        passes_quiet: waitqueue;
+        /// The devices a mount holds beyond its own (MOUNT_HELD_MAX).
+        held: [*mut blkdev; 12];
         unmounting: bool;
         unmounted: bool;
     }
@@ -106,47 +111,167 @@ extern "C" {
     fn waitqueue_wake_all(wq: *mut waitqueue) -> u32;
     fn thread_create(entry: extern "C" fn(*mut void), arg: *mut void, name: *CChar, priority: i32) -> *mut thread;
 
-    // vfs_floor.c
-    fn vfs_floor_mounts() -> *mut list_node;
-    fn vfs_floor_mounts_lock() -> *mut mutex;
-    fn vfs_floor_mount_list_lock() -> *mut spinlock_t;
-    fn vfs_floor_root_slot() -> *mut *mut mount;
-    fn vfs_floor_fs_types() -> *mut list_node;
-    fn vfs_floor_claims() -> *mut list_node;
-    fn vfs_floor_claim_lock() -> *mut mutex;
-    fn vfs_floor_mount_type() -> *kobject_type;
-    fn vfs_floor_passes_init(mnt: *mut mount);
-    fn vfs_floor_passes_wait(mnt: *mut mount);
-    fn vfs_floor_passes_wake(mnt: *mut mount);
-    fn vfs_floor_total_pages() -> u64;
-    fn vfs_floor_orphans() -> *mut list_node;
-    fn vfs_floor_orphan_wq() -> *mut waitqueue;
-    fn vfs_floor_orphan_wait(cond: extern "C" fn(*mut void) -> bool, arg: *mut void);
-    /// The devices a mount holds beyond its own: `held`, MOUNT_HELD_MAX pointers.
-    fn vfs_floor_held(mnt: *mut mount) -> *mut *mut blkdev;
+    /// wait.h's wait_event, for a condition a callback tests.
+    fn wait_floor_until(wq: *mut waitqueue, cond: extern "C" fn(*mut void) -> bool, arg: *mut void);
+    /// pmm.h's figures: the pages the buddy manages, which the page cache takes a quarter of.
+    struct pmm_stats {
+        total_pages: u64;
+    }
+    fn pmm_get_stats(out: *mut pmm_stats);
+    // The values and layout the C compiler checks (ADR 0080 §3.1), which the floor asserted.
+    const VNODE_DIR: u32 = 2;
+    const VNODE_HASH: u32 = 64;
+    const SCHED_PRIO_DEFAULT: i32 = 32;
+    const ENOENT: i32 = 2;
+    const ENOMEM: i32 = 12;
+    const EBUSY: i32 = 16;
+    const EEXIST: i32 = 17;
+    const ENODEV: i32 = 19;
+    const ENOTDIR: i32 = 20;
+    const EINVAL: i32 = 22;
+    const ENOSPC: i32 = 28;
+    const EOPNOTSUPP: i32 = 95;
+    const KMEM_ZERO: u32 = 1;
+    const VNODE_PINNED: u32 = 1;
+    const VNODE_NESTED_CHILD: u32 = 2;
+    const MOUNT_RDONLY: u32 = 1;
+    const MOUNT_DETACHED: u32 = 8;
+    const MOUNT_HELD_MAX: u32 = 12;
+    const VFS_UMOUNT_FORCE: u32 = 1;
+    const VFS_NAME_MAX: usize = 255;
+    const VFS_PATH_MAX: usize = 1024;
+    /// vfs_vnode.cee's errno.h values
+    @cvalue("EINTR == 4 && ETIMEDOUT == 110")
+    const VFS_MOUNT_FACT_0: bool = true;
+    /// vfs_vnode.cee's vfs.h and process.h values
+    @cvalue("VNODE_REG == 1 && VNODE_DEAD == 2 && PROCESS_NAME_MAX == 32")
+    const VFS_MOUNT_FACT_1: bool = true;
+    /// vfs_vnode.cee's field widths
+    @cvalue("sizeof(((struct process *)0)->pid) == 4 && sizeof(((struct process *)0)->nr_threads) == 4 && sizeof(((struct mount *)0)->nr_vnodes) == 4 && sizeof(((struct vnode *)0)->flags) == 4")
+    const VFS_MOUNT_FACT_2: bool = true;
+    /// vfs_mount.cee's vfs.h, lockdep.h and blk.h values
+    @cvalue("BLKDEV_NAME_MAX == 16 && sizeof(((struct mount_ns_ref *)0)->path) == VFS_PATH_MAX")
+    const VFS_MOUNT_FACT_3: bool = true;
+    /// vfs_mount.cee's field widths
+    @cvalue("sizeof(((struct mount *)0)->nheld) == 4 && sizeof(((struct mount *)0)->flags) == 4 && sizeof(((struct mount *)0)->passes_running) == 8")
+    const VFS_MOUNT_FACT_4: bool = true;
+    /// vfs_walk.cee's errno.h values
+    @cvalue("EPERM == 1 && EIO == 5 && ENXIO == 6 && EACCES == 13 && EISDIR == 21 && ETXTBSY == 26 && EROFS == 30 && ENAMETOOLONG == 36 && ELOOP == 40 && ENOTSUP == 95")
+    const VFS_MOUNT_FACT_5: bool = true;
+    /// vfs_walk.cee's vfs.h and cred.h values
+    @cvalue("VNODE_SOCK == 5 && VNODE_LNK == 6 && VFS_MAX_COMPONENTS == 40 && VFS_MAX_SYMLINKS == 8 && VFS_MAY_EXEC == 1 && VFS_MAY_WRITE == 2 && VFS_MAY_READ == 4 && VFS_SET_MODE == 1 && VFS_SET_MTIME == 2 && VFS_SET_MTIME_NOW == 4 && VFS_ID_KEEP == 0xffffffffu && PRIV_SYS_ADMIN == 2 && CRED_ROOT_UID == 0")
+    const VFS_MOUNT_FACT_6: bool = true;
+    /// vfs_walk.cee's syscall.h values
+    @cvalue("COSMO_O_RDONLY == 0 && COSMO_O_WRONLY == 1 && COSMO_O_ACCMODE == 3 && COSMO_O_CREAT == 0x40 && COSMO_O_EXCL == 0x80 && COSMO_O_TRUNC == 0x200 && COSMO_O_DIRECTORY == 0x10000 && COSMO_O_NOFOLLOW == 0x20000")
+    const VFS_MOUNT_FACT_7: bool = true;
+    /// vfs_file.cee's errno.h, vfs.h and syscall.h values
+    @cvalue("EBADF == 9 && EFAULT == 14 && ESPIPE == 29 && VNODE_CHR == 3 && VNODE_FIFO == 4 && COSMO_O_APPEND == 0x400 && COSMO_O_NONBLOCK == 0x800 && COSMO_IO_READABLE == 1 && COSMO_IO_WRITABLE == 2 && COSMO_SEEK_SET == 0 && COSMO_SEEK_CUR == 1 && COSMO_SEEK_END == 2")
+    const VFS_MOUNT_FACT_8: bool = true;
+    /// vfs_file.cee's dirent layout and field widths
+    @cvalue("sizeof(struct cosmo_dirent) == 16 && offsetof(struct cosmo_dirent, name) == 12 && sizeof(((struct file *)0)->flags) == 4")
+    const VFS_MOUNT_FACT_9: bool = true;
+    /// vfs_dir.cee's errno.h, lockdep.h, vfs.h and types.h values
+    @cvalue("EXDEV == 18 && EMLINK == 31 && VNODE_NESTED_PARENT2 == 1 && MOUNT_CACHE_IS_STORE == 2 && VFS_LINK_MAX == 65000 && PAGE_SIZE == 4096")
+    const VFS_MOUNT_FACT_10: bool = true;
 }
 
-// errno.h, vfs.h and lockdep.h, which vfs_floor.c checks.
-const ENOENT: i32 = 2;
-const ENOMEM: i32 = 12;
-const EBUSY: i32 = 16;
-const EEXIST: i32 = 17;
-const ENODEV: i32 = 19;
-const ENOTDIR: i32 = 20;
-const EINVAL: i32 = 22;
-const ENOSPC: i32 = 28;
-const EOPNOTSUPP: i32 = 95;
-const KMEM_ZERO: u32 = 1;
-const VNODE_DIR: u32 = 2;
-const VNODE_PINNED: u32 = 1;
-const VNODE_HASH: u32 = 64;
-const VNODE_NESTED_CHILD: u32 = 2;
-const MOUNT_RDONLY: u32 = 1;
-const MOUNT_DETACHED: u32 = 8;
-const MOUNT_HELD_MAX: u32 = 12;
-const VFS_UMOUNT_FORCE: u32 = 1;
-const VFS_NAME_MAX: usize = 255;
-const VFS_PATH_MAX: usize = 1024;
+// ---- The mount table (vfs_internal.h), the registry, the claims and the orphans (ADR 0080 §3.2) ----
+
+/// The mount table, its lock (taken before any vnode lock), the lock of the mounts' list that /proc/mounts is
+/// rendered under, and the root mount: vfs_internal.h's C data.
+@export("g_mounts_lock")
+static mut MOUNTS_LOCK: mutex = mutex {};
+@export("g_mount_list_lock")
+static mut MOUNT_LIST_LOCK: spinlock_t = SPINLOCK_INIT("mount-list\0".ptr as *CChar);
+@export("g_mounts")
+static mut MOUNTS: list_node = list_node {
+    next: borrow mut MOUNTS as *mut list_node,
+    prev: borrow mut MOUNTS as *mut list_node,
+};
+@export("g_root_mount")
+static mut ROOT_MOUNT: *mut mount = 0 as *mut mount;
+
+/// The registered filesystem types.
+static mut FS_TYPES: list_node = list_node {
+    next: borrow mut FS_TYPES as *mut list_node,
+    prev: borrow mut FS_TYPES as *mut list_node,
+};
+/// The block devices mounts hold (invariant V38), under a leaf lock.
+static mut CLAIM_LOCK: mutex = mutex {};
+static mut CLAIMS: list_node = list_node { next: borrow mut CLAIMS as *mut list_node, prev: borrow mut CLAIMS as *mut list_node };
+/// Orphans waiting for their last user (vfs_mount_orphaned), by `link`, under g_mounts_lock; the reaper sleeps on the
+/// queue. test_vfs.c reads the list.
+@export("vfs_orphans")
+static mut ORPHAN_LIST: list_node = list_node {
+    next: borrow mut ORPHAN_LIST as *mut list_node,
+    prev: borrow mut ORPHAN_LIST as *mut list_node,
+};
+static mut ORPHAN_WQ: waitqueue = waitqueue {};
+/// The mount's kobject type: the release is this file's.
+static mut MOUNT_TYPE: kobject_type = kobject_type { name: "mount\0".ptr as *CChar, release: releaseObj };
+
+/// Safety: the table is used under its lock.
+unsafe fn mountsList() -> *mut list_node => borrow mut MOUNTS as *mut list_node;
+
+/// Safety: as mountsList.
+unsafe fn mountsLock() -> *mut mutex => borrow mut MOUNTS_LOCK as *mut mutex;
+
+/// Safety: as mountsList.
+unsafe fn mountListLock() -> *mut spinlock_t => borrow mut MOUNT_LIST_LOCK as *mut spinlock_t;
+
+/// Safety: as mountsList.
+unsafe fn rootSlot() -> *mut *mut mount => borrow mut ROOT_MOUNT as *mut *mut mount;
+
+/// Safety: as mountsList.
+unsafe fn fsTypes() -> *mut list_node => borrow mut FS_TYPES as *mut list_node;
+
+/// Safety: the claims are used under their lock.
+unsafe fn claims() -> *mut list_node => borrow mut CLAIMS as *mut list_node;
+
+/// Safety: as claims.
+unsafe fn claimLock() -> *mut mutex => borrow mut CLAIM_LOCK as *mut mutex;
+
+/// Safety: as mountsList.
+unsafe fn orphans() -> *mut list_node => borrow mut ORPHAN_LIST as *mut list_node;
+
+/// Safety: the queue is set up at init.
+unsafe fn orphanWq() -> *mut waitqueue => borrow mut ORPHAN_WQ as *mut waitqueue;
+
+/// Safety: the type is never written.
+unsafe fn mountType() -> *kobject_type => borrow mut MOUNT_TYPE as *mut kobject_type as *kobject_type;
+
+/// Safety: `mnt` is a mount being made.
+unsafe fn passesInit(mnt: *mut mount) {
+    waitqueue_init(borrow mut Ptr.toBorrowMut(mnt).passes_quiet as *mut waitqueue, "mount-passes\0".ptr as *CChar);
+
+}
+
+/// No pass running: the drain's condition.
+/// Safety: `arg` is a live mount.
+@callback
+unsafe fn passesQuiet(arg: *mut void) -> bool => passes(arg as *mut mount).loadWith(LoadOrdering.Acquire) == 0;
+
+/// An unmount's drain sleeps until the last pass is released (wait.h's wait_event: the waiter is queued and BLOCKED
+/// before the count is read, so no release is missed).
+/// Safety: `mnt` is a live mount.
+unsafe fn passesWait(mnt: *mut mount) {
+    wait_floor_until(borrow mut Ptr.toBorrowMut(mnt).passes_quiet as *mut waitqueue, passesQuiet, mnt as *mut void);
+}
+
+/// Safety: as passesWait.
+unsafe fn passesWake(mnt: *mut mount) {
+    let _ = waitqueue_wake_all(borrow mut Ptr.toBorrowMut(mnt).passes_quiet as *mut waitqueue);
+}
+
+/// The pages the buddy manages.
+/// Safety: the page allocator is up.
+unsafe fn totalPages() -> u64 {
+    var pst: pmm_stats;
+    pmm_get_stats(borrow mut pst as *mut pmm_stats);
+    return pst.total_pages;
+}
+
+// errno.h, vfs.h and lockdep.h's.
 
 /// How many mounts are on the table. Under g_mounts_lock.
 static mut NR_MOUNTS: u32 = 0;
@@ -162,7 +287,6 @@ static ORPHANS: AtomicU32 = AtomicU32.constant(0);
 static KICKS: AtomicU32 = AtomicU32.constant(0);
 /// The reaper is started at the first orphan that has to wait. Under g_mounts_lock.
 static mut REAPER: bool = false;
-const SCHED_PRIO_DEFAULT: i32 = 32;
 
 /// The panic of a broken invariant (the C's KASSERT).
 fn check(ok: bool, what: StringView) {
@@ -232,7 +356,8 @@ unsafe fn pathOf(r: *mut mount_ns_ref) -> *mut u8 => (r as *mut u8).add(offsetOf
 
 /// Device `i` of the ones `mnt` holds beyond its own.
 /// Safety: `mnt` is live; i < MOUNT_HELD_MAX.
-unsafe fn heldOf(mnt: *mut mount, i: u32) -> *mut *mut blkdev => vfs_floor_held(mnt).add(i as usize);
+unsafe fn heldOf(mnt: *mut mount, i: u32) -> *mut *mut blkdev =>
+    ((mnt as *mut u8).add(offsetOf<mount>(held)) as *mut *mut blkdev).add(i as usize);
 
 /// Safety: `mnt` is live; b < VNODE_HASH.
 unsafe fn bucket(mnt: *mut mount, b: u32) -> *mut list_node =>
@@ -275,9 +400,9 @@ unsafe fn claimCovers(mnt: *mut mount, bd: *mut blkdev) -> bool {
 /// Claim `mnt`'s device, or -EBUSY: it, its disk or one of its partitions is another mount's.
 /// Safety: `mnt` is a mount with a device, not claimed.
 unsafe fn claim(mnt: *mut mount) -> i32 {
-    let lock = vfs_floor_claim_lock();
+    let lock = claimLock();
     mutex_lock(lock);
-    let head = vfs_floor_claims();
+    let head = claims();
     var node = List.first(head as *list_node);
     while (!node.isNull()) {
         if (claimCovers(mountOfClaim(node), Ptr.toBorrow(mnt as *mount).bdev)) {
@@ -293,7 +418,7 @@ unsafe fn claim(mnt: *mut mount) -> i32 {
 
 /// Safety: `mnt` is a claimed mount.
 unsafe fn unclaim(mnt: *mut mount) {
-    let lock = vfs_floor_claim_lock();
+    let lock = claimLock();
     mutex_lock(lock);
     List.remove(borrow mut Ptr.toBorrowMut(mnt).claim_link as *mut list_node);
     List.init(borrow mut Ptr.toBorrowMut(mnt).claim_link as *mut list_node);
@@ -319,9 +444,9 @@ unsafe fn setHeld(mnt: *mut mount, bd: **mut blkdev, n: u32) -> i32 {
     if (n > MOUNT_HELD_MAX) {
         return -ENOSPC;
     }
-    let lock = vfs_floor_claim_lock();
+    let lock = claimLock();
     mutex_lock(lock);
-    let head = vfs_floor_claims();
+    let head = claims();
     var node = List.first(head as *list_node);
     while (!node.isNull()) {
         let other = mountOfClaim(node);
@@ -387,9 +512,9 @@ unsafe fn deviceMounted(bd: *blkdev) -> bool => deviceMountedExcept(bd, 0 as *mo
 @export("vfs_bdev_mounted_except")
 unsafe fn deviceMountedExcept(bd: *blkdev, self: *mount) -> bool {
     var found = false;
-    let lock = vfs_floor_claim_lock();
+    let lock = claimLock();
     mutex_lock(lock);
-    let head = vfs_floor_claims();
+    let head = claims();
     var node = List.first(head as *list_node);
     while (!node.isNull()) {
         let mnt = mountOfClaim(node);
@@ -421,9 +546,9 @@ unsafe fn registerFs(fs: *mut fs_type) -> i32 {
     if (f.name.isNull() || f.mount.isNull() || f.unmount.isNull()) {
         return -EINVAL;
     }
-    let lock = vfs_floor_mounts_lock();
+    let lock = mountsLock();
     mutex_lock(lock);
-    let head = vfs_floor_fs_types();
+    let head = fsTypes();
     var node = List.first(head as *list_node);
     while (!node.isNull()) {
         if (strcmp(Ptr.toBorrow(fsOfLink(node) as *fs_type).name, f.name) == 0) {
@@ -448,10 +573,10 @@ unsafe fn registerFs(fs: *mut fs_type) -> i32 {
 /// Safety: `name` is NUL-terminated.
 @export("vfs_find_fs")
 unsafe fn findFs(name: *CChar) -> *mut fs_type {
-    let lock = vfs_floor_mounts_lock();
+    let lock = mountsLock();
     mutex_lock(lock);
     var found = 0 as *mut fs_type;
-    let head = vfs_floor_fs_types();
+    let head = fsTypes();
     var node = List.first(head as *list_node);
     while (!node.isNull()) {
         let f = fsOfLink(node);
@@ -473,7 +598,7 @@ unsafe fn mountAlloc(fs: *mut fs_type, bdev: *mut blkdev, flags: u32) -> *mut mo
     if (mnt.isNull()) {
         return mnt;
     }
-    kobject_init(objOf(mnt), vfs_floor_mount_type());
+    kobject_init(objOf(mnt), mountType());
     {
         let x = Ptr.toBorrowMut(mnt);
         x.id = NEXT_MOUNT_ID.fetchAddWith(1, Ordering.Relaxed);
@@ -490,7 +615,7 @@ unsafe fn mountAlloc(fs: *mut fs_type, bdev: *mut blkdev, flags: u32) -> *mut mo
     spinlock_init(borrow mut Ptr.toBorrowMut(mnt).lock as *mut spinlock_t, "mount-hash\0".ptr as *CChar);
     mutex_init(borrow mut Ptr.toBorrowMut(mnt).rename_lock as *mut mutex, "rename\0".ptr as *CChar);
     mutex_init(borrow mut Ptr.toBorrowMut(mnt).sync_lock as *mut mutex, "mount-sync\0".ptr as *CChar);
-    vfs_floor_passes_init(mnt);
+    passesInit(mnt);
     List.init(borrow mut Ptr.toBorrowMut(mnt).link as *mut list_node);
     List.init(borrow mut Ptr.toBorrowMut(mnt).cover_link as *mut list_node);
     List.init(borrow mut Ptr.toBorrowMut(mnt).claim_link as *mut list_node);
@@ -501,7 +626,7 @@ unsafe fn mountAlloc(fs: *mut fs_type, bdev: *mut blkdev, flags: u32) -> *mut mo
 /// Safety: a root is mounted.
 @export("vfs_root")
 unsafe fn root() -> *mut vnode {
-    let r = *Ptr.toBorrow(vfs_floor_root_slot());
+    let r = *Ptr.toBorrow(rootSlot());
     if (r.isNull()) {
         check(false, "g_root_mount != NULL"); // panics: the return is for the analyzer, which cannot see that
         return 0 as *mut vnode;
@@ -670,7 +795,7 @@ unsafe fn mountAt(start: *mut vnode, startname: *CChar, path: *CChar, fsname: *C
         return rc;
     }
 
-    let table = vfs_floor_mounts_lock();
+    let table = mountsLock();
     mutex_lock(table);
     mutex_lock(lockOf(dir));
     // No stacking *in this namespace*: a directory already covered here (the lookup followed it, so `dir` is that
@@ -701,12 +826,12 @@ unsafe fn mountAt(start: *mut vnode, startname: *CChar, path: *CChar, fsname: *C
         x.ns = ns;
     }
     List.pushBack(borrow mut Ptr.toBorrowMut(mnt).ns_refs as *mut list_node, borrow mut Ptr.toBorrowMut(r).mnt_link as *mut list_node);
-    spin_lock(vfs_floor_mount_list_lock());
+    spin_lock(mountListLock());
     List.pushBack(borrow mut Ptr.toBorrowMut(ns).mounts as *mut list_node,
         borrow mut Ptr.toBorrowMut(r).ns_link as *mut list_node);
-    spin_unlock(vfs_floor_mount_list_lock());
+    spin_unlock(mountListLock());
     mutex_unlock(lockOf(dir));
-    List.pushBack(vfs_floor_mounts(), borrow mut Ptr.toBorrowMut(mnt).link as *mut list_node);
+    List.pushBack(mountsList(), borrow mut Ptr.toBorrowMut(mnt).link as *mut list_node);
     NR_MOUNTS += 1;
     mutex_unlock(table);
     var buffer: [u8; 256] = [0; 256];
@@ -808,16 +933,16 @@ unsafe fn teardownOrphan(mnt: *mut mount) {
 /// Safety: `mnt` is detached and no namespace can see it; no lock held.
 @export("vfs_mount_orphaned")
 unsafe fn orphaned(mnt: *mut mount) {
-    let table = vfs_floor_mounts_lock();
+    let table = mountsLock();
     mutex_lock(table);
-    List.pushBack(vfs_floor_orphans(), borrow mut Ptr.toBorrowMut(mnt).link as *mut list_node);
+    List.pushBack(orphans(), borrow mut Ptr.toBorrowMut(mnt).link as *mut list_node);
     let _ = ORPHANS.fetchAddWith(1, Ordering.SequentiallyConsistent);
     mutex_unlock(table);
     let _ = reapOrphans();
 
     // Still waiting: something uses it. Said once, and the reaper is there to finish it.
     mutex_lock(table);
-    let head = vfs_floor_orphans();
+    let head = orphans();
     var node = List.first(head as *list_node);
     while (!node.isNull()) {
         if (mountOfLink(node) == mnt) {
@@ -844,11 +969,11 @@ unsafe fn orphaned(mnt: *mut mount) {
 @export("vfs_mount_reap_orphans")
 unsafe fn reapOrphans() -> u32 {
     var reaped: u32 = 0;
-    let table = vfs_floor_mounts_lock();
+    let table = mountsLock();
     loop {
         mutex_lock(table);
         var idle = 0 as *mut mount;
-        let head = vfs_floor_orphans();
+        let head = orphans();
         var node = List.first(head as *list_node);
         while (!node.isNull()) {
             let cand = mountOfLink(node);
@@ -879,7 +1004,7 @@ unsafe fn reapOrphans() -> u32 {
 fn orphanKick() {
     if (ORPHANS.loadWith(LoadOrdering.SequentiallyConsistent) != 0) {
         let _ = KICKS.fetchAddWith(1, Ordering.SequentiallyConsistent);
-        unsafe { let _ = waitqueue_wake_all(vfs_floor_orphan_wq()); }
+        unsafe { let _ = waitqueue_wake_all(orphanWq()); }
     }
 }
 
@@ -896,7 +1021,7 @@ unsafe fn reaper(arg: *mut void) {
     loop {
         var seen = KICKS.loadWith(LoadOrdering.SequentiallyConsistent);
         let _ = reapOrphans();
-        vfs_floor_orphan_wait(kicked, borrow mut seen as *mut u32 as *mut void);
+        wait_floor_until(orphanWq(), kicked, borrow mut seen as *mut u32 as *mut void);
     }
 }
 
@@ -1005,7 +1130,7 @@ unsafe fn umountAt(start: *mut vnode, path: *CChar, flags: u32) -> i32 {
         vnode_put(rootVn);
         return -EINVAL; // not a mount root
     }
-    if (mnt == *Ptr.toBorrow(vfs_floor_root_slot())) {
+    if (mnt == *Ptr.toBorrow(rootSlot())) {
         vnode_put(rootVn);
         return -EBUSY; // the root filesystem stays
     }
@@ -1019,7 +1144,7 @@ unsafe fn umountAt(start: *mut vnode, path: *CChar, flags: u32) -> i32 {
     }
     vnode_put(rootVn); // the lookup reference; the mount still holds one
 
-    let table = vfs_floor_mounts_lock();
+    let table = mountsLock();
     mutex_lock(table);
     // If another namespace can still see this mount, unmounting is only this namespace forgetting it: the filesystem
     // stays, so there is nothing to commit, nothing to tear down, and no reason to care whether anyone else has a
@@ -1046,9 +1171,9 @@ unsafe fn umountAt(start: *mut vnode, path: *CChar, flags: u32) -> i32 {
     if (seen > 1) {
         List.remove(borrow mut Ptr.toBorrowMut(mine).mnt_link as *mut list_node);
         mutex_unlock(lockOf(mp));
-        spin_lock(vfs_floor_mount_list_lock());
+        spin_lock(mountListLock());
         List.remove(borrow mut Ptr.toBorrowMut(mine).ns_link as *mut list_node);
-        spin_unlock(vfs_floor_mount_list_lock());
+        spin_unlock(mountListLock());
         mutex_unlock(table);
         kfree(mine as *mut void);
         sayDropped(path, seen - 1, "");
@@ -1073,7 +1198,7 @@ unsafe fn umountAt(start: *mut vnode, path: *CChar, flags: u32) -> i32 {
     // release landing in the gap wakes a waiter that is already there.
     while (passes(mnt).loadWith(LoadOrdering.Acquire) != 0) {
         mutex_unlock(table);
-        vfs_floor_passes_wait(mnt);
+        passesWait(mnt);
         mutex_lock(table);
     }
 
@@ -1099,9 +1224,9 @@ unsafe fn umountAt(start: *mut vnode, path: *CChar, flags: u32) -> i32 {
             mutex_unlock(table);
             return -EINVAL; // someone else dropped this namespace's view
         }
-        spin_lock(vfs_floor_mount_list_lock());
+        spin_lock(mountListLock());
         List.remove(borrow mut Ptr.toBorrowMut(mine).ns_link as *mut list_node);
-        spin_unlock(vfs_floor_mount_list_lock());
+        spin_unlock(mountListLock());
         mutex_unlock(table);
         kfree(mine as *mut void);
         sayDropped(path, seen - 1, " (gained during the drain)");
@@ -1147,9 +1272,9 @@ unsafe fn umountAt(start: *mut vnode, path: *CChar, flags: u32) -> i32 {
     List.init(borrow mut Ptr.toBorrowMut(mnt).cover_link as *mut list_node);
     List.remove(borrow mut Ptr.toBorrowMut(mine).mnt_link as *mut list_node);
     mutex_unlock(lockOf(mp));
-    spin_lock(vfs_floor_mount_list_lock());
+    spin_lock(mountListLock());
     List.remove(borrow mut Ptr.toBorrowMut(mine).ns_link as *mut list_node);
-    spin_unlock(vfs_floor_mount_list_lock());
+    spin_unlock(mountListLock());
     kfree(mine as *mut void);
     List.remove(borrow mut Ptr.toBorrowMut(mnt).link as *mut list_node);
     NR_MOUNTS -= 1;
@@ -1254,14 +1379,14 @@ unsafe fn switchRoot(start: *mut vnode, path: *CChar, oldOut: *mut *mut mount) -
     // along), at the top level of the old root (it moves to the same name in the new one), or under such a mount --
     // /dev/pts under /dev (roadmap M4) -- whose mountpoint is a directory of that mount, so it comes along with it.
     // Anything else would be left hanging off a filesystem that is about to be released.
-    let table = vfs_floor_mounts_lock();
+    let table = mountsLock();
     mutex_lock(table);
-    let r = *Ptr.toBorrow(vfs_floor_root_slot());
+    let r = *Ptr.toBorrow(rootSlot());
     let t = Ptr.toBorrow(target as *mount);
     if (r.isNull() || t.root != v || target == r || t.parent != r || t.mountpoint.isNull() || t.unmounting) {
         rc = -EINVAL; // not a mount root, the root already, or not on a directory of the root
     }
-    let head = vfs_floor_mounts();
+    let head = mountsList();
     var node = List.first(head as *list_node);
     while (!node.isNull()) {
         let n = mountOfLink(node);
@@ -1341,7 +1466,7 @@ unsafe fn switchRoot(start: *mut vnode, path: *CChar, oldOut: *mut *mut mount) -
             node = List.next(head as *list_node, node);
         }
         let t2 = Ptr.toBorrow(target as *mount);
-        if (now != nrMounts || *Ptr.toBorrow(vfs_floor_root_slot()) != r || t2.parent != r || t2.mountpoint.isNull()) {
+        if (now != nrMounts || *Ptr.toBorrow(rootSlot()) != r || t2.parent != r || t2.mountpoint.isNull()) {
             rc = -EBUSY;
         }
         i = 0;
@@ -1401,7 +1526,7 @@ unsafe fn switchRoot(start: *mut vnode, path: *CChar, oldOut: *mut *mut mount) -
     var dead: [u64; 2] = [0; 2]; // a struct list_node: next, prev
     let deadHead = borrow mut dead as *mut [u64; 2] as *mut list_node;
     List.init(deadHead);
-    spin_lock(vfs_floor_mount_list_lock());
+    spin_lock(mountListLock());
     let refs = borrow mut Ptr.toBorrowMut(target).ns_refs as *mut list_node;
     node = List.first(refs as *list_node);
     while (!node.isNull()) {
@@ -1413,10 +1538,10 @@ unsafe fn switchRoot(start: *mut vnode, path: *CChar, oldOut: *mut *mut mount) -
         node = nextNode;
     }
     {
-        let slot6 = Ptr.toBorrowMut(vfs_floor_root_slot());
+        let slot6 = Ptr.toBorrowMut(rootSlot());
         *slot6 = target;
     }
-    spin_unlock(vfs_floor_mount_list_lock());
+    spin_unlock(mountListLock());
     node = List.first(deadHead as *list_node);
     while (!node.isNull()) {
         let nextNode = List.next(deadHead as *list_node, node);
@@ -1483,7 +1608,7 @@ unsafe fn releaseOldRoot(r: *mut mount) -> i32 {
         KernelLog.send(LogLevel.Warn, line);
         return -EBUSY;
     }
-    let table = vfs_floor_mounts_lock();
+    let table = mountsLock();
     mutex_lock(table);
     List.remove(borrow mut Ptr.toBorrowMut(r).link as *mut list_node);
     NR_MOUNTS -= 1;
@@ -1510,8 +1635,8 @@ unsafe fn releaseOldRoot(r: *mut mount) -> i32 {
 @export("vfs_sync")
 unsafe fn sync() -> i32 {
     var rc: i32 = 0;
-    let table = vfs_floor_mounts_lock();
-    let head = vfs_floor_mounts();
+    let table = mountsLock();
+    let head = mountsList();
     var k: u32 = 0;
     loop {
         mutex_lock(table);
@@ -1555,12 +1680,12 @@ unsafe fn sync() -> i32 {
 @export("vfs_init")
 unsafe fn init() {
     check(!INITIALIZED, "!g_initialized");
-    mutex_init(vfs_floor_mounts_lock(), "mounts\0".ptr as *CChar);
-    mutex_init(vfs_floor_claim_lock(), "mount-claims\0".ptr as *CChar);
-    waitqueue_init(vfs_floor_orphan_wq(), "vfs-orphans\0".ptr as *CChar);
+    mutex_init(mountsLock(), "mounts\0".ptr as *CChar);
+    mutex_init(claimLock(), "mount-claims\0".ptr as *CChar);
+    waitqueue_init(orphanWq(), "vfs-orphans\0".ptr as *CChar);
     INITIALIZED = true;
     // The page cache may hold a quarter of RAM before clean pages are reclaimed (docs/kernel/security/design.md §3).
-    pagecache_set_limit(vfs_floor_total_pages() / 4);
+    pagecache_set_limit(totalPages() / 4);
     pagecache_dirty_init();
 }
 
@@ -1606,9 +1731,9 @@ unsafe fn mountRoot(fsname: *CChar, bdev: *mut blkdev, flags: u32) -> i32 {
     if (fs.isNull()) {
         return -ENODEV;
     }
-    let table = vfs_floor_mounts_lock();
+    let table = mountsLock();
     mutex_lock(table);
-    let have = !(*Ptr.toBorrow(vfs_floor_root_slot())).isNull();
+    let have = !(*Ptr.toBorrow(rootSlot())).isNull();
     mutex_unlock(table);
     if (have) {
         return -EBUSY; // once; switching it later is another operation
@@ -1619,13 +1744,13 @@ unsafe fn mountRoot(fsname: *CChar, bdev: *mut blkdev, flags: u32) -> i32 {
         return rc;
     }
     mutex_lock(table);
-    spin_lock(vfs_floor_mount_list_lock());
+    spin_lock(mountListLock());
     {
-        let slot8 = Ptr.toBorrowMut(vfs_floor_root_slot());
+        let slot8 = Ptr.toBorrowMut(rootSlot());
         *slot8 = r;
     }
-    spin_unlock(vfs_floor_mount_list_lock());
-    List.pushBack(vfs_floor_mounts(), borrow mut Ptr.toBorrowMut(r).link as *mut list_node);
+    spin_unlock(mountListLock());
+    List.pushBack(mountsList(), borrow mut Ptr.toBorrowMut(r).link as *mut list_node);
     NR_MOUNTS = 1;
     mutex_unlock(table);
     sayPath(LogLevel.Info, "vfs: root mounted (", fsname, ")");
@@ -1761,10 +1886,10 @@ unsafe fn acquire(id: u64, out: *mut *mut mount) -> i32 {
     if (id == 0 || out.isNull()) {
         return -EINVAL;
     }
-    let table = vfs_floor_mounts_lock();
+    let table = mountsLock();
     mutex_lock(table);
     var found = 0 as *mut mount;
-    let r = *Ptr.toBorrow(vfs_floor_root_slot());
+    let r = *Ptr.toBorrow(rootSlot());
     if (!r.isNull() && Ptr.toBorrow(r as *mount).id == id) {
         found = r;
     } else {
@@ -1805,7 +1930,7 @@ unsafe fn releasePass(mnt: *mut mount) {
     if (mnt.isNull()) {
         return;
     }
-    let table = vfs_floor_mounts_lock();
+    let table = mountsLock();
     mutex_lock(table);
     let p = passes(mnt);
     let running = p.loadWith(LoadOrdering.Relaxed);
@@ -1815,7 +1940,7 @@ unsafe fn releasePass(mnt: *mut mount) {
     mutex_unlock(table);
     // The falling edge is the only one a drain is waiting for.
     if (left == 0) {
-        vfs_floor_passes_wake(mnt);
+        passesWake(mnt);
     }
     kobject_put(objOf(mnt));
 }
@@ -1823,7 +1948,7 @@ unsafe fn releasePass(mnt: *mut mount) {
 /// Safety: the VFS is initialised.
 @export("vfs_mount_count")
 unsafe fn mountCount() -> u32 {
-    let table = vfs_floor_mounts_lock();
+    let table = mountsLock();
     mutex_lock(table);
     let n = NR_MOUNTS;
     mutex_unlock(table);
@@ -1834,9 +1959,9 @@ unsafe fn mountCount() -> u32 {
 @export("vfs_vnode_count")
 unsafe fn vnodeCount() -> u32 {
     var n: u32 = 0;
-    let table = vfs_floor_mounts_lock();
+    let table = mountsLock();
     mutex_lock(table);
-    let head = vfs_floor_mounts();
+    let head = mountsList();
     var node = List.first(head as *list_node);
     while (!node.isNull()) {
         n += Ptr.toBorrow(mountOfLink(node) as *mount).nr_vnodes;
@@ -1849,10 +1974,10 @@ unsafe fn vnodeCount() -> u32 {
 /// Safety: the VFS is initialised.
 @export("vfs_dump")
 unsafe fn dump() {
-    let table = vfs_floor_mounts_lock();
+    let table = mountsLock();
     mutex_lock(table);
     kprintf("mounts (%u):\n\0".ptr as *CChar, NR_MOUNTS);
-    let head = vfs_floor_mounts();
+    let head = mountsList();
     var node = List.first(head as *list_node);
     while (!node.isNull()) {
         let mnt = Ptr.toBorrow(mountOfLink(node) as *mount);

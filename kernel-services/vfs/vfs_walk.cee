@@ -7,10 +7,10 @@
 // creates, truncates and opens what it reaches.
 //
 // The vnodes and files stay C (vfs.h). A walk's state is this file's own struct; the rest of the VFS walks to a
-// parent through vfs_walk_parent. vfs_floor.c asserts the values this file writes as its own constants.
+// parent through vfs_walk_parent. The values this file writes as its own constants are the headers', which C checks.
 
 @header("kernel/cred.h", "kernel/errno.h", "kernel/kmalloc.h", "kernel/mountns.h", "kernel/mutex.h",
-    "kernel/string.h", "kernel/vfs.h")
+    "kernel/string.h", "kernel/vfs.h", "vfs_internal.h")
 extern "C" {
     struct file;
     struct mount_ns;
@@ -63,53 +63,55 @@ extern "C" {
     fn vfs_file_run_open(f: *mut file) -> i32;
     fn vfs_text_busy_locked(vn: *mut vnode) -> bool;
 
-    // vfs_floor.c
-    fn vfs_floor_root_slot() -> *mut *mut mount;
+    /// vfs_mount.cee's root mount (vfs_internal.h's g_root_mount).
+    static mut g_root_mount: *mut mount;
+
+    // The values and layout the C compiler checks (ADR 0080 §3.1), which the floor asserted.
+    const VNODE_REG: u32 = 1;
+    const VNODE_DIR: u32 = 2;
+    const VNODE_DEAD: u32 = 2;
+    const ENOENT: i32 = 2;
+    const ENOMEM: i32 = 12;
+    const EBUSY: i32 = 16;
+    const EEXIST: i32 = 17;
+    const ENOTDIR: i32 = 20;
+    const EINVAL: i32 = 22;
+    const MOUNT_RDONLY: u32 = 1;
+    const VFS_NAME_MAX: usize = 255;
+    const VFS_PATH_MAX: usize = 1024;
+    const EPERM: i32 = 1;
+    const EIO: i32 = 5;
+    const ENXIO: i32 = 6;
+    const EACCES: i32 = 13;
+    const EISDIR: i32 = 21;
+    const ETXTBSY: i32 = 26;
+    const EROFS: i32 = 30;
+    const ENAMETOOLONG: i32 = 36;
+    const ELOOP: i32 = 40;
+    const ENOTSUP: i32 = 95;
+    const VNODE_SOCK: u32 = 5;
+    const VNODE_LNK: u32 = 6;
+    const VFS_MAX_COMPONENTS: u32 = 40;
+    const VFS_MAX_SYMLINKS: u32 = 8;
+    const VFS_MAY_EXEC: u32 = 1;
+    const VFS_MAY_WRITE: u32 = 2;
+    const VFS_MAY_READ: u32 = 4;
+    const VFS_SET_MODE: u32 = 1;
+    const VFS_SET_MTIME: u32 = 2;
+    const VFS_SET_MTIME_NOW: u32 = 4;
+    const VFS_ID_KEEP: u32 = 0xFFFFFFFF;
+    const PRIV_SYS_ADMIN: u32 = 2;
+    const COSMO_O_RDONLY: u32 = 0;
+    const COSMO_O_WRONLY: u32 = 1;
+    const COSMO_O_ACCMODE: u32 = 3;
+    const COSMO_O_CREAT: u32 = 0x40;
+    const COSMO_O_EXCL: u32 = 0x80;
+    const COSMO_O_TRUNC: u32 = 0x200;
+    const COSMO_O_DIRECTORY: u32 = 0x10000;
+    const COSMO_O_NOFOLLOW: u32 = 0x20000;
 }
 
-// errno.h, vfs.h, cred.h, kmalloc.h and syscall.h, which vfs_floor.c checks.
-const EPERM: i32 = 1;
-const ENOENT: i32 = 2;
-const EIO: i32 = 5;
-const ENXIO: i32 = 6;
-const ENOMEM: i32 = 12;
-const EACCES: i32 = 13;
-const EBUSY: i32 = 16;
-const EEXIST: i32 = 17;
-const ENOTDIR: i32 = 20;
-const EISDIR: i32 = 21;
-const EINVAL: i32 = 22;
-const ETXTBSY: i32 = 26;
-const EROFS: i32 = 30;
-const ENAMETOOLONG: i32 = 36;
-const ELOOP: i32 = 40;
-const ENOTSUP: i32 = 95;
-const VNODE_REG: u32 = 1;
-const VNODE_DIR: u32 = 2;
-const VNODE_SOCK: u32 = 5;
-const VNODE_LNK: u32 = 6;
-const VNODE_DEAD: u32 = 2;
-const MOUNT_RDONLY: u32 = 1;
-const VFS_NAME_MAX: usize = 255;
-const VFS_PATH_MAX: usize = 1024;
-const VFS_MAX_COMPONENTS: u32 = 40;
-const VFS_MAX_SYMLINKS: u32 = 8;
-const VFS_MAY_EXEC: u32 = 1;
-const VFS_MAY_WRITE: u32 = 2;
-const VFS_MAY_READ: u32 = 4;
-const VFS_SET_MODE: u32 = 1;
-const VFS_SET_MTIME: u32 = 2;
-const VFS_SET_MTIME_NOW: u32 = 4;
-const VFS_ID_KEEP: u32 = 0xFFFFFFFF;
-const PRIV_SYS_ADMIN: u32 = 2;
-const COSMO_O_RDONLY: u32 = 0;
-const COSMO_O_WRONLY: u32 = 1;
-const COSMO_O_ACCMODE: u32 = 3;
-const COSMO_O_CREAT: u32 = 0x40;
-const COSMO_O_EXCL: u32 = 0x80;
-const COSMO_O_TRUNC: u32 = 0x200;
-const COSMO_O_DIRECTORY: u32 = 0x10000;
-const COSMO_O_NOFOLLOW: u32 = 0x20000;
+// errno.h, vfs.h, cred.h, kmalloc.h and syscall.h's.
 const SLASH: u8 = 0x2F;
 const DOT: u8 = 0x2E;
 
@@ -139,7 +141,7 @@ unsafe fn opLookup(dir: *mut vnode, name: *u8, len: usize, out: *mut *mut vnode)
 
 /// The global root's vnode.
 /// Safety: a root is mounted.
-unsafe fn globalRoot() -> *mut vnode => Ptr.toBorrow(*Ptr.toBorrow(vfs_floor_root_slot()) as *mount).root;
+unsafe fn globalRoot() -> *mut vnode => Ptr.toBorrow(g_root_mount as *mount).root;
 
 /// cred.h's cred_has: the bit, and an effective uid of 0.
 /// Safety: `c` is live.

@@ -163,6 +163,7 @@ bool wait_timeout_expired(const struct wait_timeout *wt);
 void wait_floor_until(struct waitqueue *wq, bool (*cond)(void *), void *arg);
 bool wait_floor_until_timeout(struct waitqueue *wq, bool (*cond)(void *), void *arg, uint64_t ns);
 int wait_floor_until_killable(struct waitqueue *wq, bool (*cond)(void *), void *arg);
+int wait_floor_until_killable_timeout(struct waitqueue *wq, bool (*cond)(void *), void *arg, uint64_t ns);
 void wait_floor_check_sleep(uintptr_t ip, const char *what);
 void wait_floor_loop(struct waitqueue *wq, bool (*attempt)(void *, bool), void (*woken)(void *), void *arg);
 
