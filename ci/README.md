@@ -8,9 +8,11 @@ test job runs in, and `litmus` (Debian sid with herdtools7) for the
 memory-order litmus job. Both bases are pinned by digest.
 
 `scripts/ci-image.sh` builds and pushes them to
-`ghcr.io/vkuttyp/cosmoos-ci` only when this `Dockerfile` changes (the tag
-is the target name and the file's SHA-256 prefix) and hands the jobs
-digest references. Each image lists its packages in
+`ghcr.io/vkuttyp/cosmoos-ci` only when this `Dockerfile` or
+`fetch-ceesafec.py` changes (the tag is the target name and the pair's
+SHA-256 prefix) and hands the jobs digest references. `fetch-ceesafec.py`
+downloads the pinned ceesafec, through the GitHub API first and retrying,
+for the image and for CI's "CeeSafe sources" job. Each image lists its packages in
 `/usr/share/cosmoos-ci/packages.txt`. Nothing here is used by a local
 build; `scripts/setup-dev-linux.sh` installs the same packages on a
 development host. See `docs/development.md`, "Continuous integration".

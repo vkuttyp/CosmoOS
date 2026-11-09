@@ -513,8 +513,8 @@ makes sure the project's toolchain image exists: `ci/Dockerfile` (Debian
 trixie, pinned by digest, with QEMU 10, `libclang-rt-dev` for the
 sanitizers, `qemu-system-arm` and `qemu-efi-aarch64` for the AArch64
 target) is built and pushed to `ghcr.io/vkuttyp/cosmoos-ci` by
-`scripts/ci-image.sh` only when the Dockerfile's SHA-256 is not already
-a tag there, and the job outputs the image's digest reference. Every
+`scripts/ci-image.sh` only when the SHA-256 of the Dockerfile and
+`ci/fetch-ceesafec.py` is not already a tag there, and the job outputs the image's digest reference. Every
 other job runs in that image, pulled from this repository's GitHub
 Container Registry by digest (roadmap M6: pulling Debian from Docker Hub,
 then from ECR Public, on every job failed whole runs at "Initialize

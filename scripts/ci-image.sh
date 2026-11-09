@@ -8,14 +8,16 @@
 #   output    lines `toolchain=REPO@sha256:...` and `litmus=REPO@sha256:...`,
 #             appended to $GITHUB_OUTPUT when it is set
 #
-# The tag is the target name and the first 16 hex digits of the
-# Dockerfile's SHA-256, so an unchanged Dockerfile never rebuilds and a
-# changed one never reuses an old image.
+# The tag is the target name and the first 16 hex digits of the SHA-256 of
+# the Dockerfile and ci/fetch-ceesafec.py, the one file it copies, so an
+# unchanged pair never rebuilds and a changed one never reuses an old image.
+# GH_TOKEN, when set, reaches the build as the secret gh_token (the
+# ceesafec download's API calls), which no layer keeps.
 set -eu
 repo=$1
 root=$(cd "$(dirname "$0")/.." && pwd)
 df="$root/ci/Dockerfile"
-hash=$(sha256sum "$df" | cut -c1-16)
+hash=$(cat "$df" "$root/ci/fetch-ceesafec.py" | sha256sum | cut -c1-16)
 for target in toolchain litmus; do
     ref="$repo:$target-$hash"
     # Built only when the registry says the tag is not there: any other
@@ -28,7 +30,11 @@ for target in toolchain litmus; do
         exit 1
     else
         echo "ci-image: building $ref" >&2
-        docker build --target "$target" -t "$ref" -f "$df" "$root/ci"
+        if [ -n "${GH_TOKEN:-}" ]; then
+            docker build --secret id=gh_token,env=GH_TOKEN --target "$target" -t "$ref" -f "$df" "$root/ci"
+        else
+            docker build --target "$target" -t "$ref" -f "$df" "$root/ci"
+        fi
         docker push "$ref"
     fi
     digest=$(docker buildx imagetools inspect "$ref" --format '{{json .Manifest}}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["digest"])')

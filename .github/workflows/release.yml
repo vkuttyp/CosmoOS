@@ -84,6 +84,8 @@ jobs:
 
       - name: The images for this tag's ci/Dockerfile
         id: image
+        env:
+          GH_TOKEN: ${{ github.token }} # the image's ceesafec download (ci/fetch-ceesafec.py), a build secret
         run: scripts/ci-image.sh "ghcr.io/${{ github.repository_owner }}/cosmoos-ci"
 
   # Two independent builds of each architecture: separate jobs, so separate

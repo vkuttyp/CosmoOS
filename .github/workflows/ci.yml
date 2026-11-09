@@ -85,8 +85,9 @@ jobs:
         run: python3 scripts/ci-gate.py
 
   # The CI images (ci/Dockerfile; scripts/ci-image.sh): pushed to
-  # ghcr.io/<owner>/cosmoos-ci under a tag naming the Dockerfile's hash the
-  # first time that Dockerfile is seen, found there every later time. Its
+  # ghcr.io/<owner>/cosmoos-ci under a tag naming the hash of the Dockerfile
+  # and ci/fetch-ceesafec.py the first time that pair is seen, found there
+  # every later time. Its
   # outputs are digest references, so every job below runs in exactly the
   # image this Dockerfile produced, and a release records that digest.
   image:
@@ -110,6 +111,8 @@ jobs:
 
       - name: Build and push the images if ci/Dockerfile changed
         id: image
+        env:
+          GH_TOKEN: ${{ github.token }} # the image's ceesafec download (ci/fetch-ceesafec.py), a build secret
         run: scripts/ci-image.sh "ghcr.io/${{ github.repository_owner }}/cosmoos-ci"
 
   # The kernel's CeeSafe sources compile with the pinned ceesafec and the negative
@@ -129,12 +132,12 @@ jobs:
       - name: Install the pinned ceesafec
         env:
           CEESAFEC_SHA256: 011e1f0ca7983ec943d3c0bf7bcf8b75a076cd9b9ddaac71fa552fbc22166629   # ceesafec-linux-x64.tar.gz of the pinned release
+          GH_TOKEN: ${{ github.token }}
         run: |
           v=$(python3 scripts/cee-gen.py --pinned)
-          # Retried: GitHub's release-asset download answers 504 for minutes at a time (run 42572157976); eight
-          # tries 30 s apart stay inside the job's 10 minutes.
-          curl -fsSL --retry 8 --retry-delay 30 --retry-all-errors -o ceesafec.tar.gz "https://github.com/CeeSafe/CeeSafe/releases/download/v$v/ceesafec-linux-x64.tar.gz"
-          echo "$CEESAFEC_SHA256  ceesafec.tar.gz" | sha256sum -c -
+          # Through the API, then the download URL, which has answered 504 for minutes at a time (run 42572157976);
+          # six tries 30 s apart stay inside the job's 10 minutes. The script checks the SHA-256.
+          python3 ci/fetch-ceesafec.py "$v" "$CEESAFEC_SHA256" ceesafec.tar.gz 6
           mkdir -p "$RUNNER_TEMP/ceesafec" && tar -xzf ceesafec.tar.gz -C "$RUNNER_TEMP/ceesafec" && rm ceesafec.tar.gz
           echo "CEESAFEC=$RUNNER_TEMP/ceesafec/ceesafec" >> "$GITHUB_ENV"
 
