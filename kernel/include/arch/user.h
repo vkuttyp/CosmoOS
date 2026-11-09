@@ -145,6 +145,14 @@ void arch_user_access_end(void);
  * outside the bracket is not denied; the guard boot (make test-guard)
  * runs where it is. */
 bool arch_user_guard_present(void);
+/* Whether the guard is SMAP (x86-64) rather than PAN, for messages: a C
+ * constant macro CeeSafe can read (its cfg tests a macro's value, and
+ * ARCH_* are only defined or not). */
+#if defined(ARCH_X86_64)
+#define ARCH_USER_GUARD_IS_SMAP() true
+#else
+#define ARCH_USER_GUARD_IS_SMAP() false
+#endif
 
 /* True if the trap frame was captured while executing user code. */
 struct arch_trap_frame;

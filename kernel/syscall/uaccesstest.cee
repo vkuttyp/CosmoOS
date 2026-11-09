@@ -1,0 +1,268 @@
+// uaccesstest.cee - The exception fixup path (docs/kernel/memory/design.md §6.1), in CeeSafe (roadmap 2.0 SA8).
+//
+// uaccess runs on a kernel thread with no process: every user address is unmapped from its point of view, so each copy
+// takes a real kernel-mode page fault at a user address that the fault handler must resolve through the exception
+// table into -EFAULT. The user-mode side (a process whose pointers name PROT_NONE, read-only and unmapped pages) is
+// process-efault. uaccess-guard checks the guard on kernel access to user memory where the CPU has one.
+
+@header(
+    "arch/mmu.h", "arch/user.h", "kernel/errno.h", "kernel/extable.h", "kernel/kernel.h", "kernel/page.h",
+    "kernel/percpu.h", "kernel/process.h", "kernel/selftest.h", "kernel/string.h", "kernel/uaccess.h", "kernel/vmm.h",
+)
+extern "C" {
+    struct process;
+    struct vm_space;
+    struct arch_mmu_context;
+    struct vm_stats;
+    @ctype("vm_cache_t")
+    struct vm_cache_t;
+    struct percpu {
+        cur_space: *mut vm_space;
+    }
+    // process.h's user window, errno.h's, types.h's PAGE_SIZE, mmu.h's and vmm.h's.
+    const USER_LO: u64 = 0x400000;
+    const USER_HI: u64 = 0x7FFFFFFFF000;
+    const EFAULT: i32 = 14;
+    const EINVAL: i32 = 22;
+    const PAGE_SIZE: usize = 4096;
+    const VM_PROT_RW: u32 = 3;
+    const VM_REGION_POPULATED: u32 = 4;
+    /// struct vm_stats is 14 counters of 64 bits; the test reads `fixups`.
+    @cvalue("sizeof(struct vm_stats) / sizeof(uint64_t)")
+    const VM_STATS_WORDS: usize = 14;
+    @cvalue("offsetof(struct vm_stats, fixups)")
+    const VM_STATS_FIXUPS_AT: usize = 32;
+    /// vm_space's page tables are its first member: a space's address is its mmu context's.
+    @cvalue("offsetof(struct vm_space, mmu)")
+    const MMU_AT: usize = 0;
+    static kernel_space: vm_space;
+    fn process_current() -> *mut process;
+    fn extable_count() -> u32;
+    fn extable_entry(i: u32, insn: *mut usize, fixup: *mut usize) -> bool;
+    fn extable_fixup(pc: usize) -> usize;
+    fn kernel_text_contains(addr: usize) -> bool;
+    fn vm_get_stats(out: *mut vm_stats);
+    fn user_range_ok(addr: u64, len: usize) -> bool;
+    fn copy_from_user(dst: *mut void, userSrc: u64, len: usize) -> i32;
+    fn copy_to_user(userDst: u64, src: *void, len: usize) -> i32;
+    fn strncpy_from_user(dst: *mut CChar, userSrc: u64, max: usize) -> i32;
+    fn arch_user_guard_present() -> bool;
+    fn arch_user_access_begin();
+    fn arch_user_access_end();
+    fn arch_copy_user_raw(dst: *mut void, src: *void, n: usize) -> usize;
+    fn this_cpu() -> *mut percpu;
+    fn vm_space_create_user(out: *mut *mut vm_space) -> i32;
+    fn vm_user_map_anon(space: *mut vm_space, base: u64, size: usize, prot: u32, flags: u32, name: *CChar) -> i32;
+    fn vm_space_switch(from: *mut vm_space, to: *mut vm_space);
+    fn vm_space_destroy(space: *mut vm_space);
+    fn arch_mmu_query(
+        ctx: *arch_mmu_context,
+        va: usize,
+        pa: *mut u64,
+        prot: *mut u32,
+        cache: *mut vm_cache_t,
+        pageSize: *mut usize,
+    ) -> bool;
+    fn phys_to_virt(pa: u64) -> *mut void;
+    fn memset(dst: *mut void, c: i32, n: usize) -> *mut void;
+    /// user.h: whether the guard is SMAP (x86-64) rather than PAN.
+    @constant
+    fn ARCH_USER_GUARD_IS_SMAP() -> bool;
+}
+
+/// Whether the guard is SMAP rather than PAN, for the report.
+static GUARD_IS_SMAP: bool = ARCH_USER_GUARD_IS_SMAP();
+
+/// An address in the kernel's image, far above the user window.
+const KERNEL_ADDR: u64 = 0xffffffff80000000;
+
+/// A failed check: its reason, for the runner's report, and false.
+/// Safety: `reason` is the runner's; `why` is a zero-terminated literal, which outlives the report.
+fn failed(reason: *mut *CChar, why: StringView) -> bool {
+    unsafe {
+        reason.write(why.ptr as *CChar);
+    }
+    return false;
+}
+
+/// The table exists and every entry names kernel text; uaccess's copies fault at user addresses and are resumed as
+/// -EFAULT, the kernel buffer untouched where the copy could not start.
+/// Safety: the runner's: a kernel thread with no process, `reason` writable.
+@export("selftest_uaccess")
+unsafe fn selftestUaccess(reason: *mut *CChar) -> bool {
+    if (!process_current().isNull()) {
+        return failed(reason, "check failed: process_current() == NULL\0");
+    }
+
+    let n = extable_count();
+    if (n < 1) {
+        return failed(reason, "check failed: n >= 1\0");
+    }
+    for (i in 0..n) {
+        var insn: usize = 0;
+        var fixup: usize = 0;
+        if (!extable_entry(i, borrow mut insn as *mut usize, borrow mut fixup as *mut usize)) {
+            return failed(reason, "check failed: extable_entry(i, &insn, &fixup)\0");
+        }
+        if (!kernel_text_contains(insn) || !kernel_text_contains(fixup)) {
+            return failed(reason, "check failed: kernel_text_contains(insn) && kernel_text_contains(fixup)\0");
+        }
+        if (extable_fixup(insn) != fixup) {
+            return failed(reason, "check failed: extable_fixup(insn) == fixup\0");
+        }
+    }
+    // Kernel text that is no user access, the runner's call site (the C used this function's own address).
+    if (extable_fixup(callerAddress()) != 0) {
+        return failed(reason, "check failed: extable_fixup(the caller's address) == 0\0");
+    }
+
+    // Range checks stay in front of the copy.
+    if (!user_range_ok(USER_LO, 1)) {
+        return failed(reason, "check failed: user_range_ok(USER_LO, 1)\0");
+    }
+    if (!user_range_ok(USER_HI, 0)) {
+        return failed(reason, "check failed: user_range_ok(USER_HI, 0)\0");
+    }
+    if (user_range_ok(USER_HI, 1)) {
+        return failed(reason, "check failed: !user_range_ok(USER_HI, 1)\0");
+    }
+    if (user_range_ok(USER_LO - 1, 1)) {
+        return failed(reason, "check failed: !user_range_ok(USER_LO - 1, 1)\0");
+    }
+    if (user_range_ok(USER_HI - 8, 16)) {
+        return failed(reason, "check failed: !user_range_ok(USER_HI - 8, 16)\0");
+    }
+    if (user_range_ok(KERNEL_ADDR, 8)) {
+        return failed(reason, "check failed: !user_range_ok(0xffffffff80000000ULL, 8)\0");
+    }
+    if (user_range_ok(USER_LO, 0xFFFFFFFFFFFFFFFF as usize)) {
+        return failed(reason, "check failed: !user_range_ok(USER_LO, (size_t)-1)\0");
+    }
+
+    var s0 = [0u64; 14]; // two struct vm_stats: VM_STATS_WORDS, which the C compiler checks
+    var s1 = [0u64; 14];
+    vm_get_stats(s0[..].ptr as *mut vm_stats);
+    var buf: [u8; 64] = [0x78; 64]; // 'x'
+    let b = buf[..].ptr as *mut u8;
+
+    // Real faults, resolved by the fixup: -EFAULT, no panic, the kernel buffer untouched where the copy could not start.
+    if (copy_from_user(b as *mut void, USER_LO, 16) != -EFAULT) {
+        return failed(reason, "check failed: copy_from_user(buf, USER_LO, 16) == -EFAULT\0");
+    }
+    if (buf[0] != 0x78) {
+        return failed(reason, "check failed: buf[0] == 'x'\0");
+    }
+    if (copy_to_user(USER_LO + 4096, b as *void, 16) != -EFAULT) {
+        return failed(reason, "check failed: copy_to_user(USER_LO + 4096, buf, 16) == -EFAULT\0");
+    }
+    if (copy_from_user(b as *mut void, USER_HI - 4096, 4096) != -EFAULT) {
+        return failed(reason, "check failed: copy_from_user(buf, USER_HI - 4096, 4096) == -EFAULT\0");
+    }
+    if (strncpy_from_user(b as *mut CChar, USER_LO + 100, 64) != -EFAULT) {
+        return failed(reason, "check failed: strncpy_from_user(buf, USER_LO + 100, sizeof(buf)) == -EFAULT\0");
+    }
+    if (buf[0] != 0) {
+        return failed(reason, "check failed: buf[0] == '\\0'\0");
+    }
+    if (copy_from_user(b as *mut void, USER_LO, 0) != 0) {
+        return failed(reason, "check failed: copy_from_user(buf, USER_LO, 0) == 0\0"); // nothing to copy: no access
+    }
+    if (copy_from_user(b as *mut void, KERNEL_ADDR, 8) != -EFAULT) {
+        // refused by range, no fault
+        return failed(reason, "check failed: copy_from_user(buf, 0xffffffff80000000ULL, 8) == -EFAULT\0");
+    }
+    if (strncpy_from_user(b as *mut CChar, USER_LO, 0) != -EINVAL) {
+        return failed(reason, "check failed: strncpy_from_user(buf, USER_LO, 0) == -EINVAL\0");
+    }
+
+    vm_get_stats(s1[..].ptr as *mut vm_stats);
+    let at = VM_STATS_FIXUPS_AT / 8;
+    if (s1[at] != s0[at] + 4) {
+        return failed(reason, "check failed: s1.fixups == s0.fixups + 4\0");
+    }
+    var buffer = [0u8; 128];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("selftest: uaccess: ");
+    line.decimal(n as u64);
+    line.text(" fixup entries; 4 kernel-mode faults at user addresses resumed as -EFAULT");
+    KernelLog.send(LogLevel.Info, line);
+    return true;
+}
+
+/// The guard on kernel access to user memory, where the CPU has one (SMAP on x86-64, PAN on AArch64;
+/// docs/kernel/security/design.md, "Hardening"). A private space maps one user page; with it active and interrupts off,
+/// one byte is read through the raw copy twice: inside arch_user_access_begin/end, which must succeed, and outside it,
+/// whose outcome IS the guard -- a fault (the fixup reports the byte not copied) where the guard is live, the byte where
+/// the CPU has no guard. The test says which, and the guard boot's harness requires "live". On the default CI models
+/// the fault cannot be asserted; the mapping is, and the bracketed read's success is also the proof the space was
+/// active (the kernel's own tables have nothing at that address).
+/// Safety: the runner's: a kernel thread with no process, `reason` writable.
+@export("selftest_uaccess_guard")
+unsafe fn selftestUaccessGuard(reason: *mut *CChar) -> bool {
+    if (!process_current().isNull()) {
+        return failed(reason, "check failed: process_current() == NULL\0");
+    }
+    let hasGuard = arch_user_guard_present();
+    let va: u64 = 0x0000300000000000; // far from anything a process maps
+    var sp: *mut vm_space = 0 as *mut vm_space;
+    if (vm_space_create_user(borrow mut sp as *mut *mut vm_space) != 0) {
+        return failed(reason, "check failed: vm_space_create_user(&sp) == 0\0");
+    }
+    if (vm_user_map_anon(sp, va, PAGE_SIZE, VM_PROT_RW, VM_REGION_POPULATED, "guard\0".ptr as *CChar) != 0) {
+        return failed(
+            reason,
+            "check failed: vm_user_map_anon(sp, VA, PAGE_SIZE, VM_PROT_RW, VM_REGION_POPULATED, \"guard\") == 0\0",
+        );
+    }
+    var pa: u64 = 0;
+    let mmu = (sp as *mut u8).add(MMU_AT) as *arch_mmu_context;
+    if (!arch_mmu_query(
+        mmu,
+        va as usize,
+        borrow mut pa as *mut u64,
+        0 as *mut u32,
+        0 as *mut vm_cache_t,
+        0 as *mut usize,
+    )) {
+        return failed(reason, "check failed: arch_mmu_query(&sp->mmu, VA, &pa, NULL, NULL, NULL)\0");
+    }
+    memset(phys_to_virt(pa), 0x5A, PAGE_SIZE);
+
+    var inByte: u8 = 0;
+    var outByte: u8 = 0;
+    let s = arch_irq_save();
+    let cur = Ptr.toBorrow(this_cpu() as *percpu).cur_space; // read where the switch is made (S25)
+    let restore = if (cur.isNull()) (borrow kernel_space as *vm_space) as *mut vm_space else cur;
+    vm_space_switch(restore, sp);
+    arch_user_access_begin();
+    let leftIn = arch_copy_user_raw(borrow mut inByte as *mut u8 as *mut void, va as usize as *void, 1);
+    arch_user_access_end();
+    let leftOut = arch_copy_user_raw(borrow mut outByte as *mut u8 as *mut void, va as usize as *void, 1);
+    vm_space_switch(sp, restore);
+    arch_irq_restore(s);
+    vm_space_destroy(sp);
+
+    if (!(leftIn == 0 && inByte == 0x5A)) {
+        return failed(reason, "check failed: left_in == 0 && in == 0x5A\0"); // the bracket opens, the space was active
+    }
+    var buffer = [0u8; 160];
+    var line = TextWriter.create(mut buffer[..]);
+    if (hasGuard) {
+        if (!(leftOut == 1 && outByte == 0)) {
+            return failed(reason, "check failed: left_out == 1 && out == 0\0"); // the guard denied the unbracketed read
+        }
+        line.text(
+            "selftest: uaccess-guard: guard live: an unbracketed kernel read of a user page faulted, the bracketed one did not",
+        );
+    } else {
+        if (!(leftOut == 0 && outByte == 0x5A)) {
+            return failed(reason, "check failed: left_out == 0 && out == 0x5A\0"); // no guard: the page is simply readable
+        }
+        line.text("selftest: uaccess-guard: guard absent (");
+        line.text("no ");
+        line.text(if (GUARD_IS_SMAP) "smap" else "pan");
+        line.text("): the unbracketed read succeeded; nothing to assert but the mapping");
+    }
+    KernelLog.send(LogLevel.Info, line);
+    return true;
+}
