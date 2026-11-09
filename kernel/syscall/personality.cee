@@ -1,0 +1,45 @@
+// personality.cee - Which personality runs a program (roadmap M3, docs/kernel/process/design.md, "Personalities"), in
+// CeeSafe (roadmap 2.0 SA8).
+//
+// The one place that lists the personalities, so the process code names none of them: a process the kernel creates is
+// native; any other ELF runs under the first personality that claims it -- native claims the CosmoOS note, Linux takes
+// every ELF without one.
+
+@header("kernel/elf.h", "kernel/process.h")
+extern "C" {
+    struct elf_info;
+    struct personality {
+        claims_elf: extern "C" fn(*elf_info) -> bool;
+    }
+    static personality_native: personality;
+    static personality_linux: personality;
+}
+
+/// Whether `pers` claims the program `info` describes.
+/// Safety: `pers` is a live personality and `info` the loader's description of an ELF it accepted.
+unsafe fn claims(pers: *personality, info: *elf_info) -> bool {
+    let p = Ptr.toBorrow(pers);
+    return !p.claims_elf.isNull() && p.claims_elf(info);
+}
+
+/// The personality of a program: native for one the kernel creates, else the first that claims it.
+/// Safety: `info` is the loader's description of an ELF it accepted.
+@export("personality_for_elf")
+unsafe fn personalityForElf(info: *elf_info, kernelCreated: bool) -> *personality {
+    let native = borrow personality_native as *personality;
+    if (kernelCreated) {
+        return native;
+    }
+    if (claims(native, info)) {
+        return native;
+    }
+    let linux = borrow personality_linux as *personality;
+    if (claims(linux, info)) {
+        return linux;
+    }
+    var buffer: [u8; 80] = [0; 80];
+    var line = TextWriter.create(mut buffer[..]);
+    line.text("process: no personality claims an ELF the loader accepted");
+    KernelLog.panic(line);
+    return linux; // not reached: the panic does not return
+}
