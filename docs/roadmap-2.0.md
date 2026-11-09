@@ -1700,6 +1700,23 @@ the reader's callback directly, `ramfs_mknod` is its table's entry, and
 trampolines in `ramfs_floor.c`, `procfs_floor.c` and `vfs_floor.c`, and
 `cosmofs_dir_floor.c` whole, are gone (8bbd5bd2).
 
+The floors (2026-11-09): ceesafec 0.24.0's ADR 0080 gives CeeSafe what
+they held, and every SA7 floor is gone but `blk_floor.c`, which keeps only
+the module exports (EXPORT_SYMBOL's section is C's). A floor's asserts
+are its `.cee`'s extern constants, which the C compiler checks, or
+`@cvalue` ones for a macro the `.cee` names differently and for a size;
+its operation tables, list heads, locks and wait queues are `.cee`
+statics, exported where a C header names them (`g_mounts`,
+`vfs_orphans`); its `#if CONFIG_*` code and the release builds' stand-ins
+are `if (cfg("X"))` blocks, which are C's `#if`. Waits on a condition go
+through `wait_floor_until*` (`kernel/scheduler/wait_floor.c`, which
+gained the killable timed one). Every digest is unchanged, and the debug
+and release kernels, the fuzz build, the host tests, the analysis and both
+boots pass at each step. The port found four ceesafec bugs, fixed after
+0.24.1 (an inverted `cfg` test, a pointer constant's cast, a `cfg` arm moved
+out of its `#if`, a callback only a `cfg` block names): CI needs the
+release that has them.
+
 Size: about 4.5x.
 
 ### SA8 The Linux personality and the system-call layer
