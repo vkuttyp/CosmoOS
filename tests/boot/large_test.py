@@ -18,10 +18,12 @@ with two data disks the build makes pools on:
   upgrade   it trusts this build's key and upgrades to this build with
             its own cosmo-upgrade, which takes the environment be-v... of
             its root first.
-  write     this build: a pool on the 1 GiB disk filled with one file of
-            compressible chunks, each written with an fsync, until a
-            write fails: the largest compressible file a 1 GiB pool holds
-            (printed; docs/guide/limitations.md). A pool on the 1.5 GiB
+  write     this build: the root the published release installed and
+            upgraded checks clean (an image the C cosmofs wrote, under
+            the CeeSafe build: roadmap 2.0 SA7). A pool on the 1 GiB disk
+            filled with one file of compressible chunks, each written with
+            an fsync, until a write fails: the largest compressible file a
+            1 GiB pool holds (printed; docs/guide/limitations.md). A pool on the 1.5 GiB
             disk: a 1 GiB compressible file, every chunk written, its
             size and SHA-256, the pool's check clean.
   remount   this build again: both files the same after a reboot, the
@@ -152,6 +154,8 @@ def stage_write(args, results, d):
     try:
         if re.search(rf"^\[ INFO\] boot: verified boot, key {upgrade_test.RELEASE_KEY} ", b.text(), re.M):
             raise Fail("write: the upgraded root booted the release's kernel, not this build's")
+        # The root as the published release wrote it (its cosmofs is C): this build's check finds it clean.
+        check_pool(b, "/", f"write: the root {OLD_TAG} wrote")
         dm, dl = disk_named(b, M_MIB), disk_named(b, L_MIB)
         sh(b, f"mkfs.cosmofs {dm} && mkfs.cosmofs {dl} && mkdir -p /mnt/m /mnt/l && "
               f"mount -t cosmofs /dev/{dm} /mnt/m && mount -t cosmofs /dev/{dl} /mnt/l", "pools")
@@ -185,7 +189,7 @@ def stage_write(args, results, d):
         b.kill()
         raise
     largest = d["chunks"] * CHUNK >> 20
-    results.append(f"write: the largest compressible file on a {M_MIB} MiB pool: {largest} MiB ({d['chunks']} "
+    results.append(f"write: the root {OLD_TAG} wrote checks clean; the largest compressible file on a {M_MIB} MiB pool: {largest} MiB ({d['chunks']} "
                    f"chunks of 4 MiB, {filled:.0f} s); the {BIG_MIB} MiB file written whole in {wrote:.0f} s; both "
                    "pools clean")
     print(f"large: LARGEST {largest} MiB compressible on a {M_MIB} MiB pool", flush=True)
