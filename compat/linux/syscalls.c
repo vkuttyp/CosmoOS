@@ -3,7 +3,7 @@
  * translating onto the native kernel services (docs/compat/linux/).
  *
  * Every entry validates its arguments, converts Linux structures and
- * flags (convert.c), and calls the same VFS, socket, process and memory
+ * flags (lxconv.cee), and calls the same VFS, socket, process and memory
  * services the native personality uses. Nothing here is reachable by a
  * native process, and nothing native depends on this file.
  */

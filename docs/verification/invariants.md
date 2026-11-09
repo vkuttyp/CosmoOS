@@ -81,7 +81,7 @@ gives the same log.
 
 **F8. Fuzz targets run the real code.** Each target compiles the kernel or
 userland source unchanged (`modelf.c`, `elf.c` with `ELF_HOST_TEST`
-leaving out the VMM half, `manifest.c`/`tar.c` with the C generated from `pkgparse.cee`, `convert.c`,
+leaving out the VMM half, `manifest.c`/`tar.c` with the C generated from `pkgparse.cee`, the C generated from `lxconv.cee`,
 `virtqueue.c`, `cosmofs_core.c` and `cosmofs.c`); shims replace only
 services (heap, pool, VFS bookkeeping, mutexes). Check: `tests/fuzz/fuzz.mk`
 source lists; review.

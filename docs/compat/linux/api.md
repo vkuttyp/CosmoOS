@@ -332,21 +332,23 @@ so a program asking not to follow a link was told about the target) and
 conversions gained `S_IFLNK` and `DT_LNK` arms, and `O_NOFOLLOW` now
 reaches the kernel instead of being accepted and ignored.
 
-## Conversions (`compat/linux/convert.h`, `lxconv.cee`, `convert.c`)
+## Conversions (`compat/linux/convert.h`, `lxconv.cee`)
 
 **ABI stability: internal.** Pure functions: no kernel state, no
 locks, no allocation, interrupt-safe; compiled unchanged by
 `tests/host/test_linux.c`. The decoders of guest input and the
 conversions `fuzz_linux` drives are CeeSafe (`lxconv.cee`; roadmap 2.0
 SA5): open flags, PROT bits, socket addresses both ways, the guest's
-termios, wait statuses, dirent types and getdents64 records. `stat`,
-`statx` and termios going out are C (`convert.c`): Linux's `struct stat`
-differs between the architectures, and the generated C is one for
-both. `lx_open_flags` is an inline wrapper over `lx_open_flags_for`,
-which takes this architecture's `O_DIRECTORY`, `O_NOFOLLOW` and
-`O_LARGEFILE` (different bits on x86-64 and AArch64). `convert.c`
-asserts at compile time the byte order, layouts and numbers
-`lxconv.cee` writes down.
+termios, wait statuses, dirent types and getdents64 records. So are
+`stat`, `statx` and termios going out (roadmap 2.0 SA8): Linux's
+`struct stat` differs between the architectures, so its two fields of
+different widths are written in `cfg` blocks on `LX_ABI_IS_X86_64`
+(`linux_abi.h`), and the generated C writes the build's own.
+`lx_open_flags` is an inline wrapper over `lx_open_flags_for`, which
+takes this architecture's `O_DIRECTORY`, `O_NOFOLLOW` and `O_LARGEFILE`
+(different bits on x86-64 and AArch64). The byte order, layouts and
+numbers `lxconv.cee` writes down are extern constants of its own, which
+the C compiler checks against the headers.
 
 | Function | Purpose | Result |
 |---|---|---|
@@ -434,7 +436,7 @@ loads the incoming one's (milestone 10). A clone's thread pointer is
 |---|---|
 | `compat/linux/linux_abi.h` | the Linux ABI written out: flags, `AT_*`, structures (per-architecture `struct lx_stat`, `LX_STAT_SIZE`, `LX_MACHINE`), the signal frame layouts; includes the number table for the architecture; shared with `tests/linux/lxabi.h` and the host test |
 | `compat/linux/nr_x86_64.h`, `nr_aarch64.h` | the system-call numbers (milestone 10) |
-| `compat/linux/convert.h`, `lxconv.cee`, `convert.c` | the pure conversions above: the decoders in CeeSafe, the per-architecture encoders in C |
+| `compat/linux/convert.h`, `lxconv.cee` | the pure conversions above, in CeeSafe |
 | `compat/linux/syscalls.c` | `struct linux_state`, the hooks, the `lx_*` handlers, the table, `personality_linux` |
 | `compat/linux/signal.c`, `linux_internal.h` | signals: the frame builders, `rt_sigreturn`, the trampoline page, the exit hook, `kill`/`tgkill`/`tkill`, `exit`/`exit_group`, `gettid`/`set_tid_address` (milestone 10) |
 | `kernel/ipc/futex.c`, `kernel/include/kernel/futex.h` | the futex primitive |

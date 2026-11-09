@@ -32,7 +32,7 @@ void lx_stat_from_native(const struct cosmo_stat *st, struct lx_stat *out);
 void lx_statx_from_native(const struct cosmo_stat *st, uint32_t mask, struct lx_statx *out);
 /* Native exit status (exit n, 128+sig, 139) to the Linux wait status word. */
 int lx_wait_status(int native_status);
-/* The terminal's modes, both ways (compat/linux/convert.c). */
+/* The terminal's modes, both ways (compat/linux/lxconv.cee). */
 struct lx_termios;
 struct cosmo_termios;
 void lx_termios_from_native(struct lx_termios *out, const struct cosmo_termios *in);

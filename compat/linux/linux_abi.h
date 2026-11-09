@@ -17,10 +17,12 @@
 #include "nr_x86_64.h"
 #define LX_MACHINE "x86_64"
 #define LX_ABI_X86_64 1
+#define LX_ABI_IS_X86_64 1   /* for CeeSafe's cfg, which tests a macro's value: lxconv.cee's struct stat */
 #elif defined(ARCH_AARCH64) || defined(__aarch64__)
 #include "nr_aarch64.h"
 #define LX_MACHINE "aarch64"
 #define LX_ABI_AARCH64 1
+#define LX_ABI_IS_X86_64 0
 #else
 #error "linux_abi.h: unknown architecture"
 #endif
@@ -445,6 +447,10 @@ struct lx_stat {                 /* AArch64 (asm-generic) struct stat: 128 bytes
 };
 #define LX_STAT_SIZE 128
 #endif
+/* sizeof(struct lx_stat), as a C constant macro CeeSafe can read (lxconv.cee). */
+#define LX_STAT_BYTES() sizeof(struct lx_stat)
+/* The same struct by a second name: lxconv.cee's view of the AArch64 fields of 32 bits. */
+typedef struct lx_stat lx_stat_t;
 
 /* statx(2): one 256-byte layout on both architectures (a modern syscall with
  * a fixed struct, unlike the per-arch struct stat above). */

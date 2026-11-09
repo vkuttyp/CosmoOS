@@ -1,6 +1,6 @@
 /*
  * fuzz_linux.c - The Linux personality's ABI conversions
- * (compat/linux/convert.c) under fuzzing: guest-controlled structures in,
+ * (compat/linux/lxconv.cee) under fuzzing: guest-controlled structures in,
  * bounded native structures out.
  */
 

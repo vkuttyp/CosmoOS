@@ -109,7 +109,7 @@ renamed symbols so they coexist with the host libc; `docs/libc/testing.md`),
 and `test_pkg` (the package manager's `manifest.c`, `tar.c` and the
 decoders in `pkgparse.cee`: formats, constraints, path confinement, the ustar reader;
 `docs/pkg/testing.md`), and `test_linux` (the Linux personality's pure
-conversions in `compat/linux/convert.c`: open flags, `struct stat`,
+conversions in `compat/linux/lxconv.cee`: open flags, `struct stat`,
 wait status, sockaddr, `getdents64` records, `PROT_*`;
 `docs/compat/linux/testing.md`), and `test_hv` (the SVM backend's pure
 parts: the nested page table builder `kernel/arch/x86_64/svm_npt.c` over

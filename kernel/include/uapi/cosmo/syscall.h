@@ -400,7 +400,7 @@ struct cosmo_spawn {
  * needed two more outcomes and they are put *above* those rather than
  * replacing the encoding, so nothing that already reads a status
  * changes meaning. Linux's own encoding is produced by
- * `compat/linux/convert.c` for Linux binaries, so nothing outside this
+ * `compat/linux/lxconv.cee` for Linux binaries, so nothing outside this
  * tree ever sees these values.
  */
 #define COSMO_STATUS_STOPPED(sig) (0x200 | ((sig) & 0xff))
@@ -487,7 +487,7 @@ struct cosmo_siginfo {
  * What a program may change about its terminal. Four flags and two
  * numbers, which is what this tree's line discipline actually has --
  * POSIX's `termios` carries forty fields describing a serial line that
- * is not modelled here, and `compat/linux/convert.c` builds one of
+ * is not modelled here, and `compat/linux/lxconv.cee` builds one of
  * those for Linux binaries out of this.
  */
 #define COSMO_TTY_ECHO   (1u << 0)  /* echo what is typed */
