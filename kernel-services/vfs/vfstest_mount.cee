@@ -1,11 +1,13 @@
 // vfstest_mount.cee - The VFS's self-tests of page budgets, cache limits, the last put and mounts' names and pins, in
 // CeeSafe: roadmap 2.0 SA7. cache-budget-race, cache-limits, vfs-put-race, vfs-mount-id and vfs-mount-pin. Each is an
 // exported function the selftest table names, failing with the condition that did not hold and its line here.
-// vfstest_floor.c asserts the values this file writes as its own constants.
+// The C compiler checks the values this file shares with the C headers (ADR 0080 §3.1).
 
 @header("kernel/cosmofs.h", "kernel/kmalloc.h", "kernel/log.h", "kernel/mountns.h", "kernel/pagecache.h",
     "kernel/percpu.h", "kernel/ramblk.h", "kernel/sched.h", "kernel/string.h", "kernel/thread.h", "kernel/timer.h",
-    "kernel/vfs.h", "kernel/wait.h", "uapi/cosmo/syscall.h")
+    "kernel/vfs.h", "kernel/wait.h", "uapi/cosmo/syscall.h", "kernel/completion.h", "kernel/errno.h",
+    "kernel/faultinject.h", "kernel/handle.h", "kernel/syscall.h", "kernel/types.h", "kernel/utsns.h", "kernel/page.h",
+    "uapi/cosmo/fsctl.h")
 extern "C" {
     struct vnode_ops;
     struct mount {
@@ -67,21 +69,27 @@ extern "C" {
         -> *mut thread;
     fn thread_join(t: *mut thread) -> i32;
     fn thread_sleep_ns(ns: u64);
+
+    // The values and layout the C compiler checks (ADR 0080 §3.1), which the floor asserted.
+    const ENOENT: i32 = 2;
+    const EBUSY: i32 = 16;
+    const EEXIST: i32 = 17;
+    const EINVAL: i32 = 22;
+    const SCHED_PRIO_DEFAULT: i32 = 32;
+    const ENOSPC: i32 = 28;
+    const VNODE_REG: u32 = 1;
+    const MOUNT_CACHE_IS_STORE: u32 = 2;
+    @cvalue("COSMO_O_RDWR")
+    const O_RDWR: u32 = 0x0002;
+    @cvalue("COSMO_O_CREAT")
+    const O_CREAT: u32 = 0x0040;
+    @cvalue("COSMO_O_TRUNC")
+    const O_TRUNC: u32 = 0x0200;
+    @cvalue("PAGE_SIZE")
+    const PAGE: usize = 4096;
 }
 
-// errno.h, syscall.h, vfs.h and thread.h, which vfstest_floor.c checks.
-const ENOENT: i32 = 2;
-const EBUSY: i32 = 16;
-const EEXIST: i32 = 17;
-const EINVAL: i32 = 22;
-const ENOSPC: i32 = 28;
-const O_RDWR: u32 = 0x0002;
-const O_CREAT: u32 = 0x0040;
-const O_TRUNC: u32 = 0x0200;
-const VNODE_REG: u32 = 1;
-const MOUNT_CACHE_IS_STORE: u32 = 2;
-const SCHED_PRIO_DEFAULT: i32 = 32;
-const PAGE: usize = 4096;
+// errno.h, syscall.h, vfs.h and thread.h, which the C compiler checks.
 const PAGE_I: i64 = 4096;
 const PAGE_U: u64 = 4096;
 const MODE_DIR: u32 = 0x1ED; // 0755

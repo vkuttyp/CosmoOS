@@ -1,11 +1,12 @@
 // vfstest_base.cee - The VFS's first self-tests, in CeeSafe: roadmap 2.0 SA7. crc32c, pagecache, the symbolic links
 // (vfs-symlink, -walk, -loop, -nofollow), vfs-ramfs, fsync-handle, utsns, mountns and vfs-concurrency. Each is an
 // exported function the selftest table names, failing with the condition that did not hold and its line here.
-// vfstest_floor.c asserts the values this file writes as its own constants.
+// The C compiler checks the values this file shares with the C headers (ADR 0080 §3.1).
 
 @header("arch/cpu.h", "kernel/crc32c.h", "kernel/handle.h", "kernel/kmalloc.h", "kernel/log.h", "kernel/mountns.h",
     "kernel/percpu.h", "kernel/string.h", "kernel/thread.h", "kernel/utsns.h", "kernel/vfs.h", "kernel/wait.h",
-    "uapi/cosmo/syscall.h")
+    "uapi/cosmo/syscall.h", "kernel/completion.h", "kernel/errno.h", "kernel/faultinject.h", "kernel/pagecache.h",
+    "kernel/syscall.h", "kernel/types.h", "kernel/page.h", "uapi/cosmo/fsctl.h")
 extern "C" {
     struct vnode_ops {
         readdir: extern "C" fn(
@@ -95,44 +96,75 @@ extern "C" {
     fn thread_sleep_ns(ns: u64);
     fn thread_pin_self() -> u64;
     fn thread_set_affinity_self(affinity: u64);
+
+    // The values and layout the C compiler checks (ADR 0080 §3.1), which the floor asserted.
+    const ENOENT: i32 = 2;
+    const EBADF: i32 = 9;
+    const EBUSY: i32 = 16;
+    const EEXIST: i32 = 17;
+    const EXDEV: i32 = 18;
+    const ENODEV: i32 = 19;
+    const ENOTDIR: i32 = 20;
+    const EISDIR: i32 = 21;
+    const EINVAL: i32 = 22;
+    const ENAMETOOLONG: i32 = 36;
+    const ENOTEMPTY: i32 = 39;
+    const ELOOP: i32 = 40;
+    const VNODE_DIR: u32 = 2;
+    const VNODE_DEAD: u32 = 2;
+    const VFS_PATH_MAX: usize = 1024;
+    const VFS_MAX_SYMLINKS: u32 = 8;
+    const HANDLE_RIGHT_OWNER: u32 = 0x1C;
+    const SCHED_PRIO_DEFAULT: i32 = 32;
+    const KMEM_ZERO: u32 = 1;
+    @cvalue("COSMO_O_RDONLY")
+    const O_RDONLY: u32 = 0x0000;
+    @cvalue("COSMO_O_WRONLY")
+    const O_WRONLY: u32 = 0x0001;
+    @cvalue("COSMO_O_RDWR")
+    const O_RDWR: u32 = 0x0002;
+    @cvalue("COSMO_O_ACCMODE")
+    const O_ACCMODE: u32 = 0x0003;
+    @cvalue("COSMO_O_CREAT")
+    const O_CREAT: u32 = 0x0040;
+    @cvalue("COSMO_O_EXCL")
+    const O_EXCL: u32 = 0x0080;
+    @cvalue("COSMO_O_TRUNC")
+    const O_TRUNC: u32 = 0x0200;
+    @cvalue("COSMO_O_APPEND")
+    const O_APPEND: u32 = 0x0400;
+    @cvalue("COSMO_O_DIRECTORY")
+    const O_DIRECTORY: u32 = 0x10000;
+    @cvalue("COSMO_O_NOFOLLOW")
+    const O_NOFOLLOW: u32 = 0x20000;
+    @cvalue("COSMO_SEEK_SET")
+    const SEEK_SET: i32 = 0;
+    @cvalue("COSMO_SEEK_CUR")
+    const SEEK_CUR: i32 = 1;
+    @cvalue("COSMO_DT_REG")
+    const DT_REG: u32 = 1;
+    @cvalue("COSMO_DT_DIR")
+    const DT_DIR: u32 = 2;
+    @cvalue("COSMO_DT_LNK")
+    const DT_LNK: u32 = 6;
+    @cvalue("COSMO_HOST_NAME_MAX")
+    const HOST_NAME_MAX: usize = 64;
+    @cvalue("PAGE_SIZE")
+    const PAGE: usize = 4096;
+    /// The self-tests' stat records: seven u64s.
+    @cvalue("sizeof(struct cosmo_stat)")
+    const STAT_SIZE: usize = 56;
+    /// The page cache's figures, eleven u64s (vfstest_mount.cee).
+    @cvalue("sizeof(struct pagecache_stats)")
+    const PAGECACHE_STATS_SIZE: usize = 88;
+    /// The fsctl record (vfstest_dev.cee), eleven u64s, and the syscall bounce, three words.
+    @cvalue("sizeof(struct cosmo_fsctl)")
+    const FSCTL_SIZE: usize = 88;
+    @cvalue("sizeof(struct io_bounce)")
+    const IO_BOUNCE_SIZE: usize = 24;
 }
 
-// errno.h, syscall.h, vfs.h, handle.h and thread.h, which vfstest_floor.c checks.
-const ENOENT: i32 = 2;
-const EBADF: i32 = 9;
-const EBUSY: i32 = 16;
-const EEXIST: i32 = 17;
-const EXDEV: i32 = 18;
-const ENODEV: i32 = 19;
-const ENOTDIR: i32 = 20;
-const EISDIR: i32 = 21;
-const EINVAL: i32 = 22;
-const ENAMETOOLONG: i32 = 36;
-const ENOTEMPTY: i32 = 39;
-const ELOOP: i32 = 40;
-const O_RDONLY: u32 = 0x0000;
-const O_WRONLY: u32 = 0x0001;
-const O_RDWR: u32 = 0x0002;
-const O_ACCMODE: u32 = 0x0003;
-const O_CREAT: u32 = 0x0040;
-const O_EXCL: u32 = 0x0080;
-const O_TRUNC: u32 = 0x0200;
-const O_APPEND: u32 = 0x0400;
-const O_DIRECTORY: u32 = 0x10000;
-const O_NOFOLLOW: u32 = 0x20000;
-const SEEK_SET: i32 = 0;
-const SEEK_CUR: i32 = 1;
-const DT_REG: u32 = 1;
-const DT_DIR: u32 = 2;
-const DT_LNK: u32 = 6;
-const VNODE_DIR: u32 = 2;
-const VNODE_DEAD: u32 = 2;
-const VFS_PATH_MAX: usize = 1024;
-const VFS_MAX_SYMLINKS: u32 = 8;
-const HOST_NAME_MAX: usize = 64;
-const HANDLE_RIGHT_OWNER: u32 = 0x1C;
-const SCHED_PRIO_DEFAULT: i32 = 32;
-const PAGE: usize = 4096;
+// errno.h, syscall.h, vfs.h, handle.h and thread.h, which the C compiler checks.
 const MODE_DIR: u32 = 0x1ED; // 0755
 const MODE_FILE: u32 = 0x1A4; // 0644
 const MODE_OWN: u32 = 0x180; // 0600
@@ -637,7 +669,7 @@ unsafe fn selftestVfsSymlinkLoop(reason: *mut *CChar) -> bool {
             "line 607\0");
     }
 
-    // The budget is pinned (vfstest_floor.c asserts VFS_MAX_SYMLINKS == 8): a test built only from the macro moves
+    // The budget is pinned (the C compiler checks VFS_MAX_SYMLINKS == 8): a test built only from the macro moves
     // with it and can never see it change. A chain of exactly VFS_MAX_SYMLINKS resolves; one more is ELOOP.
     // c0 -> c1 -> ... -> c<N-1> -> end, so naming c0 expands N links.
     if (!(mkFile(c("/tmp/lp/end\0"), c("chain-end\0")) == 0)) {
@@ -1166,7 +1198,6 @@ unsafe fn selftestFsyncHandle(reason: *mut *CChar) -> bool {
     return true;
 }
 
-const KMEM_ZERO: u32 = 1;
 
 // ---- the uts namespace (docs/kernel/security/design.md §1e, S13) ----
 //

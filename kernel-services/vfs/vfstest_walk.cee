@@ -1,10 +1,11 @@
 // vfstest_walk.cee - The VFS's self-tests of walks from a start, in CeeSafe: roadmap 2.0 SA7. vfs-rename2,
 // vfs-lookup-named and vfs-umount-once. Each is an exported function the selftest table names, failing with the
-// condition that did not hold and its line here. vfstest_floor.c asserts the values this file writes as its own
-// constants.
+// condition that did not hold and its line here. The C compiler checks the values this file shares with the C
+// headers (ADR 0080 §3.1).
 
-@header("kernel/kmalloc.h", "kernel/log.h", "kernel/mutex.h", "kernel/string.h", "kernel/thread.h",
-    "kernel/timer.h", "kernel/vfs.h", "kernel/wait.h")
+@header("kernel/kmalloc.h", "kernel/log.h", "kernel/mutex.h", "kernel/string.h", "kernel/thread.h", "kernel/timer.h",
+    "kernel/vfs.h", "kernel/wait.h", "kernel/completion.h", "kernel/errno.h", "kernel/faultinject.h", "kernel/handle.h",
+    "kernel/pagecache.h", "kernel/syscall.h", "kernel/types.h", "kernel/utsns.h", "kernel/page.h", "uapi/cosmo/fsctl.h")
 extern "C" {
     struct vnode {
         obj: kobject;
@@ -46,16 +47,20 @@ extern "C" {
     fn thread_create(entry: extern "C" fn(*mut void), arg: *mut void, name: *CChar, priority: i32) -> *mut thread;
     fn thread_join(t: *mut thread) -> i32;
     fn thread_sleep_ns(ns: u64);
+
+    // The values and layout the C compiler checks (ADR 0080 §3.1), which the floor asserted.
+    const ENOENT: i32 = 2;
+    const EBUSY: i32 = 16;
+    const ENAMETOOLONG: i32 = 36;
+    const VFS_PATH_MAX: usize = 1024;
+    const SCHED_PRIO_DEFAULT: i32 = 32;
+    @cvalue("COSMO_O_WRONLY")
+    const O_WRONLY: u32 = 0x0001;
+    @cvalue("COSMO_O_CREAT")
+    const O_CREAT: u32 = 0x0040;
 }
 
-// errno.h, syscall.h, vfs.h and thread.h, which vfstest_floor.c checks.
-const ENOENT: i32 = 2;
-const EBUSY: i32 = 16;
-const ENAMETOOLONG: i32 = 36;
-const O_WRONLY: u32 = 0x0001;
-const O_CREAT: u32 = 0x0040;
-const VFS_PATH_MAX: usize = 1024;
-const SCHED_PRIO_DEFAULT: i32 = 32;
+// errno.h, syscall.h, vfs.h and thread.h, which the C compiler checks.
 const MODE_DIR: u32 = 0x1ED; // 0755
 const MODE_FILE: u32 = 0x1A4; // 0644
 const MS: u64 = 1000000;

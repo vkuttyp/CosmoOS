@@ -1,13 +1,13 @@
 // vfstest_dev.cee - The VFS's self-tests of /dev/fsctl from the inside, character devices and the syscall bounce, in
 // CeeSafe: roadmap 2.0 SA7. fsctl-list, fsctl-result-per-open, vfs-chr-write-during-blocked-read, vfs-chrdev-open and
 // read-bounce. Each is an exported function the selftest table names, failing with the condition that did not hold
-// and its line here. vfstest_floor.c keeps the two test devices' operation tables and the completions the blocked
-// read waits on, C data; the bounce's fallback under fault injection, which a build without it compiles out; and
-// asserts the values this file writes as its own constants.
+// and its line here. The two test devices' operation tables and the completions the blocked read waits on are this
+// file's statics; the bounce's fallback needs fault injection, and a build without it skips it (ADR 0080).
 
-@header("kernel/kmalloc.h", "kernel/log.h", "kernel/mountns.h", "kernel/object.h", "kernel/pipe.h",
-    "kernel/string.h", "kernel/syscall.h", "kernel/thread.h", "kernel/timer.h", "kernel/vfs.h", "kernel/wait.h",
-    "uapi/cosmo/fsctl.h")
+@header("kernel/kmalloc.h", "kernel/log.h", "kernel/mountns.h", "kernel/object.h", "kernel/pipe.h", "kernel/string.h",
+    "kernel/syscall.h", "kernel/thread.h", "kernel/timer.h", "kernel/vfs.h", "kernel/wait.h", "uapi/cosmo/fsctl.h",
+    "kernel/completion.h", "kernel/errno.h", "kernel/faultinject.h", "kernel/handle.h", "kernel/pagecache.h",
+    "kernel/types.h", "kernel/utsns.h", "kernel/page.h")
 extern "C" {
     struct mount {
         id: u64;
@@ -19,7 +19,13 @@ extern "C" {
         obj: kobject;
         priv: *mut void;
     }
-    struct chrdev_ops;
+    /// vfs.h's character device operations, the members the test devices set.
+    struct chrdev_ops {
+        open: extern "C" fn(*mut vnode, *mut file) -> i32;
+        release: extern "C" fn(*mut vnode, *mut file);
+        read_file: extern "C" fn(*mut vnode, *mut file, u64, *mut void, usize) -> i64;
+        write_file: extern "C" fn(*mut vnode, *mut file, u64, *void, usize) -> i64;
+    }
     struct completion;
     struct mount_ns;
     struct thread;
@@ -86,37 +92,108 @@ extern "C" {
     fn pipe_create(readEnd: *mut *mut kobject, writeEnd: *mut *mut kobject) -> i32;
     fn kobject_io_of(obj: *kobject) -> *kobject_io_type;
 
-    // vfstest_floor.c
-    fn vfstest_floor_chropen_ops() -> *chrdev_ops;
-    fn vfstest_floor_chrblock_ops() -> *chrdev_ops;
-    fn vfstest_floor_completion(which: u32) -> *mut completion;
-    fn vfstest_floor_bounce_fallback(reason: *mut *CChar) -> bool;
+    // faultinject.h's faults, armed only in a fault-injection build (ADR 0080 §3.3).
+    struct fi_stats {
+        hits: u64;
+    }
+    enum fi_kind: u32;
+    @cfg("CONFIG_FAULTINJECT")
+    fn faultinject_set(kind: fi_kind, every: u32, budget: u32, only: *mut thread);
+    @cfg("CONFIG_FAULTINJECT")
+    fn faultinject_clear(kind: fi_kind);
+    @cfg("CONFIG_FAULTINJECT")
+    fn faultinject_stats(kind: fi_kind, out: *mut fi_stats);
+    fn thread_current() -> *mut thread;
+    const FI_KMALLOC: fi_kind = 0;
+    /// How many reads the bounce kept on the stack chunk because the heap refused.
+    fn syscall_bounce_fallback_count() -> u64;
+
+    // The values and layout the C compiler checks (ADR 0080 §3.1), which the floor asserted.
+    const EBUSY: i32 = 16;
+    const EEXIST: i32 = 17;
+    const SCHED_PRIO_DEFAULT: i32 = 32;
+    const KMEM_ZERO: u32 = 1;
+    const ENOMEM: i32 = 12;
+    const ERANGE: i32 = 34;
+    const EMSGSIZE: i32 = 90;
+    const IO_CHUNK: usize = 1024;
+    const IO_BOUNCE_MAX: usize = 65536;
+    @cvalue("COSMO_O_RDONLY")
+    const O_RDONLY: u32 = 0x0000;
+    @cvalue("COSMO_O_WRONLY")
+    const O_WRONLY: u32 = 0x0001;
+    @cvalue("COSMO_O_RDWR")
+    const O_RDWR: u32 = 0x0002;
+    @cvalue("COSMO_O_CREAT")
+    const O_CREAT: u32 = 0x0040;
+    @cvalue("COSMO_O_TRUNC")
+    const O_TRUNC: u32 = 0x0200;
+    @cvalue("COSMO_SEEK_SET")
+    const SEEK_SET: i32 = 0;
+    @cvalue("COSMO_FSCTL_VERSION")
+    const FSCTL_VERSION: u16 = 3;
+    @cvalue("COSMO_FSCTL_LIST")
+    const FSCTL_LIST: u16 = 1;
 }
 
-// errno.h, syscall.h, fsctl.h and thread.h, which vfstest_floor.c checks.
-const EBUSY: i32 = 16;
-const EEXIST: i32 = 17;
-const ENOMEM: i32 = 12;
-const ERANGE: i32 = 34;
-const EMSGSIZE: i32 = 90;
-const O_RDONLY: u32 = 0x0000;
-const O_WRONLY: u32 = 0x0001;
-const O_RDWR: u32 = 0x0002;
-const O_CREAT: u32 = 0x0040;
-const O_TRUNC: u32 = 0x0200;
-const SEEK_SET: i32 = 0;
-const KMEM_ZERO: u32 = 1;
-const FSCTL_VERSION: u16 = 3;
-const FSCTL_LIST: u16 = 1;
-const IO_CHUNK: usize = 1024;
-const IO_BOUNCE_MAX: usize = 65536;
-const SCHED_PRIO_DEFAULT: i32 = 32;
+// ---- The test devices, their completions and the bounce's fallback (ADR 0080) ----
+
+/// A device whose open and release the tests count, and one whose reads and writes block.
+static mut CHROPEN_OPS: chrdev_ops = chrdev_ops {
+    open: chropenOpen,
+    release: chropenRelease,
+    read_file: chropenReadFile,
+};
+static mut CHRBLOCK_OPS: chrdev_ops = chrdev_ops {
+    read_file: chrblockReadFile,
+    write_file: chrblockWriteFile,
+};
+/// The blocked read's release (0) and its reader's and writer's ends (1, 2).
+static mut COMPLETIONS: [completion; 3] = [completion {}, completion {}, completion {}];
+/// The fallback's chunk, the caller's stack chunk to the bounce. A static, since the fallback inlines into
+/// read-bounce, whose own chunk is on its stack (the kernel's frame limit is 2 KiB).
+static mut FALLBACK_CHUNK: [u8; 1024] = [0; 1024];
+
+/// Safety: the tables are never written.
+unsafe fn chropenOps() -> *chrdev_ops => borrow mut CHROPEN_OPS as *mut chrdev_ops as *chrdev_ops;
+
+/// Safety: as chropenOps.
+unsafe fn chrblockOps() -> *chrdev_ops => borrow mut CHRBLOCK_OPS as *mut chrdev_ops as *chrdev_ops;
+
+/// A heap that refuses: the caller's chunk, never an error. Fault injection is what makes the heap refuse, and a
+/// build without it has none.
+/// Safety: the serial self-test runner; `reason` writable.
+unsafe fn bounceFallback(reason: *mut *CChar) -> bool {
+    if (cfg("CONFIG_FAULTINJECT")) {
+        let sp = borrow mut FALLBACK_CHUNK as *mut [u8; 1024] as *mut u8 as *mut CChar;
+        var b: io_bounce;
+        let fb0 = syscall_bounce_fallback_count();
+        faultinject_set(FI_KMALLOC, 1, 1, thread_current());
+        syscall_bounce_get(borrow mut b as *mut io_bounce, sp, 65536);
+        faultinject_clear(FI_KMALLOC);
+        var fst: fi_stats;
+        faultinject_stats(FI_KMALLOC, borrow mut fst as *mut fi_stats);
+        let ok = fst.hits == 1 && !b.heap && b.cap == IO_CHUNK && b.buf == sp &&
+            syscall_bounce_fallback_count() == fb0 + 1;
+        syscall_bounce_put(borrow mut b as *mut io_bounce);
+        if (!ok) {
+            let why = "check failed: the bounce fell back to the stack chunk once, under FI_KMALLOC\0";
+            reason.write(why.ptr as *CChar);
+        }
+        return ok;
+    }
+    KernelLog.write(LogLevel.Info,
+        "selftest: read-bounce: the fallback needs fault injection, compiled out of this build");
+    return true;
+}
+
+// errno.h, syscall.h, fsctl.h and thread.h, which the C compiler checks.
 const MODE_DIR: u32 = 0x1ED; // 0755
 const MODE_FILE: u32 = 0x1A4; // 0644
 const MODE_DEV: u32 = 0x180; // 0600
 const MS: u64 = 1000000;
 
-// vfstest_floor_completion's: the blocked read's release, and the two threads' ends.
+// COMPLETIONS's: the blocked read's release, and the two threads' ends.
 const C_RELEASE: u32 = 0;
 const C_READER: u32 = 1;
 const C_WRITER: u32 = 2;
@@ -478,7 +555,7 @@ static CHRBLOCK_IN_READ: AtomicBool = AtomicBool.constant(false);
 @export("vfstest_chrblock_read_file")
 unsafe fn chrblockReadFile(vn: *mut vnode, f: *mut file, off: u64, buf: *mut void, len: usize) -> i64 {
     CHRBLOCK_IN_READ.storeWith(true, StoreOrdering.Release);
-    wait_for_completion(vfstest_floor_completion(C_RELEASE));
+    wait_for_completion((borrow mut COMPLETIONS[(C_RELEASE) as usize] as *mut completion));
     return 0;
 }
 
@@ -491,14 +568,14 @@ fn chrblockWriteFile(vn: *mut vnode, f: *mut file, off: u64, buf: *void, len: us
 unsafe fn chrblockReader(arg: *mut void) {
     var b: [u8; 4] = [0; 4];
     let _ = file_read(arg as *mut file, borrow mut b as *mut [u8; 4] as *mut void, 4);
-    complete(vfstest_floor_completion(C_READER));
+    complete((borrow mut COMPLETIONS[(C_READER) as usize] as *mut completion));
 }
 
 /// Safety: `arg` is the writer's open file.
 @callback
 unsafe fn chrblockWriter(arg: *mut void) {
     let _ = file_write(arg as *mut file, c("x\0") as *void, 1);
-    complete(vfstest_floor_completion(C_WRITER));
+    complete((borrow mut COMPLETIONS[(C_WRITER) as usize] as *mut completion));
 }
 
 /// Whether the blocked read began within `ms`.
@@ -524,12 +601,12 @@ unsafe fn waitDone(done: *mut completion, ms: u64) -> bool {
 @export("selftest_vfs_chr_write_during_blocked_read")
 unsafe fn selftestVfsChrWriteDuringBlockedRead(reason: *mut *CChar) -> bool {
     // NULL: `out` would hand back a reference this test never drops.
-    if (!(ramfs_mkchr(c("/dev/chrblock-test\0"), MODE_DEV, vfstest_floor_chrblock_ops(), 0 as *mut void,
+    if (!(ramfs_mkchr(c("/dev/chrblock-test\0"), MODE_DEV, chrblockOps(), 0 as *mut void,
         0 as *mut *mut vnode) == 0)) {
         return failed2(reason, "check failed: ramfs_mkchr(\"/dev/chrblock-test\", 0600, &chrblock_ops, NULL, NULL) == ",
             "0 at line 530\0");
     }
-    completion_init(vfstest_floor_completion(C_RELEASE), c("chrblock-release\0"));
+    completion_init((borrow mut COMPLETIONS[(C_RELEASE) as usize] as *mut completion), c("chrblock-release\0"));
     CHRBLOCK_IN_READ.storeWith(false, StoreOrdering.Release);
 
     var rf = 0 as *mut file;
@@ -542,8 +619,8 @@ unsafe fn selftestVfsChrWriteDuringBlockedRead(reason: *mut *CChar) -> bool {
         return failed2(reason, "check failed: vfs_open(NULL, \"/dev/chrblock-test\", COSMO_O_RDWR, 0, &wf) == 0 && wf ",
             "!= NULL at line 543\0");
     }
-    completion_init(vfstest_floor_completion(C_READER), c("chrblock-reader\0"));
-    completion_init(vfstest_floor_completion(C_WRITER), c("chrblock-writer\0"));
+    completion_init((borrow mut COMPLETIONS[(C_READER) as usize] as *mut completion), c("chrblock-reader\0"));
+    completion_init((borrow mut COMPLETIONS[(C_WRITER) as usize] as *mut completion), c("chrblock-writer\0"));
 
     let rt = thread_create(chrblockReader, rf as *mut void, c("chrblock-r\0"), SCHED_PRIO_DEFAULT);
     var wt = 0 as *mut thread;
@@ -555,14 +632,14 @@ unsafe fn selftestVfsChrWriteDuringBlockedRead(reason: *mut *CChar) -> bool {
         if (readerBlocked) {
             wt = thread_create(chrblockWriter, wf as *mut void, c("chrblock-w\0"), SCHED_PRIO_DEFAULT);
             if (!wt.isNull()) {
-                writerReturned = waitDone(vfstest_floor_completion(C_WRITER), 500);
+                writerReturned = waitDone((borrow mut COMPLETIONS[(C_WRITER) as usize] as *mut completion), 500);
             }
         }
     }
 
     // Unconditionally, before any assertion: let the reader go, so a failure below is a failed test rather than a
     // boot that stops.
-    complete(vfstest_floor_completion(C_RELEASE));
+    complete((borrow mut COMPLETIONS[(C_RELEASE) as usize] as *mut completion));
     if (!wt.isNull()) {
         let _ = thread_join(wt);
     }
@@ -638,7 +715,7 @@ unsafe fn chropenReadFile(vn: *mut vnode, f: *mut file, off: u64, buf: *mut void
 @export("selftest_vfs_chrdev_open")
 unsafe fn selftestVfsChrdevOpen(reason: *mut *CChar) -> bool {
     var node = 0 as *mut vnode;
-    if (!(ramfs_mkchr(c("/dev/chropen-test\0"), MODE_DEV, vfstest_floor_chropen_ops(), 0 as *mut void,
+    if (!(ramfs_mkchr(c("/dev/chropen-test\0"), MODE_DEV, chropenOps(), 0 as *mut void,
         borrow mut node as *mut *mut vnode) == 0)) {
         return failed2(reason, "check failed: ramfs_mkchr(\"/dev/chropen-test\", 0600, &chropen_ops, NULL, &node) == ",
             "0 at line 644\0");
@@ -753,8 +830,8 @@ unsafe fn selftestReadBounce(reason: *mut *CChar) -> bool {
     }
     syscall_bounce_put(b);
 
-    // A heap that refuses: the stack chunk, never an error (vfstest_floor.c, with fault injection).
-    if (!vfstest_floor_bounce_fallback(reason)) {
+    // A heap that refuses: the caller's chunk, never an error (with fault injection).
+    if (!bounceFallback(reason)) {
         return false;
     }
 

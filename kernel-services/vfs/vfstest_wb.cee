@@ -1,15 +1,15 @@
 // vfstest_wb.cee - The VFS's self-tests of write-back on cosmofs, in CeeSafe: roadmap 2.0 SA7. wb-error-fsync,
 // wb-error-once, wb-error-close and wb-error-lost: a failure recorded, reported once to each open file, counted when
-// the data is lost. They need fault injection: in a build without it vfstest_floor.c's stubs stand in for them, and
-// the injection itself goes through vfstest_floor.c, which compiles either way. Then pagecache-dirty-bound,
+// the data is lost. They need fault injection: in a build without it they pass, saying so, and the injection does
+// nothing (ADR 0080 §3.3). Then pagecache-dirty-bound,
 // read-bench, write-bench and pagecache-pinned, which share the RAM disk.
 //
 // cosmofs on a RAM block device, which completes every bio in its submitter's context, so FI_BLK_COMPLETE scoped to
 // this thread refuses exactly the next `budget` write-backs this thread issues.
 
 @header("kernel/cosmofs.h", "kernel/faultinject.h", "kernel/handle.h", "kernel/kmalloc.h", "kernel/log.h",
-    "kernel/page.h", "kernel/pagecache.h",
-    "kernel/ramblk.h", "kernel/string.h", "kernel/vfs.h")
+    "kernel/page.h", "kernel/pagecache.h", "kernel/ramblk.h", "kernel/string.h", "kernel/vfs.h", "kernel/completion.h",
+    "kernel/errno.h", "kernel/syscall.h", "kernel/thread.h", "kernel/types.h", "kernel/utsns.h", "uapi/cosmo/fsctl.h")
 extern "C" {
     struct pagecache {
         nr_dirty: u32;
@@ -79,31 +79,71 @@ extern "C" {
     fn thread_join(t: *mut thread) -> i32;
     fn thread_sleep_ns(ns: u64);
 
-    // vfstest_floor.c: FI_BLK_COMPLETE refusing this thread's next `count` write-backs, and its end with the hits.
-    fn vfstest_floor_inject_blk(count: u32);
-    fn vfstest_floor_inject_end() -> u64;
+    // faultinject.h's faults, armed only in a fault-injection build (ADR 0080 §3.3).
+    struct fi_stats {
+        hits: u64;
+    }
+    enum fi_kind: u32;
+    @cfg("CONFIG_FAULTINJECT")
+    fn faultinject_set(kind: fi_kind, every: u32, budget: u32, only: *mut thread);
+    @cfg("CONFIG_FAULTINJECT")
+    fn faultinject_clear(kind: fi_kind);
+    @cfg("CONFIG_FAULTINJECT")
+    fn faultinject_stats(kind: fi_kind, out: *mut fi_stats);
+    fn thread_current() -> *mut thread;
+    const FI_BLK_COMPLETE: fi_kind = 2;
+
+    // The values and layout the C compiler checks (ADR 0080 §3.1), which the floor asserted.
+    const EBADF: i32 = 9;
+    const EEXIST: i32 = 17;
+    const HANDLE_RIGHT_OWNER: u32 = 0x1C;
+    const SCHED_PRIO_DEFAULT: i32 = 32;
+    const KMEM_ZERO: u32 = 1;
+    const ENOMEM: i32 = 12;
+    const EIO: i32 = 5;
+    const VFS_UMOUNT_FORCE: u32 = 1;
+    const EFBIG: i32 = 27;
+    const PG_PAGECACHE: u32 = 128;
+    @cvalue("COSMO_O_RDONLY")
+    const O_RDONLY: u32 = 0x0000;
+    @cvalue("COSMO_O_WRONLY")
+    const O_WRONLY: u32 = 0x0001;
+    @cvalue("COSMO_O_RDWR")
+    const O_RDWR: u32 = 0x0002;
+    @cvalue("COSMO_O_CREAT")
+    const O_CREAT: u32 = 0x0040;
+    @cvalue("PAGE_SIZE")
+    const PAGE: usize = 4096;
+    @cvalue("COSMO_O_TRUNC")
+    const O_TRUNC: u32 = 0x0200;
+    @cvalue("COSMO_SEEK_SET")
+    const SEEK_SET: i32 = 0;
 }
 
-// errno.h, syscall.h, vfs.h, handle.h and kmalloc.h, which vfstest_floor.c checks.
-const ENOMEM: i32 = 12;
-const EIO: i32 = 5;
-const EBADF: i32 = 9;
-const EEXIST: i32 = 17;
-const O_RDONLY: u32 = 0x0000;
-const O_WRONLY: u32 = 0x0001;
-const O_RDWR: u32 = 0x0002;
-const O_CREAT: u32 = 0x0040;
-const VFS_UMOUNT_FORCE: u32 = 1;
-const HANDLE_RIGHT_OWNER: u32 = 0x1C;
-const KMEM_ZERO: u32 = 1;
-const PAGE: usize = 4096;
+/// FI_BLK_COMPLETE refuses this thread's next `count` write-backs; nothing without fault injection.
+/// Safety: the serial self-test runner.
+unsafe fn injectBlk(count: u32) {
+    if (cfg("CONFIG_FAULTINJECT")) {
+        faultinject_set(FI_BLK_COMPLETE, 1, count, thread_current());
+    }
+}
+
+/// The injection's end: how many it refused (0 without fault injection).
+/// Safety: as injectBlk.
+unsafe fn injectEnd() -> u64 {
+    var hits: u64 = 0;
+    if (cfg("CONFIG_FAULTINJECT")) {
+        faultinject_clear(FI_BLK_COMPLETE);
+        var fst: fi_stats;
+        faultinject_stats(FI_BLK_COMPLETE, borrow mut fst as *mut fi_stats);
+        hits = fst.hits;
+    }
+    return hits;
+}
+
+// errno.h, syscall.h, vfs.h, handle.h and kmalloc.h, which the C compiler checks.
 const PAGE_I: i64 = 4096;
 const PAGE_U: u64 = 4096;
-const EFBIG: i32 = 27;
-const O_TRUNC: u32 = 0x0200;
-const SEEK_SET: i32 = 0;
-const PG_PAGECACHE: u32 = 128;
-const SCHED_PRIO_DEFAULT: i32 = 32;
 const MS: u64 = 1000000;
 const MODE_DIR: u32 = 0x1ED; // 0755
 const MODE_FILE: u32 = 0x1A4; // 0644
@@ -213,9 +253,12 @@ unsafe fn wbReadsBack(path: StringView, page: *u8) -> bool {
 }
 
 /// Safety: `reason` is writable; runs at boot, alone, with fault injection.
-@cfg("CONFIG_FAULTINJECT")
 @export("selftest_wb_error_fsync")
 unsafe fn selftestWbErrorFsync(reason: *mut *CChar) -> bool {
+    if (cfg("!CONFIG_FAULTINJECT")) {
+        KernelLog.write(LogLevel.Info, "selftest: wb-error-fsync: fault injection is compiled out of this build");
+        return true;
+    }
     var bd = 0 as *mut blkdev;
     if (!(wbSetup(borrow mut bd as *mut *mut blkdev) == 0)) {
         return failed(reason, "check failed: wb_setup(&bd) == 0 at line 220\0");
@@ -244,9 +287,9 @@ unsafe fn selftestWbErrorFsync(reason: *mut *CChar) -> bool {
     }
 
     // One refused write-back: fsync says so, and throws nothing away.
-    vfstest_floor_inject_blk(1);
+    injectBlk(1);
     let r1 = file_sync(f);
-    let hits = vfstest_floor_inject_end();
+    let hits = injectEnd();
     if (!(hits == 1)) {
         return failed(reason, "check failed: fst.hits == 1 at line 250\0");
     }
@@ -286,9 +329,12 @@ unsafe fn selftestWbErrorFsync(reason: *mut *CChar) -> bool {
 }
 
 /// Safety: `reason` is writable; runs at boot, alone, with fault injection.
-@cfg("CONFIG_FAULTINJECT")
 @export("selftest_wb_error_once")
 unsafe fn selftestWbErrorOnce(reason: *mut *CChar) -> bool {
+    if (cfg("!CONFIG_FAULTINJECT")) {
+        KernelLog.write(LogLevel.Info, "selftest: wb-error-once: fault injection is compiled out of this build");
+        return true;
+    }
     var bd = 0 as *mut blkdev;
     if (!(wbSetup(borrow mut bd as *mut *mut blkdev) == 0)) {
         return failed(reason, "check failed: wb_setup(&bd) == 0 at line 293\0");
@@ -316,9 +362,9 @@ unsafe fn selftestWbErrorOnce(reason: *mut *CChar) -> bool {
     }
 
     // A's attempt fails; A hears its own failure once.
-    vfstest_floor_inject_blk(1);
+    injectBlk(1);
     let sa = file_sync(a);
-    let hits = vfstest_floor_inject_end();
+    let hits = injectEnd();
     if (!(hits == 1 && sa == -EIO)) {
         return failed(reason, "check failed: fst.hits == 1 && sa == -EIO at line 322\0");
     }
@@ -372,9 +418,12 @@ unsafe fn wbOpenInTable(t: *mut handle_table, path: StringView, page: *u8) -> i3
 }
 
 /// Safety: `reason` is writable; runs at boot, alone, with fault injection.
-@cfg("CONFIG_FAULTINJECT")
 @export("selftest_wb_error_close")
 unsafe fn selftestWbErrorClose(reason: *mut *CChar) -> bool {
+    if (cfg("!CONFIG_FAULTINJECT")) {
+        KernelLog.write(LogLevel.Info, "selftest: wb-error-close: fault injection is compiled out of this build");
+        return true;
+    }
     var bd = 0 as *mut blkdev;
     if (!(wbSetup(borrow mut bd as *mut *mut blkdev) == 0)) {
         return failed(reason, "check failed: wb_setup(&bd) == 0 at line 379\0");
@@ -399,9 +448,9 @@ unsafe fn selftestWbErrorClose(reason: *mut *CChar) -> bool {
     }
     // close: the flush's write-back is refused and close says so; the handle is closed regardless; the release's own
     // retry then writes the page (the injection is spent), so nothing is lost.
-    vfstest_floor_inject_blk(1);
+    injectBlk(1);
     let rc = handle_close(t, h);
-    let hits = vfstest_floor_inject_end();
+    let hits = injectEnd();
     if (!(hits == 1)) {
         return failed(reason, "check failed: fst.hits == 1 at line 405\0");
     }
@@ -444,9 +493,12 @@ unsafe fn selftestWbErrorClose(reason: *mut *CChar) -> bool {
 }
 
 /// Safety: `reason` is writable; runs at boot, alone, with fault injection.
-@cfg("CONFIG_FAULTINJECT")
 @export("selftest_wb_error_lost")
 unsafe fn selftestWbErrorLost(reason: *mut *CChar) -> bool {
+    if (cfg("!CONFIG_FAULTINJECT")) {
+        KernelLog.write(LogLevel.Info, "selftest: wb-error-lost: fault injection is compiled out of this build");
+        return true;
+    }
     var bd = 0 as *mut blkdev;
     if (!(wbSetup(borrow mut bd as *mut *mut blkdev) == 0)) {
         return failed(reason, "check failed: wb_setup(&bd) == 0 at line 451\0");
@@ -471,9 +523,9 @@ unsafe fn selftestWbErrorLost(reason: *mut *CChar) -> bool {
     }
     // Three refusals: the flush's, the file release's retry, the vnode release's last attempt. Then the page is gone
     // -- counted, said.
-    vfstest_floor_inject_blk(3);
+    injectBlk(3);
     let rc = handle_close(t, h);
-    let hits = vfstest_floor_inject_end();
+    let hits = injectEnd();
     if (!(hits == 3)) {
         return failed(reason, "check failed: fst.hits == 3 at line 477\0");
     }

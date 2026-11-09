@@ -1,10 +1,12 @@
 // vfstest_fill.cee - The VFS's self-tests of reads that fill and writers bounded by the dirty count, in CeeSafe:
 // roadmap 2.0 SA7. file-read-filled, pagecache-dirty-writer and aio-pwrite-dirty. Each is an exported function the
 // selftest table names, failing with the condition that did not hold and its line here. aio-pwrite-dirty needs the
-// ring's test body, which only a self-test build has: vfstest_floor.c's stub stands in for it elsewhere.
+// ring's test body, which only a self-test build has: elsewhere it passes without running.
 
 @header("kernel/aio.h", "kernel/cosmofs.h", "kernel/kmalloc.h", "kernel/log.h", "kernel/mutex.h", "kernel/object.h",
-    "kernel/pagecache.h", "kernel/ramblk.h", "kernel/string.h", "kernel/vfs.h")
+    "kernel/pagecache.h", "kernel/ramblk.h", "kernel/string.h", "kernel/vfs.h", "kernel/completion.h", "kernel/errno.h",
+    "kernel/faultinject.h", "kernel/handle.h", "kernel/syscall.h", "kernel/thread.h", "kernel/types.h",
+    "kernel/utsns.h", "kernel/page.h", "uapi/cosmo/fsctl.h")
 extern "C" {
     struct mount {
         cache_dirty: AtomicU64;
@@ -48,21 +50,30 @@ extern "C" {
     fn cosmofs_format(bd: *mut blkdev) -> i32;
     fn cosmofs_test_set_writeback(mnt: *mut mount, on: bool);
     fn aio_test_pwrite(f: *mut file, buf: *void, len: usize, off: u64) -> i64;
+
+    // The values and layout the C compiler checks (ADR 0080 §3.1), which the floor asserted.
+    const EEXIST: i32 = 17;
+    const VNODE_REG: u32 = 1;
+    const VFS_UMOUNT_FORCE: u32 = 1;
+    const EFAULT: i32 = 14;
+    const EOPNOTSUPP: i32 = 95;
+    @cvalue("COSMO_O_RDONLY")
+    const O_RDONLY: u32 = 0x0000;
+    @cvalue("COSMO_O_RDWR")
+    const O_RDWR: u32 = 0x0002;
+    @cvalue("COSMO_O_CREAT")
+    const O_CREAT: u32 = 0x0040;
+    @cvalue("COSMO_O_TRUNC")
+    const O_TRUNC: u32 = 0x0200;
+    @cvalue("COSMO_SEEK_SET")
+    const SEEK_SET: i32 = 0;
+    @cvalue("COSMO_SEEK_CUR")
+    const SEEK_CUR: i32 = 1;
+    @cvalue("PAGE_SIZE")
+    const PAGE: usize = 4096;
 }
 
-// errno.h, syscall.h, vfs.h, page.h and kmalloc.h, which vfstest_floor.c checks.
-const EEXIST: i32 = 17;
-const EFAULT: i32 = 14;
-const EOPNOTSUPP: i32 = 95;
-const O_RDONLY: u32 = 0x0000;
-const O_RDWR: u32 = 0x0002;
-const O_CREAT: u32 = 0x0040;
-const O_TRUNC: u32 = 0x0200;
-const SEEK_SET: i32 = 0;
-const SEEK_CUR: i32 = 1;
-const VNODE_REG: u32 = 1;
-const VFS_UMOUNT_FORCE: u32 = 1;
-const PAGE: usize = 4096;
+// errno.h, syscall.h, vfs.h, page.h and kmalloc.h, which the C compiler checks.
 const MODE_DIR: u32 = 0x1ED; // 0755
 const MODE_FILE: u32 = 0x1A4; // 0644
 const MODE_OWN: u32 = 0x180; // 0600
@@ -427,8 +438,12 @@ unsafe fn dirtyRun(reason: *mut *CChar, dir: StringView, path: StringView, aio: 
 unsafe fn selftestPagecacheDirtyWriter(reason: *mut *CChar) -> bool =>
     dirtyRun(reason, "/mnt/dw\0", "/mnt/dw/w\0", false, 65536);
 
-/// Safety: `reason` is writable; runs at boot, alone, in a self-test build.
-@cfg("CONFIG_SELFTEST")
+/// Passes in a build without self-tests, which has no ring test body to run.
+/// Safety: `reason` is writable; runs at boot, alone.
 @export("selftest_aio_pwrite_dirty")
-unsafe fn selftestAioPwriteDirty(reason: *mut *CChar) -> bool =>
-    dirtyRun(reason, "/mnt/aw\0", "/mnt/aw/w\0", true, AW_BYTES);
+unsafe fn selftestAioPwriteDirty(reason: *mut *CChar) -> bool {
+    if (cfg("!CONFIG_SELFTEST")) {
+        return true;
+    }
+    return dirtyRun(reason, "/mnt/aw\0", "/mnt/aw/w\0", true, AW_BYTES);
+}
