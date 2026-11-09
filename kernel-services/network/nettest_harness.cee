@@ -10,7 +10,19 @@
 // kmalloc. The debug build's injected break of the first attempts (CONFIG_HARNESS_BREAK, `make test-harness-retry`)
 // is nettest.h's constant macro, 0 outside debug builds.
 
-@header("nettest.h", "kernel/fwcfg.h", "kernel/log.h", "kernel/net/inet.h", "kernel/net/tcp.h", "kernel/netif.h", "kernel/socket.h", "kernel/selftest.h", "kernel/sched.h", "kernel/thread.h", "kernel/timer.h")
+@header(
+    "nettest.h",
+    "kernel/fwcfg.h",
+    "kernel/log.h",
+    "kernel/net/inet.h",
+    "kernel/net/tcp.h",
+    "kernel/netif.h",
+    "kernel/socket.h",
+    "kernel/selftest.h",
+    "kernel/sched.h",
+    "kernel/thread.h",
+    "kernel/timer.h",
+)
 extern "C" {
     struct netaddr;
     struct thread;

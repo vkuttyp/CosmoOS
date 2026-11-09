@@ -3,18 +3,15 @@
 // exported function the selftest table names, failing with the condition that did not hold and its line here.
 // The C compiler checks the values this file shares with the C headers (ADR 0080 §3.1).
 
-@header("arch/cpu.h", "kernel/crc32c.h", "kernel/handle.h", "kernel/kmalloc.h", "kernel/log.h", "kernel/mountns.h",
+@header(
+    "arch/cpu.h", "kernel/crc32c.h", "kernel/handle.h", "kernel/kmalloc.h", "kernel/log.h", "kernel/mountns.h",
     "kernel/percpu.h", "kernel/string.h", "kernel/thread.h", "kernel/utsns.h", "kernel/vfs.h", "kernel/wait.h",
     "uapi/cosmo/syscall.h", "kernel/completion.h", "kernel/errno.h", "kernel/faultinject.h", "kernel/pagecache.h",
-    "kernel/syscall.h", "kernel/types.h", "kernel/page.h", "uapi/cosmo/fsctl.h")
+    "kernel/syscall.h", "kernel/types.h", "kernel/page.h", "uapi/cosmo/fsctl.h",
+)
 extern "C" {
     struct vnode_ops {
-        readdir: extern "C" fn(
-            *mut vnode,
-            *mut u64,
-            extern "C" fn(*mut void, *CChar, usize, u64, u32) -> i32,
-            *mut void,
-        ) -> i32;
+        readdir: extern "C" fn(*mut vnode, *mut u64, extern "C" fn(*mut void, *CChar, usize, u64, u32) -> i32, *mut void,) -> i32;
         truncate: extern "C" fn(*mut vnode, u64) -> i32;
     }
     struct pagecache {
@@ -90,8 +87,13 @@ extern "C" {
     fn mountns_put(ns: *mut mount_ns);
     fn cpu_count() -> u32;
     fn cpu_online(cpu: u32) -> bool;
-    fn thread_create_on(entry: extern "C" fn(*mut void), arg: *mut void, name: *CChar, priority: i32, affinity: u64)
-        -> *mut thread;
+    fn thread_create_on(
+        entry: extern "C" fn(*mut void),
+        arg: *mut void,
+        name: *CChar,
+        priority: i32,
+        affinity: u64,
+    ) -> *mut thread;
     fn thread_join(t: *mut thread) -> i32;
     fn thread_sleep_ns(ns: u64);
     fn thread_pin_self() -> u64;
@@ -165,9 +167,9 @@ extern "C" {
 }
 
 // errno.h, syscall.h, vfs.h, handle.h and thread.h, which the C compiler checks.
-const MODE_DIR: u32 = 0x1ED; // 0755
+const MODE_DIR: u32 = 0x1ED;  // 0755
 const MODE_FILE: u32 = 0x1A4; // 0644
-const MODE_OWN: u32 = 0x180; // 0600
+const MODE_OWN: u32 = 0x180;  // 0600
 
 /// Safety: `reason` is writable; `why` ends in a zero byte.
 unsafe fn failed(reason: *mut *CChar, why: StringView) -> bool {
@@ -250,8 +252,10 @@ static mut PC_BUF: [u8; 12288] = [0; 12288];
 @export("selftest_pagecache")
 unsafe fn selftestPagecache(reason: *mut *CChar) -> bool {
     var f = 0 as *mut file;
-    if (!(vfs_open(0 as *mut vnode, c("/tmp/pc-test\0"), O_RDWR | O_CREAT | O_TRUNC, MODE_OWN,
-        borrow mut f as *mut *mut file) == 0)) {
+    if (!(vfs_open(
+        0 as *mut vnode, c("/tmp/pc-test\0"), O_RDWR | O_CREAT | O_TRUNC, MODE_OWN,
+        borrow mut f as *mut *mut file,
+    ) == 0)) {
         return failed(reason, "check failed: vfs_open(NULL, \"/tmp/pc-test\", ...) == 0 at line 223\0");
     }
     let vn = Ptr.toBorrow(f as *file).vn;
@@ -268,15 +272,19 @@ unsafe fn selftestPagecache(reason: *mut *CChar) -> bool {
     }
     let _ = memset(p, 0xff, 3 * PAGE);
     if (!(file_pread(f, p, 3 * PAGE, 0) == truncate<i64>(2 * PAGE + 150))) {
-        return failed2(reason, "check failed: file_pread(f, buf, 3 * PAGE_SIZE, 0) == 2 * PAGE_SIZE + 150 at line ",
-            "217\0");
+        return failed2(
+            reason, "check failed: file_pread(f, buf, 3 * PAGE_SIZE, 0) == 2 * PAGE_SIZE + 150 at line ",
+            "217\0",
+        );
     }
     if (!all(buf, 0, 2 * PAGE + 50, 0)) {
         return failed(reason, "check failed: zero at line 243\0");
     }
     if (!(at(buf, 2 * PAGE + 50) == 0xab && at(buf, 2 * PAGE + 149) == 0xab)) {
-        return failed2(reason, "check failed: buf[2 * PAGE_SIZE + 50] == 0xab && buf[2 * PAGE_SIZE + 149] == 0xab at ",
-            "line 223\0");
+        return failed2(
+            reason, "check failed: buf[2 * PAGE_SIZE + 50] == 0xab && buf[2 * PAGE_SIZE + 149] == 0xab at ",
+            "line 223\0",
+        );
     }
     let pc = borrow Ptr.toBorrow(vn as *vnode).pc;
     if (!(pc.nr_pages == 3 && pc.nr_dirty == 1)) { // holes read in clean
@@ -354,8 +362,10 @@ unsafe fn dirEntries(path: *CChar) -> u32 {
     var pos: u64 = 0;
     let lock = borrow mut Ptr.toBorrowMut(d).lock as *mut mutex;
     mutex_lock(lock);
-    let _ = Ptr.toBorrow(Ptr.toBorrow(d as *vnode).ops).readdir(d, borrow mut pos as *mut u64, countCb,
-        borrow mut n as *mut u32 as *mut void);
+    let _ = Ptr.toBorrow(Ptr.toBorrow(d as *vnode).ops).readdir(
+        d, borrow mut pos as *mut u64, countCb,
+        borrow mut n as *mut u32 as *mut void,
+    );
     mutex_unlock(lock);
     vnode_put(d);
     return n;
@@ -400,7 +410,6 @@ unsafe fn readAll(path: *CChar, buf: *mut u8, len: usize) -> i32 {
 /// Safety: `a` is NUL-terminated; `b` a literal ending in a zero byte.
 unsafe fn same(a: *u8, b: StringView) -> bool => strcmp(a as *CChar, c(b)) == 0;
 
-
 /// Safety: `reason` is writable; runs at boot, alone.
 @export("selftest_vfs_symlink")
 unsafe fn selftestVfsSymlink(reason: *mut *CChar) -> bool {
@@ -435,8 +444,10 @@ unsafe fn selftestVfsSymlink(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: buf[4] == 'Z' at line 403\0");
     }
     if (!(vfs_readlink(none, c("/tmp/sl/file\0"), b as *mut CChar, 64) == -EINVAL)) {
-        return failed2(reason, "check failed: vfs_readlink(NULL, \"/tmp/sl/file\", buf, sizeof(buf)) == -EINVAL at ",
-            "line 382\0");
+        return failed2(
+            reason, "check failed: vfs_readlink(NULL, \"/tmp/sl/file\", buf, sizeof(buf)) == -EINVAL at ",
+            "line 382\0",
+        );
     }
 
     // lstat is the link, stat is the target, and they differ in type and size.
@@ -452,8 +463,10 @@ unsafe fn selftestVfsSymlink(reason: *mut *CChar) -> bool {
     }
     let s = Ptr.toBorrow(st as *cosmo_stat);
     if (!(s.kind == DT_REG && s.size == 12)) {
-        return failed2(reason, "check failed: st.type == COSMO_DT_REG && st.size == strlen(\"target-bytes\") at line ",
-            "398\0");
+        return failed2(
+            reason, "check failed: st.type == COSMO_DT_REG && st.size == strlen(\"target-bytes\") at line ",
+            "398\0",
+        );
     }
     if (!(s.ino != l.ino)) {
         return failed(reason, "check failed: st.ino != lst.ino at line 427\0");
@@ -461,8 +474,10 @@ unsafe fn selftestVfsSymlink(reason: *mut *CChar) -> bool {
 
     // Opening it reads the target's bytes.
     if (!(readAll(c("/tmp/sl/link\0"), b, 64) == 12)) {
-        return failed2(reason, "check failed: read_all(\"/tmp/sl/link\", buf, sizeof(buf)) == ",
-            "(int)strlen(\"target-bytes\") at line 433\0");
+        return failed2(
+            reason, "check failed: read_all(\"/tmp/sl/link\", buf, sizeof(buf)) == ",
+            "(int)strlen(\"target-bytes\") at line 433\0",
+        );
     }
     if (!same(b as *u8, "target-bytes\0")) {
         return failed(reason, "check failed: strcmp(buf, \"target-bytes\") == 0 at line 436\0");
@@ -473,8 +488,10 @@ unsafe fn selftestVfsSymlink(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: vfs_unlink(NULL, \"/tmp/sl/link\") == 0 at line 441\0");
     }
     if (!(vfs_stat(none, c("/tmp/sl/file\0"), st) == 0 && Ptr.toBorrow(st as *cosmo_stat).size == 12)) {
-        return failed2(reason, "check failed: vfs_stat(NULL, \"/tmp/sl/file\", &st) == 0 && st.size == ",
-            "strlen(\"target-bytes\") at line 445\0");
+        return failed2(
+            reason, "check failed: vfs_stat(NULL, \"/tmp/sl/file\", &st) == 0 && st.size == ",
+            "strlen(\"target-bytes\") at line 445\0",
+        );
     }
     if (!(vfs_lstat(none, c("/tmp/sl/link\0"), lst) == -ENOENT)) {
         return failed(reason, "check failed: vfs_lstat(NULL, \"/tmp/sl/link\", &lst) == -ENOENT at line 448\0");
@@ -486,8 +503,10 @@ unsafe fn selftestVfsSymlink(reason: *mut *CChar) -> bool {
     if (!(vfs_rmdir(none, c("/tmp/sl\0")) == 0)) {
         return failed(reason, "check failed: vfs_rmdir(NULL, \"/tmp/sl\") == 0 at line 455\0");
     }
-    KernelLog.write(LogLevel.Info,
-        "selftest: vfs-symlink: created, read without a terminator, lstat the link and stat the target");
+    KernelLog.write(
+        LogLevel.Info,
+        "selftest: vfs-symlink: created, read without a terminator, lstat the link and stat the target",
+    );
     return true;
 }
 
@@ -553,8 +572,10 @@ unsafe fn selftestVfsSymlinkWalk(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: strcmp(buf, \"inner-bytes\") == 0 at line 521\0");
     }
     if (!(stat("/tmp/w/dlink/\0", s) == 0 && st(s).kind == DT_DIR)) {
-        return failed2(reason, "check failed: vfs_stat(NULL, \"/tmp/w/dlink/\", &st) == 0 && st.type == COSMO_DT_DIR ",
-            "at line 525\0");
+        return failed2(
+            reason, "check failed: vfs_stat(NULL, \"/tmp/w/dlink/\", &st) == 0 && st.type == COSMO_DT_DIR ",
+            "at line 525\0",
+        );
     }
 
     // A relative target resolves against the link's own directory, not the caller's start: this link lives in d and
@@ -623,8 +644,10 @@ unsafe fn selftestVfsSymlinkWalk(reason: *mut *CChar) -> bool {
     if (!(rmdir("/tmp/w\0") == 0)) {
         return failed(reason, "check failed: vfs_rmdir(NULL, \"/tmp/w\") == 0 at line 592\0");
     }
-    infoTwo("selftest: vfs-symlink-walk: through a directory link, relative to the link's own ",
-        "directory, .. past an expansion");
+    infoTwo(
+        "selftest: vfs-symlink-walk: through a directory link, relative to the link's own ",
+        "directory, .. past an expansion",
+    );
     return true;
 }
 
@@ -665,8 +688,10 @@ unsafe fn selftestVfsSymlinkLoop(reason: *mut *CChar) -> bool {
     }
     // ... while lstat and readlink still answer, because they do not follow.
     if (!(lstat("/tmp/lp/a\0", s) == 0 && st(s).kind == DT_LNK)) {
-        return failed2(reason, "check failed: vfs_lstat(NULL, \"/tmp/lp/a\", &st) == 0 && st.type == COSMO_DT_LNK at ",
-            "line 607\0");
+        return failed2(
+            reason, "check failed: vfs_lstat(NULL, \"/tmp/lp/a\", &st) == 0 && st.type == COSMO_DT_LNK at ",
+            "line 607\0",
+        );
     }
 
     // The budget is pinned (the C compiler checks VFS_MAX_SYMLINKS == 8): a test built only from the macro moves
@@ -690,8 +715,10 @@ unsafe fn selftestVfsSymlinkLoop(reason: *mut *CChar) -> bool {
         }
     }
     if (!(stat("/tmp/lp/c0\0", s) == 0 && st(s).size == 9)) {
-        return failed2(reason, "check failed: vfs_stat(NULL, \"/tmp/lp/c0\", &st) == 0 && st.size == ",
-            "strlen(\"chain-end\") at line 662\0");
+        return failed2(
+            reason, "check failed: vfs_stat(NULL, \"/tmp/lp/c0\", &st) == 0 && st.size == ",
+            "strlen(\"chain-end\") at line 662\0",
+        );
     }
     chainName(mut name, "/tmp/lp/c", VFS_MAX_SYMLINKS);
     if (!(vfs_symlink(0 as *mut vnode, np, c("c0\0")) == 0)) { // one link longer
@@ -755,12 +782,16 @@ unsafe fn selftestVfsSymlinkNofollow(reason: *mut *CChar) -> bool {
 
     // O_NOFOLLOW refuses a link as the last component, takes a file, and says nothing about links in the middle.
     if (!(open("/tmp/nf/link\0", O_RDONLY | O_NOFOLLOW, 0, fp) == -ELOOP)) {
-        return failed2(reason, "check failed: vfs_open(NULL, \"/tmp/nf/link\", COSMO_O_RDONLY | COSMO_O_NOFOLLOW, 0, ",
-            "&f) == -ELOOP at line 727\0");
+        return failed2(
+            reason, "check failed: vfs_open(NULL, \"/tmp/nf/link\", COSMO_O_RDONLY | COSMO_O_NOFOLLOW, 0, ",
+            "&f) == -ELOOP at line 727\0",
+        );
     }
     if (!(open("/tmp/nf/file\0", O_RDONLY | O_NOFOLLOW, 0, fp) == 0)) {
-        return failed2(reason, "check failed: vfs_open(NULL, \"/tmp/nf/file\", COSMO_O_RDONLY | COSMO_O_NOFOLLOW, 0, ",
-            "&f) == 0 at line 731\0");
+        return failed2(
+            reason, "check failed: vfs_open(NULL, \"/tmp/nf/file\", COSMO_O_RDONLY | COSMO_O_NOFOLLOW, 0, ",
+            "&f) == 0 at line 731\0",
+        );
     }
     filePut(f);
     if (!(mkdir("/tmp/nf/d\0") == 0)) {
@@ -773,8 +804,10 @@ unsafe fn selftestVfsSymlinkNofollow(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: vfs_symlink(NULL, \"/tmp/nf/dlink\", \"d\") == 0 at line 741\0");
     }
     if (!(open("/tmp/nf/dlink/inner\0", O_RDONLY | O_NOFOLLOW, 0, fp) == 0)) {
-        return failed2(reason, "check failed: vfs_open(NULL, \"/tmp/nf/dlink/inner\", COSMO_O_RDONLY | ",
-            "COSMO_O_NOFOLLOW, 0, &f) == 0 at line 745\0");
+        return failed2(
+            reason, "check failed: vfs_open(NULL, \"/tmp/nf/dlink/inner\", COSMO_O_RDONLY | ",
+            "COSMO_O_NOFOLLOW, 0, &f) == 0 at line 745\0",
+        );
     }
     filePut(f);
 
@@ -783,15 +816,19 @@ unsafe fn selftestVfsSymlinkNofollow(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: vfs_symlink(NULL, \"/tmp/nf/dangling\", \"nowhere\") == 0 at line 751\0");
     }
     if (!(open("/tmp/nf/dangling\0", O_RDONLY, 0, fp) == -ENOENT)) {
-        return failed2(reason, "check failed: vfs_open(NULL, \"/tmp/nf/dangling\", COSMO_O_RDONLY, 0, &f) == -ENOENT ",
-            "at line 755\0");
+        return failed2(
+            reason, "check failed: vfs_open(NULL, \"/tmp/nf/dangling\", COSMO_O_RDONLY, 0, &f) == -ENOENT ",
+            "at line 755\0",
+        );
     }
     if (!(stat("/tmp/nf/dangling\0", s) == -ENOENT)) {
         return failed(reason, "check failed: vfs_stat(NULL, \"/tmp/nf/dangling\", &st) == -ENOENT at line 758\0");
     }
     if (!(lstat("/tmp/nf/dangling\0", s) == 0 && st(s).kind == DT_LNK)) {
-        return failed2(reason, "check failed: vfs_lstat(NULL, \"/tmp/nf/dangling\", &st) == 0 && st.type == ",
-            "COSMO_DT_LNK at line 762\0");
+        return failed2(
+            reason, "check failed: vfs_lstat(NULL, \"/tmp/nf/dangling\", &st) == 0 && st.type == ",
+            "COSMO_DT_LNK at line 762\0",
+        );
     }
     if (!(unlink("/tmp/nf/dangling\0") == 0)) {
         return failed(reason, "check failed: vfs_unlink(NULL, \"/tmp/nf/dangling\") == 0 at line 765\0");
@@ -803,8 +840,10 @@ unsafe fn selftestVfsSymlinkNofollow(reason: *mut *CChar) -> bool {
     let end = Ptr.toBorrowMut(b.add(VFS_PATH_MAX + 7));
     *end = 0;
     if (!(vfs_symlink(0 as *mut vnode, c("/tmp/nf/toolong\0"), b as *CChar) == -ENAMETOOLONG)) {
-        return failed2(reason, "check failed: vfs_symlink(NULL, \"/tmp/nf/toolong\", buf) == -ENAMETOOLONG at line ",
-            "738\0");
+        return failed2(
+            reason, "check failed: vfs_symlink(NULL, \"/tmp/nf/toolong\", buf) == -ENAMETOOLONG at line ",
+            "738\0",
+        );
     }
     // ... and one that fits alone but not with a remainder after it. Built from short components on purpose: a single
     // 1000-byte name would be refused for its own length, and the test would pass without the expansion's length
@@ -828,8 +867,10 @@ unsafe fn selftestVfsSymlinkNofollow(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: vfs_stat(NULL, \"/tmp/nf/long\", &st) == -ENOENT at line 796\0");
     }
     if (!(stat("/tmp/nf/long/and/more/components/still\0", s) == -ENAMETOOLONG)) {
-        return failed2(reason, "check failed: vfs_stat(NULL, \"/tmp/nf/long/and/more/components/still\", &st) == ",
-            "-ENAMETOOLONG at line 800\0");
+        return failed2(
+            reason, "check failed: vfs_stat(NULL, \"/tmp/nf/long/and/more/components/still\", &st) == ",
+            "-ENAMETOOLONG at line 800\0",
+        );
     }
     if (!(unlink("/tmp/nf/long\0") == 0)) {
         return failed(reason, "check failed: vfs_unlink(NULL, \"/tmp/nf/long\") == 0 at line 803\0");
@@ -853,8 +894,10 @@ unsafe fn selftestVfsSymlinkNofollow(reason: *mut *CChar) -> bool {
     if (!(rmdir("/tmp/nf\0") == 0)) {
         return failed(reason, "check failed: vfs_rmdir(NULL, \"/tmp/nf\") == 0 at line 822\0");
     }
-    infoTwo("selftest: vfs-symlink-nofollow: O_NOFOLLOW is ELOOP on a link and nothing in the middle; ",
-        "dangling and over-long are refused");
+    infoTwo(
+        "selftest: vfs-symlink-nofollow: O_NOFOLLOW is ELOOP on a link and nothing in the middle; ",
+        "dangling and over-long are refused",
+    );
     return true;
 }
 
@@ -877,8 +920,10 @@ unsafe fn selftestVfsRamfs(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: vfs_stat(NULL, \"/\", &st) == 0 && st.type == COSMO_DT_DIR at line 845\0");
     }
     if (!(stat("/boot/init\0", s) == 0 && st(s).kind == DT_REG && st(s).size > 0)) {
-        return failed2(reason, "check failed: vfs_stat(NULL, \"/boot/init\", &st) == 0 && st.type == COSMO_DT_REG && ",
-            "st.size > 0 at line 849\0");
+        return failed2(
+            reason, "check failed: vfs_stat(NULL, \"/boot/init\", &st) == 0 && st.type == COSMO_DT_REG && ",
+            "st.size > 0 at line 849\0",
+        );
     }
     if (!(stat("/boot/modules/hello.ko\0", s) == 0)) {
         return failed(reason, "check failed: vfs_stat(NULL, \"/boot/modules/hello.ko\", &st) == 0 at line 852\0");
@@ -899,8 +944,10 @@ unsafe fn selftestVfsRamfs(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: vfs_stat(NULL, \"/boot/nope\", &st) == -ENOENT at line 867\0");
     }
     if (!(stat("\0", s) == -ENOENT || stat("\0", s) == 0)) {
-        return failed2(reason, "check failed: vfs_stat(NULL, \"\", &st) == -ENOENT || vfs_stat(NULL, \"\", &st) == 0 ",
-            "at line 871\0");
+        return failed2(
+            reason, "check failed: vfs_stat(NULL, \"\", &st) == -ENOENT || vfs_stat(NULL, \"\", &st) == 0 ",
+            "at line 871\0",
+        );
     }
 
     // A file: create, write, read back through a second open.
@@ -910,8 +957,10 @@ unsafe fn selftestVfsRamfs(reason: *mut *CChar) -> bool {
     let b = borrow mut buf as *mut [u8; 32] as *mut u8;
     let bv = b as *mut void;
     if (!(open("/tmp/a.txt\0", O_WRONLY | O_CREAT, MODE_FILE, fp) == 0)) {
-        return failed2(reason, "check failed: vfs_open(NULL, \"/tmp/a.txt\", COSMO_O_WRONLY | COSMO_O_CREAT, 0644, ",
-            "&f) == 0 at line 882\0");
+        return failed2(
+            reason, "check failed: vfs_open(NULL, \"/tmp/a.txt\", COSMO_O_WRONLY | COSMO_O_CREAT, 0644, ",
+            "&f) == 0 at line 882\0",
+        );
     }
     if (!(file_write(f, c("0123456789\0") as *void, 10) == 10)) {
         return failed(reason, "check failed: file_write(f, \"0123456789\", 10) == 10 at line 885\0");
@@ -927,15 +976,19 @@ unsafe fn selftestVfsRamfs(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: vfs_open(NULL, \"/tmp/a.txt\", COSMO_O_RDONLY, 0, &f) == 0 at line 895\0");
     }
     if (!(file_read(f, bv, 32) == 13 && memcmp(b as *void, c("0123456789abc\0") as *void, 13) == 0)) {
-        return failed2(reason, "check failed: file_read(f, buf, sizeof(buf)) == 13 && memcmp(buf, \"0123456789abc\", ",
-            "13) == 0 at line 899\0");
+        return failed2(
+            reason, "check failed: file_read(f, buf, sizeof(buf)) == 13 && memcmp(buf, \"0123456789abc\", ",
+            "13) == 0 at line 899\0",
+        );
     }
     if (!(file_read(f, bv, 32) == 0)) {
         return failed(reason, "check failed: file_read(f, buf, sizeof(buf)) == 0 at line 902\0");
     }
     if (!(file_seek(f, 10, SEEK_SET) == 10 && file_read(f, bv, 8) == 3 && at(b as *u8, 0) == 0x61)) {
-        return failed2(reason, "check failed: file_seek(f, 10, COSMO_SEEK_SET) == 10 && file_read(f, buf, 8) == 3 && ",
-            "buf[0] == 'a' at line 906\0");
+        return failed2(
+            reason, "check failed: file_seek(f, 10, COSMO_SEEK_SET) == 10 && file_read(f, buf, 8) == 3 && ",
+            "buf[0] == 'a' at line 906\0",
+        );
     }
     if (!(file_seek(f, -20, SEEK_CUR) == -EINVAL as i64)) {
         return failed(reason, "check failed: file_seek(f, -20, COSMO_SEEK_CUR) == -EINVAL at line 909\0");
@@ -945,31 +998,41 @@ unsafe fn selftestVfsRamfs(reason: *mut *CChar) -> bool {
     }
     filePut(f);
     if (!(open("/tmp/a.txt\0", O_WRONLY | O_APPEND, 0, fp) == 0)) {
-        return failed2(reason, "check failed: vfs_open(NULL, \"/tmp/a.txt\", COSMO_O_WRONLY | COSMO_O_APPEND, 0, &f) ",
-            "== 0 at line 917\0");
+        return failed2(
+            reason, "check failed: vfs_open(NULL, \"/tmp/a.txt\", COSMO_O_WRONLY | COSMO_O_APPEND, 0, &f) ",
+            "== 0 at line 917\0",
+        );
     }
     if (!(file_write(f, c("!\0") as *void, 1) == 1)) {
         return failed(reason, "check failed: file_write(f, \"!\", 1) == 1 at line 920\0");
     }
     filePut(f);
     if (!(stat("/tmp/a.txt\0", s) == 0 && st(s).size == 14 && st(s).nlink == 1)) {
-        return failed2(reason, "check failed: vfs_stat(NULL, \"/tmp/a.txt\", &st) == 0 && st.size == 14 && st.nlink ",
-            "== 1 at line 925\0");
+        return failed2(
+            reason, "check failed: vfs_stat(NULL, \"/tmp/a.txt\", &st) == 0 && st.size == 14 && st.nlink ",
+            "== 1 at line 925\0",
+        );
     }
     if (!(open("/tmp/a.txt\0", O_RDONLY | O_CREAT | O_EXCL, 0, fp) == -EEXIST)) {
-        return failed2(reason, "check failed: vfs_open(NULL, \"/tmp/a.txt\", COSMO_O_RDONLY | COSMO_O_CREAT | ",
-            "COSMO_O_EXCL, 0, &f) == -EEXIST at line 929\0");
+        return failed2(
+            reason, "check failed: vfs_open(NULL, \"/tmp/a.txt\", COSMO_O_RDONLY | COSMO_O_CREAT | ",
+            "COSMO_O_EXCL, 0, &f) == -EEXIST at line 929\0",
+        );
     }
     if (!(open("/tmp/a.txt\0", O_RDONLY | O_DIRECTORY, 0, fp) == -ENOTDIR)) {
-        return failed2(reason, "check failed: vfs_open(NULL, \"/tmp/a.txt\", COSMO_O_RDONLY | COSMO_O_DIRECTORY, 0, ",
-            "&f) == -ENOTDIR at line 933\0");
+        return failed2(
+            reason, "check failed: vfs_open(NULL, \"/tmp/a.txt\", COSMO_O_RDONLY | COSMO_O_DIRECTORY, 0, ",
+            "&f) == -ENOTDIR at line 933\0",
+        );
     }
     if (!(open("/tmp\0", O_RDWR, 0, fp) == -EISDIR)) {
         return failed(reason, "check failed: vfs_open(NULL, \"/tmp\", COSMO_O_RDWR, 0, &f) == -EISDIR at line 936\0");
     }
     if (!(open("/tmp/a.txt\0", O_ACCMODE, 0, fp) == -EINVAL)) {
-        return failed2(reason, "check failed: vfs_open(NULL, \"/tmp/a.txt\", COSMO_O_ACCMODE, 0, &f) == -EINVAL at ",
-            "line 892\0");
+        return failed2(
+            reason, "check failed: vfs_open(NULL, \"/tmp/a.txt\", COSMO_O_ACCMODE, 0, &f) == -EINVAL at ",
+            "line 892\0",
+        );
     }
 
     // Directories and renames.
@@ -995,25 +1058,33 @@ unsafe fn selftestVfsRamfs(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: dir_entries(\"/tmp/d1\") == 3 at line 963\0");
     }
     if (!(rename("/tmp/a.txt\0", "/tmp/d1/d2/b.txt\0") == 0)) {
-        return failed2(reason, "check failed: vfs_rename(NULL, \"/tmp/a.txt\", \"/tmp/d1/d2/b.txt\") == 0 at line ",
-            "918\0");
+        return failed2(
+            reason, "check failed: vfs_rename(NULL, \"/tmp/a.txt\", \"/tmp/d1/d2/b.txt\") == 0 at line ",
+            "918\0",
+        );
     }
     if (!(stat("/tmp/a.txt\0", s) == -ENOENT)) {
         return failed(reason, "check failed: vfs_stat(NULL, \"/tmp/a.txt\", &st) == -ENOENT at line 970\0");
     }
     if (!(stat("/tmp/d1/d2/b.txt\0", s) == 0 && st(s).size == 14)) {
-        return failed2(reason, "check failed: vfs_stat(NULL, \"/tmp/d1/d2/b.txt\", &st) == 0 && st.size == 14 at line ",
-            "924\0");
+        return failed2(
+            reason, "check failed: vfs_stat(NULL, \"/tmp/d1/d2/b.txt\", &st) == 0 && st.size == 14 at line ",
+            "924\0",
+        );
     }
     if (!(rename("/tmp/d1\0", "/tmp/d1/d2/loop\0") == -EINVAL)) { // into itself
-        return failed2(reason, "check failed: vfs_rename(NULL, \"/tmp/d1\", \"/tmp/d1/d2/loop\") == -EINVAL at line ",
-            "927\0");
+        return failed2(
+            reason, "check failed: vfs_rename(NULL, \"/tmp/d1\", \"/tmp/d1/d2/loop\") == -EINVAL at line ",
+            "927\0",
+        );
     }
     // Onto its own parent: the destination lookup returns a directory this rename has already locked, so every check
     // on it must be one that does not take the lock again.
     if (!(rename("/tmp/d1/d2\0", "/tmp/d1\0") == -ENOTEMPTY)) {
-        return failed2(reason, "check failed: vfs_rename(NULL, \"/tmp/d1/d2\", \"/tmp/d1\") == -ENOTEMPTY at line ",
-            "932\0");
+        return failed2(
+            reason, "check failed: vfs_rename(NULL, \"/tmp/d1/d2\", \"/tmp/d1\") == -ENOTEMPTY at line ",
+            "932\0",
+        );
     }
     if (!(stat("/tmp/d1/d2\0", s) == 0)) {
         return failed(reason, "check failed: vfs_stat(NULL, \"/tmp/d1/d2\", &st) == 0 at line 987\0");
@@ -1048,8 +1119,10 @@ unsafe fn selftestVfsRamfs(reason: *mut *CChar) -> bool {
 
     // An open file survives unlink; the vnode dies with the last file.
     if (!(open("/mnt/b.txt\0", O_RDONLY, 0, fp) == 0)) {
-        return failed2(reason, "check failed: vfs_open(NULL, \"/mnt/b.txt\", COSMO_O_RDONLY, 0, &f) ",
-            "== 0 at line 1020\0");
+        return failed2(
+            reason, "check failed: vfs_open(NULL, \"/mnt/b.txt\", COSMO_O_RDONLY, 0, &f) ",
+            "== 0 at line 1020\0",
+        );
     }
     if (!(unlink("/mnt/b.txt\0") == 0)) {
         return failed(reason, "check failed: vfs_unlink(NULL, \"/mnt/b.txt\") == 0 at line 1023\0");
@@ -1098,15 +1171,19 @@ unsafe fn selftestVfsRamfs(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: vfs_mkdir(NULL, \"/mnt/inner\", 0755) == 0 at line 1066\0");
     }
     if (!(open("/mnt/inner/f\0", O_WRONLY | O_CREAT, MODE_FILE, fp) == 0)) {
-        return failed2(reason, "check failed: vfs_open(NULL, \"/mnt/inner/f\", COSMO_O_WRONLY | COSMO_O_CREAT, 0644, ",
-            "&f) == 0 at line 1070\0");
+        return failed2(
+            reason, "check failed: vfs_open(NULL, \"/mnt/inner/f\", COSMO_O_WRONLY | COSMO_O_CREAT, 0644, ",
+            "&f) == 0 at line 1070\0",
+        );
     }
     if (!(file_write(f, c("mounted\0") as *void, 7) == 7)) {
         return failed(reason, "check failed: file_write(f, \"mounted\", 7) == 7 at line 1073\0");
     }
     if (!(stat("/mnt/inner/..\0", s) == 0 && st(s).ino == 1)) { // the mount's root
-        return failed2(reason, "check failed: vfs_stat(NULL, \"/mnt/inner/..\", &st) == 0 && st.ino == 1 at line ",
-            "1022\0");
+        return failed2(
+            reason, "check failed: vfs_stat(NULL, \"/mnt/inner/..\", &st) == 0 && st.ino == 1 at line ",
+            "1022\0",
+        );
     }
     if (!(stat("/mnt/..\0", s) == 0 && st(s).ino == 1)) { // the global root
         return failed(reason, "check failed: vfs_stat(NULL, \"/mnt/..\", &st) == 0 && st.ino == 1 at line 1080\0");
@@ -1159,8 +1236,10 @@ unsafe fn selftestFsyncHandle(reason: *mut *CChar) -> bool {
 
     var f = 0 as *mut file;
     if (!(open("/tmp/fsync.txt\0", O_RDWR | O_CREAT, MODE_FILE, borrow mut f as *mut *mut file) == 0)) {
-        return failed2(reason, "check failed: vfs_open(NULL, \"/tmp/fsync.txt\", COSMO_O_RDWR | COSMO_O_CREAT, 0644, ",
-            "&f) == 0 at line 1131\0");
+        return failed2(
+            reason, "check failed: vfs_open(NULL, \"/tmp/fsync.txt\", COSMO_O_RDWR | COSMO_O_CREAT, 0644, ",
+            "&f) == 0 at line 1131\0",
+        );
     }
     if (!(file_write(f, c("durable\0") as *void, 7) == 7)) {
         return failed(reason, "check failed: file_write(f, \"durable\", 7) == 7 at line 1134\0");
@@ -1198,7 +1277,6 @@ unsafe fn selftestFsyncHandle(reason: *mut *CChar) -> bool {
     return true;
 }
 
-
 // ---- the uts namespace (docs/kernel/security/design.md §1e, S13) ----
 //
 // The namespace API takes the namespace to act on, so unlike the mount side this can be shown directly: a namespace
@@ -1227,8 +1305,10 @@ unsafe fn selftestUtsns(reason: *mut *CChar) -> bool {
     }
     // The copy is of the name at the split.
     if (!(utsns_gethostname(b, g, HOST_NAME_MAX) == 6 && same(g as *u8, "before\0"))) {
-        return failed2(reason, "check failed: utsns_gethostname(b, got, sizeof(got)) == 6 && strcmp(got, \"before\") ",
-            "== 0 at line 1200\0");
+        return failed2(
+            reason, "check failed: utsns_gethostname(b, got, sizeof(got)) == 6 && strcmp(got, \"before\") ",
+            "== 0 at line 1200\0",
+        );
     }
 
     // And the two then move independently, in both directions.
@@ -1236,15 +1316,19 @@ unsafe fn selftestUtsns(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: utsns_sethostname(init, \"after\", 5) == 0 at line 1205\0");
     }
     if (!(utsns_gethostname(b, g, HOST_NAME_MAX) == 6 && same(g as *u8, "before\0"))) {
-        return failed2(reason, "check failed: utsns_gethostname(b, got, sizeof(got)) == 6 && strcmp(got, \"before\") ",
-            "== 0 at line 1209\0");
+        return failed2(
+            reason, "check failed: utsns_gethostname(b, got, sizeof(got)) == 6 && strcmp(got, \"before\") ",
+            "== 0 at line 1209\0",
+        );
     }
     if (!(utsns_sethostname(b, c("child\0"), 5) == 0)) {
         return failed(reason, "check failed: utsns_sethostname(b, \"child\", 5) == 0 at line 1212\0");
     }
     if (!(utsns_gethostname(init, g, HOST_NAME_MAX) == 5 && same(g as *u8, "after\0"))) {
-        return failed2(reason, "check failed: utsns_gethostname(init, got, sizeof(got)) == 5 && strcmp(got, ",
-            "\"after\") == 0 at line 1216\0");
+        return failed2(
+            reason, "check failed: utsns_gethostname(init, got, sizeof(got)) == 5 && strcmp(got, ",
+            "\"after\") == 0 at line 1216\0",
+        );
     }
 
     // A name that would arrive different from how it was sent is refused rather than trimmed: one holding a newline
@@ -1261,30 +1345,40 @@ unsafe fn selftestUtsns(reason: *mut *CChar) -> bool {
     var toolong: [u8; 72] = [0x78; 72];
     let tl = borrow toolong as *[u8; 72] as *CChar;
     if (!(utsns_sethostname(init, tl, HOST_NAME_MAX) == -EINVAL)) {
-        return failed2(reason, "check failed: utsns_sethostname(init, toolong, COSMO_HOST_NAME_MAX) == -EINVAL at ",
-            "line 1174\0");
+        return failed2(
+            reason, "check failed: utsns_sethostname(init, toolong, COSMO_HOST_NAME_MAX) == -EINVAL at ",
+            "line 1174\0",
+        );
     }
     // One byte short of the limit fits, terminator included.
     if (!(utsns_sethostname(init, tl, HOST_NAME_MAX - 1) == 0)) {
-        return failed2(reason, "check failed: utsns_sethostname(init, toolong, COSMO_HOST_NAME_MAX - 1) == 0 at line ",
-            "1178\0");
+        return failed2(
+            reason, "check failed: utsns_sethostname(init, toolong, COSMO_HOST_NAME_MAX - 1) == 0 at line ",
+            "1178\0",
+        );
     }
     if (!(utsns_gethostname(init, g, HOST_NAME_MAX) == HOST_NAME_MAX - 1)) {
-        return failed2(reason, "check failed: utsns_gethostname(init, got, sizeof(got)) == COSMO_HOST_NAME_MAX - 1 at ",
-            "line 1181\0");
+        return failed2(
+            reason, "check failed: utsns_gethostname(init, got, sizeof(got)) == COSMO_HOST_NAME_MAX - 1 at ",
+            "line 1181\0",
+        );
     }
 
     // A short buffer truncates and says how much it wrote, rather than overrunning or reporting the length it wanted.
     var small: [u8; 4] = [0xFF; 4];
     if (!(utsns_gethostname(init, borrow mut small as *mut [u8; 4] as *mut CChar, 4) == 3 && small[3] == 0)) {
-        return failed2(reason, "check failed: utsns_gethostname(init, small, sizeof(small)) == 3 && small[3] == 0 at ",
-            "line 1187\0");
+        return failed2(
+            reason, "check failed: utsns_gethostname(init, small, sizeof(small)) == 3 && small[3] == 0 at ",
+            "line 1187\0",
+        );
     }
 
     utsns_put(b);
     utsns_put(a);
-    KernelLog.write(LogLevel.Info,
-        "selftest: utsns: a namespace carries the name it was made with, and the two move apart");
+    KernelLog.write(
+        LogLevel.Info,
+        "selftest: utsns: a namespace carries the name it was made with, and the two move apart",
+    );
     return true;
 }
 
@@ -1361,8 +1455,10 @@ unsafe fn selftestMountns(reason: *mut *CChar) -> bool {
     if (!(rmdir("/tmp/ns\0") == 0)) {
         return failed(reason, "check failed: vfs_rmdir(NULL, \"/tmp/ns\") == 0 at line 1331\0");
     }
-    KernelLog.write(LogLevel.Info,
-        "selftest: mountns: a mount two namespaces see survives the first unmount and goes on the second");
+    KernelLog.write(
+        LogLevel.Info,
+        "selftest: mountns: a mount two namespaces see survives the first unmount and goes on the second",
+    );
     return true;
 }
 
@@ -1478,13 +1574,17 @@ unsafe fn concurrencyPinned(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: vfs_mkdir(NULL, \"/tmp/vc/a/b\", 0755) == 0 at line 1447\0");
     }
     if (!(open("/tmp/vc/a/x\0", O_WRONLY | O_CREAT, MODE_FILE, fp) == 0)) {
-        return failed2(reason, "check failed: vfs_open(NULL, \"/tmp/vc/a/x\", COSMO_O_WRONLY | COSMO_O_CREAT, 0644, ",
-            "&f) == 0 at line 1451\0");
+        return failed2(
+            reason, "check failed: vfs_open(NULL, \"/tmp/vc/a/x\", COSMO_O_WRONLY | COSMO_O_CREAT, 0644, ",
+            "&f) == 0 at line 1451\0",
+        );
     }
     filePut(f);
     if (!(open("/tmp/vc/shared\0", O_WRONLY | O_CREAT, MODE_FILE, fp) == 0)) {
-        return failed2(reason, "check failed: vfs_open(NULL, \"/tmp/vc/shared\", COSMO_O_WRONLY | COSMO_O_CREAT, ",
-            "0644, &f) == 0 at line 1456\0");
+        return failed2(
+            reason, "check failed: vfs_open(NULL, \"/tmp/vc/shared\", COSMO_O_WRONLY | COSMO_O_CREAT, ",
+            "0644, &f) == 0 at line 1456\0",
+        );
     }
     filePut(f);
 
@@ -1539,8 +1639,10 @@ unsafe fn concurrencyPinned(reason: *mut *CChar) -> bool {
     // ramfs pins its vnodes, so the count is exact: the five we created and nothing duplicated (b may be absent).
     let count = vfs_vnode_count();
     if (!(count == vnodes0 + 5 || count == vnodes0 + 4)) {
-        return failed2(reason, "check failed: vfs_vnode_count() == vnodes0 + 5 || vfs_vnode_count() == vnodes0 + 4 at ",
-            "line 1446\0");
+        return failed2(
+            reason, "check failed: vfs_vnode_count() == vnodes0 + 5 || vfs_vnode_count() == vnodes0 + 4 at ",
+            "line 1446\0",
+        );
     }
 
     if (!(unlink("/tmp/vc/shared\0") == 0)) {

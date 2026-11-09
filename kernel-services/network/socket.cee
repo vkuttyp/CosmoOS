@@ -9,7 +9,17 @@
 // condition function, since a wait entry is C state no CeeSafe local may hold. sock->lock serialises callers; the
 // conditions, the error word and the shut bits are read without it, the last two atomically.
 
-@header("kernel/socket.h", "kernel/net/tcp.h", "kernel/net/raw.h", "kernel/cred.h", "kernel/thread.h", "kernel/unix.h", "kernel/wait.h", "kernel/kmalloc.h", "kernel/string.h")
+@header(
+    "kernel/socket.h",
+    "kernel/net/tcp.h",
+    "kernel/net/raw.h",
+    "kernel/cred.h",
+    "kernel/thread.h",
+    "kernel/unix.h",
+    "kernel/wait.h",
+    "kernel/kmalloc.h",
+    "kernel/string.h",
+)
 extern "C" {
     struct in6_addr {
         s6_addr: [u8; 16];
@@ -53,7 +63,7 @@ extern "C" {
     struct socket {
         obj: kobject;
         family: i32;
-        @cname ("type") kind: i32;
+        @cname("type") kind: i32;
         state: u32;
         udp: udp_pcb;
         tcp: *mut tcp_pcb;
@@ -70,7 +80,7 @@ extern "C" {
         uid: u32;
     }
     struct cosmo_stat {
-        @cname ("type") kind: u32;
+        @cname("type") kind: u32;
         mode: u32;
         nlink: u32;
     }

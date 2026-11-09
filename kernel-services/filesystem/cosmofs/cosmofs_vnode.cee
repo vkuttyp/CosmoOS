@@ -24,8 +24,7 @@ extern "C" {
         link: extern "C" fn(*mut vnode, *CChar, usize, *mut vnode) -> i32;
         rmdir: extern "C" fn(*mut vnode, *CChar, usize, *mut vnode) -> i32;
         rename: extern "C" fn(*mut vnode, *CChar, usize, *mut vnode, *mut vnode, *CChar, usize, *mut vnode) -> i32;
-        readdir: extern "C" fn(*mut vnode, *mut u64, extern "C" fn(*mut void, *CChar, usize, u64, vnode_type) -> i32,
-            *mut void) -> i32;
+        readdir: extern "C" fn(*mut vnode, *mut u64, extern "C" fn(*mut void, *CChar, usize, u64, vnode_type) -> i32, *mut void) -> i32;
         readpage: extern "C" fn(*mut vnode, u64, *mut void) -> i32;
         writepage: extern "C" fn(*mut vnode, u64, *void) -> i32;
         writepages: extern "C" fn(*mut vnode, u64, **mut void, u32, *mut u32) -> i32;
@@ -92,10 +91,14 @@ extern "C" {
     fn cfs_link(dir: *mut vnode, name: *CChar, len: usize, target: *mut vnode) -> i32;
     fn cfs_unlink(dir: *mut vnode, name: *CChar, len: usize, victim: *mut vnode) -> i32;
     fn cfs_rmdir(dir: *mut vnode, name: *CChar, len: usize, victim: *mut vnode) -> i32;
-    fn cfs_rename(odir: *mut vnode, oname: *CChar, olen: usize, victim: *mut vnode, ndir: *mut vnode, nname: *CChar,
-        nlen: usize, replaced: *mut vnode) -> i32;
-    fn cfs_readdir(dir: *mut vnode, pos: *mut u64,
-        cb: extern "C" fn(*mut void, *CChar, usize, u64, vnode_type) -> i32, arg: *mut void) -> i32;
+    fn cfs_rename(
+        odir: *mut vnode, oname: *CChar, olen: usize, victim: *mut vnode, ndir: *mut vnode, nname: *CChar,
+        nlen: usize, replaced: *mut vnode,
+    ) -> i32;
+    fn cfs_readdir(
+        dir: *mut vnode, pos: *mut u64,
+        cb: extern "C" fn(*mut void, *CChar, usize, u64, vnode_type) -> i32, arg: *mut void,
+    ) -> i32;
     fn cfs_readpage(vn: *mut vnode, index: u64, buf: *mut void) -> i32;
     fn cfs_writepage(vn: *mut vnode, index: u64, buf: *void) -> i32;
     fn cfs_writepages(vn: *mut vnode, index: u64, pages: **mut void, n: u32, done: *mut u32) -> i32;
@@ -157,7 +160,7 @@ const CFS_TYPE_DIR: u32 = 2;
 const CFS_TYPE_LNK: u32 = 3;
 const CFS_SNAP_INO_SHIFT: u32 = 48;
 const PERM_MASK: u32 = 4095; // 07777
-const PERM_LNK: u32 = 511; // 0777
+const PERM_LNK: u32 = 511;   // 0777
 
 /// cosmofs_format.h's CFS_SNAP_INO: an inode number with a tree's tag.
 fn snapIno(tag: u32, ino: u64) -> u64 => ((tag as u64) << CFS_SNAP_INO_SHIFT) | ino;
@@ -181,8 +184,8 @@ unsafe fn fillVnode(vn: *mut vnode, inp: *cfs_inode) {
     v.size = i.size;
     v.mtime_ns = i.mtime_ns;
     v.ctime_ns = i.ctime_ns;
-    v.ops = if (t == VNODE_DIR) borrow DIR_OPS as *vnode_ops else if (t == VNODE_LNK) borrow LNK_OPS as *vnode_ops else
-        borrow FILE_OPS as *vnode_ops;
+    v.ops = if (t == VNODE_DIR) borrow DIR_OPS as *vnode_ops else if (t == VNODE_LNK) borrow LNK_OPS as *vnode_ops
+        else borrow FILE_OPS as *vnode_ops;
 }
 
 /// A vnode made with state `cv` (its inode read) under key `key`, filled and put in the cache; `cv` freed if not.

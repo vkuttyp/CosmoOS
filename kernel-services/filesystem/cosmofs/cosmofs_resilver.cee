@@ -11,8 +11,10 @@
 // against its C size (tests/host/test_cfsresilver.c). The sysctl's variable, g_cosmofs_resilver_rate, is this file's,
 // C data the sysctl reads and writes atomically (ADR 0080 §3.2).
 
-@header("kernel/blk.h", "kernel/vfs.h", "kernel/storage.h", "kernel/thread.h", "kernel/timer.h", "kernel/wait.h",
-    "kernel/random.h", "kernel/cosmofs.h", "cosmofs_internal.h")
+@header(
+    "kernel/blk.h", "kernel/vfs.h", "kernel/storage.h", "kernel/thread.h", "kernel/timer.h", "kernel/wait.h",
+    "kernel/random.h", "kernel/cosmofs.h", "cosmofs_internal.h",
+)
 extern "C" {
     struct blkdev {
         obj: kobject;
@@ -1126,7 +1128,12 @@ unsafe fn newDevice(fs: *mut cfs, name: *CChar, v: i32, out: *mut *mut blkdev) -
     var b: u32 = 0;
     var rc = 0;
     let mountDev = Ptr.toBorrow(fsOf(fs).mnt as *mount).bdev;
-    if (pool_find_dev(p as *spool, bd as *blkdev, borrow mut a as *mut u32, borrow mut b as *mut u32) || bd == mountDev) {
+    if (pool_find_dev(
+        p as *spool,
+        bd as *blkdev,
+        borrow mut a as *mut u32,
+        borrow mut b as *mut u32,
+    ) || bd == mountDev) {
         rc = -EEXIST;
     }
     for (i in 0u32..pool(p).nspares) {
@@ -1497,7 +1504,10 @@ unsafe fn status(fs: *mut cfs, req: *mut cosmofs_pool_req) {
             o.write_errors = cp.write_errors;
             o.csum_errors = cp.csum_errors;
             if (!cp.dev.isNull()) {
-                copyName(borrow mut o.dev as *mut [u8; 16] as *mut u8, borrow devOf(cp.dev).name as *[u8; 16] as *CChar);
+                copyName(
+                    borrow mut o.dev as *mut [u8; 16] as *mut u8,
+                    borrow devOf(cp.dev).name as *[u8; 16] as *CChar,
+                );
             }
         }
     }

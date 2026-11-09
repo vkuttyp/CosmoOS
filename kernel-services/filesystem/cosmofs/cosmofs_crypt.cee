@@ -11,8 +11,10 @@
 // their C sizes (tests/host/test_cfscrypt.c): a CeeSafe local cannot hold C state. cfs_mac_ok's domain is a C char
 // (ADR 0080 §3.5), and the uapi key slot's layout is the on-disk one's, which the C compiler checks.
 
-@header("kernel/blk.h", "kernel/vfs.h", "kernel/storage.h", "kernel/random.h", "kernel/chacha20.h", "kernel/crypto.h",
-    "kernel/blake2b.h", "kernel/cosmofs.h", "uapi/cosmo/fsctl.h", "cosmofs_internal.h")
+@header(
+    "kernel/blk.h", "kernel/vfs.h", "kernel/storage.h", "kernel/random.h", "kernel/chacha20.h", "kernel/crypto.h",
+    "kernel/blake2b.h", "kernel/cosmofs.h", "uapi/cosmo/fsctl.h", "cosmofs_internal.h",
+)
 extern "C" {
     struct blkdev {
         name: [u8; 16];
@@ -116,7 +118,9 @@ extern "C" {
     @cvalue("offsetof(struct cfs_super, crc)")
     const SUPER_CRC_AT: usize = 160;
     /// A /dev/fsctl key slot is an on-disk one: its size, its members' places, the slot count and the key size.
-    @cvalue("sizeof(struct cosmo_keyslot) == sizeof(struct cfs_keyslot) && offsetof(struct cosmo_keyslot, wrapped) == offsetof(struct cfs_keyslot, wrapped) && offsetof(struct cosmo_keyslot, created_ns) == offsetof(struct cfs_keyslot, created_ns) && COSMO_KEY_SLOTS == CFS_KEY_SLOTS && COSMO_KEY_SIZE == CHACHA20_KEY_SIZE")
+    @cvalue(
+        "sizeof(struct cosmo_keyslot) == sizeof(struct cfs_keyslot) && offsetof(struct cosmo_keyslot, wrapped) == offsetof(struct cfs_keyslot, wrapped) && offsetof(struct cosmo_keyslot, created_ns) == offsetof(struct cfs_keyslot, created_ns) && COSMO_KEY_SLOTS == CFS_KEY_SLOTS && COSMO_KEY_SIZE == CHACHA20_KEY_SIZE",
+    )
     const SLOT_IS_ON_DISK: bool = true;
     fn memcpy(dst: *mut void, src: *void, n: usize) -> *mut void;
     fn memset(p: *mut void, c: i32, n: usize) -> *mut void;
@@ -157,8 +161,8 @@ const CFS_KDF_SHA512: u32 = 1;
 const CFS_KEY_SLOTS: u32 = 8;
 const CFS_KEYSLOT_EMPTY: u32 = 0;
 const CFS_DVA_VDEV_SHIFT: u64 = 56;
-const KEY_SIZE: usize = 32; // CHACHA20_KEY_SIZE
-const NONCE_SIZE: usize = 12; // CHACHA20_NONCE_SIZE
+const KEY_SIZE: usize = 32;    // CHACHA20_KEY_SIZE
+const NONCE_SIZE: usize = 12;  // CHACHA20_NONCE_SIZE
 const DIGEST_SIZE: usize = 64; // SHA512_DIGEST_SIZE
 /// Where a metadata header's magic, kind and block number are (struct cfs_mhdr), and where a key block's slots begin
 /// (struct cfs_keys2).
@@ -453,7 +457,14 @@ unsafe fn macDerive(master: *u8, out: *mut cfs_mac) {
 /// cosmofs_internal.h's cfs_keys2_write: a version-2 key block -- the pool's uuid and the slots -- written.
 /// Safety: `pool` is an open pool, `mac` null or a MAC key, `uuid` 16 bytes, `slots` CFS_KEY_SLOTS slots.
 @export("cfs_keys2_write")
-unsafe fn keys2Write(pool: *mut spool, mac: *cfs_mac, dva: u64, generation: u64, uuid: *u8, slots: *cfs_keyslot) -> i32 {
+unsafe fn keys2Write(
+    pool: *mut spool,
+    mac: *cfs_mac,
+    dva: u64,
+    generation: u64,
+    uuid: *u8,
+    slots: *cfs_keyslot,
+) -> i32 {
     let block = kmalloc(CFS_BLOCK, KMEM_ZERO) as *mut u8;
     if (block.isNull()) {
         return -ENOMEM;
@@ -481,7 +492,7 @@ const KEYTAB: usize = 8;
 
 static mut g_keytab_lock: spinlock_t = SPINLOCK_INIT("cosmofs-keys\0".ptr as *CChar);
 static mut g_used: [bool; 8] = [false; 8];
-static mut g_holders: [u32; 8] = [0; 8]; // live mounts of the pool
+static mut g_holders: [u32; 8] = [0; 8];      // live mounts of the pool
 static mut g_mounted: [bool; 8] = [false; 8]; // a mount took it: its last unmount drops it
 static mut g_uuid: [u8; 128] = [0; 128];
 static mut g_master: [u8; 256] = [0; 256];
@@ -713,10 +724,17 @@ unsafe fn keyctlDev(bd: *mut blkdev, req: *mut cosmofs_key_req) -> i32 {
             if (rc == 0) {
                 // Unverified, as the superblock was: a slot authenticates itself when it is opened, against this uuid.
                 let payload = block.add(CFS_MHDR_SIZE);
-                if (u32At(block as *u8, MHDR_MAGIC) != CFS_MHDR_MAGIC || u32At(block as *u8, MHDR_KIND) != CFS_KIND_KEYS ||
+                if (u32At(
+                    block as *u8,
+                    MHDR_MAGIC,
+                ) != CFS_MHDR_MAGIC || u32At(block as *u8, MHDR_KIND) != CFS_KIND_KEYS ||
                     u64At(block as *u8, MHDR_BLKNO) != keyRoot ||
                     Ptr.toBorrow(payload as *cfs_keys2).version != 2 ||
-                    memcmp(borrow Ptr.toBorrow(payload as *cfs_keys2).uuid as *[u8; 16] as *void, uuid as *void, 16) != 0) {
+                    memcmp(
+                        borrow Ptr.toBorrow(payload as *cfs_keys2).uuid as *[u8; 16] as *void,
+                        uuid as *void,
+                        16,
+                    ) != 0) {
                     rc = -EIO;
                 } else {
                     infoSlots(payload as *u8, r.info);
@@ -743,7 +761,12 @@ unsafe fn keyctlDev(bd: *mut blkdev, req: *mut cosmofs_key_req) -> i32 {
             let s = superOf(block as *cfs_super);
             if (memcmp(borrow s.magic as *[u8; 8] as *void, "COSMOFS1".ptr as *void, 8) == 0 && isMac(s) &&
                 memcmp(borrow s.uuid as *[u8; 16] as *void, uuid as *void, 16) == 0 &&
-                cfs_mac_ok(m as *cfs_mac, CFS_MAC_SUPER as CChar, block as *u8, SUPER_CRC_AT) && (!superOk || s.generation == generation)) {
+                cfs_mac_ok(
+                    m as *cfs_mac,
+                    CFS_MAC_SUPER as CChar,
+                    block as *u8,
+                    SUPER_CRC_AT,
+                ) && (!superOk || s.generation == generation)) {
                 superOk = true;
                 keyRoot = s.key_root;
             }

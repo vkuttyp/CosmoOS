@@ -15,7 +15,25 @@
 // plain call for anything not registered. What a test still holds when it returns, the runner releases, last acquired
 // first.
 
-@header("nettest.h", "kernel/net/inet.h", "kernel/net/tcp.h", "kernel/net/raw.h", "kernel/net/nat.h", "kernel/net/fw.h", "kernel/net/tap.h", "kernel/net/tapsvc.h", "kernel/netif.h", "kernel/mbuf.h", "kernel/object.h", "kernel/percpu.h", "kernel/selftest.h", "kernel/socket.h", "kernel/thread.h", "kernel/timer.h", "kernel/vfs.h")
+@header(
+    "nettest.h",
+    "kernel/net/inet.h",
+    "kernel/net/tcp.h",
+    "kernel/net/raw.h",
+    "kernel/net/nat.h",
+    "kernel/net/fw.h",
+    "kernel/net/tap.h",
+    "kernel/net/tapsvc.h",
+    "kernel/netif.h",
+    "kernel/mbuf.h",
+    "kernel/object.h",
+    "kernel/percpu.h",
+    "kernel/selftest.h",
+    "kernel/socket.h",
+    "kernel/thread.h",
+    "kernel/timer.h",
+    "kernel/vfs.h",
+)
 extern "C" {
     struct netaddr;
     struct thread;

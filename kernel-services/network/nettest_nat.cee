@@ -4,7 +4,20 @@
 // the frames and the read-back headers are rooms, off the stack. net-second-nic takes the default interface down and
 // resolves the gateway through whatever other ethernet interface the machine has.
 
-@header("nettest.h", "kernel/net/inet.h", "kernel/net/ip.h", "kernel/net/ether.h", "kernel/net/tcp.h", "kernel/net/cksum.h", "kernel/net/tap.h", "kernel/net/nat.h", "kernel/netif.h", "kernel/mbuf.h", "kernel/selftest.h", "kernel/thread.h")
+@header(
+    "nettest.h",
+    "kernel/net/inet.h",
+    "kernel/net/ip.h",
+    "kernel/net/ether.h",
+    "kernel/net/tcp.h",
+    "kernel/net/cksum.h",
+    "kernel/net/tap.h",
+    "kernel/net/nat.h",
+    "kernel/netif.h",
+    "kernel/mbuf.h",
+    "kernel/selftest.h",
+    "kernel/thread.h",
+)
 extern "C" {
     struct tap;
     struct mbuf_pkt {

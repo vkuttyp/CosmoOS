@@ -12,7 +12,15 @@
 // are bytes: addresses are kept as they lie in memory (network order, read as little-endian words), and turned into
 // numbers (host order) only where a checksum is patched.
 
-@header("kernel/net/nat.h", "kernel/net/ip.h", "kernel/net/cksum.h", "kernel/net/tcp.h", "kernel/net/udp.h", "kernel/netif.h", "kernel/timer.h")
+@header(
+    "kernel/net/nat.h",
+    "kernel/net/ip.h",
+    "kernel/net/cksum.h",
+    "kernel/net/tcp.h",
+    "kernel/net/udp.h",
+    "kernel/netif.h",
+    "kernel/timer.h",
+)
 extern "C" {
     struct netif_ip4 {
         addr: AtomicU32;

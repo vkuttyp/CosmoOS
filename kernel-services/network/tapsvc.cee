@@ -15,7 +15,21 @@
 // the locks the C used: the DHCP binding's, the pending queries', and the instance list's. Addresses are u32s in
 // network order, as they lie in memory; messages are bytes.
 
-@header("kernel/net/tapsvc.h", "kernel/net/tap.h", "kernel/net/ether.h", "kernel/net/ip.h", "kernel/net/udp.h", "kernel/net/cksum.h", "kernel/net/netparse_types.h", "kernel/netif.h", "kernel/socket.h", "kernel/thread.h", "kernel/random.h", "kernel/fwcfg.h", "kernel/timer.h")
+@header(
+    "kernel/net/tapsvc.h",
+    "kernel/net/tap.h",
+    "kernel/net/ether.h",
+    "kernel/net/ip.h",
+    "kernel/net/udp.h",
+    "kernel/net/cksum.h",
+    "kernel/net/netparse_types.h",
+    "kernel/netif.h",
+    "kernel/socket.h",
+    "kernel/thread.h",
+    "kernel/random.h",
+    "kernel/fwcfg.h",
+    "kernel/timer.h",
+)
 extern "C" {
     struct in6_addr {
         s6_addr: [u8; 16];

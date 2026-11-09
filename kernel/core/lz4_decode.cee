@@ -9,8 +9,7 @@
 // pointers become slices. tests/host/test_lz4.c holds it to the digest of the C it replaced; fuzz_lz4 drives it.
 
 @header("kernel/lz4.h")
-extern "C" {
-}
+extern "C" {}
 
 const MIN_MATCH: usize = 4;
 

@@ -8,7 +8,16 @@
 // paths read without a lock, every CPU changes atomically (ADR 0041 §3.1): an interface's flag word and address, its
 // counters, a work item's claim, a worker's readiness.
 
-@header("netif_cpu.h", "kernel/net/ether.h", "kernel/net/ip.h", "kernel/net/cksum.h", "kernel/net/dhcp.h", "kernel/fwcfg.h", "kernel/timer.h", "kernel/string.h")
+@header(
+    "netif_cpu.h",
+    "kernel/net/ether.h",
+    "kernel/net/ip.h",
+    "kernel/net/cksum.h",
+    "kernel/net/dhcp.h",
+    "kernel/fwcfg.h",
+    "kernel/timer.h",
+    "kernel/string.h",
+)
 extern "C" {
     struct in6_addr {
         s6_addr: [u8; 16];
@@ -92,7 +101,7 @@ extern "C" {
     }
     struct net_work {
         link: list_node;
-        @cname ("fn") run: extern "C" fn(*mut void);
+        @cname("fn") run: extern "C" fn(*mut void);
         arg: *mut void;
         queued: AtomicU32;
     }

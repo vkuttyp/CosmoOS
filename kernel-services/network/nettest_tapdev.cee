@@ -15,7 +15,25 @@
 // client's test seams exist only with CONFIG_SELFTEST, and so does this test; nettest_floor.c keeps the skip without
 // them.
 
-@header("nettest.h", "kernel/net/inet.h", "kernel/net/ip.h", "kernel/net/ether.h", "kernel/net/udp.h", "kernel/net/dhcp.h", "kernel/netif.h", "kernel/mbuf.h", "kernel/vfs.h", "kernel/selftest.h", "kernel/thread.h", "kernel/timer.h", "kernel/poll.h", "kernel/process.h", "kernel/bootarchive.h", "kernel/completion.h", "kernel/object.h")
+@header(
+    "nettest.h",
+    "kernel/net/inet.h",
+    "kernel/net/ip.h",
+    "kernel/net/ether.h",
+    "kernel/net/udp.h",
+    "kernel/net/dhcp.h",
+    "kernel/netif.h",
+    "kernel/mbuf.h",
+    "kernel/vfs.h",
+    "kernel/selftest.h",
+    "kernel/thread.h",
+    "kernel/timer.h",
+    "kernel/poll.h",
+    "kernel/process.h",
+    "kernel/bootarchive.h",
+    "kernel/completion.h",
+    "kernel/object.h",
+)
 extern "C" {
     struct file;
     struct thread;

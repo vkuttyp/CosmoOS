@@ -16,7 +16,23 @@
 // a hook the last close calls just after the guest's NAT and firewall state is purged, set through
 // tap_test_set_after_purge.
 
-@header("kernel/net/tap.h", "kernel/net/tapsvc.h", "kernel/net/dhcp.h", "kernel/net/ether.h", "kernel/net/ip.h", "kernel/net/fw.h", "kernel/net/nat.h", "uapi/cosmo/netctl.h", "kernel/netif.h", "kernel/mbuf.h", "kernel/cred.h", "kernel/fwcfg.h", "kernel/thread.h", "kernel/vfs.h", "kernel/wait.h")
+@header(
+    "kernel/net/tap.h",
+    "kernel/net/tapsvc.h",
+    "kernel/net/dhcp.h",
+    "kernel/net/ether.h",
+    "kernel/net/ip.h",
+    "kernel/net/fw.h",
+    "kernel/net/nat.h",
+    "uapi/cosmo/netctl.h",
+    "kernel/netif.h",
+    "kernel/mbuf.h",
+    "kernel/cred.h",
+    "kernel/fwcfg.h",
+    "kernel/thread.h",
+    "kernel/vfs.h",
+    "kernel/wait.h",
+)
 extern "C" {
     struct in6_addr {
         s6_addr: [u8; 16];

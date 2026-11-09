@@ -7,7 +7,18 @@
 // took 16 KiB each from kmalloc. The per-round reset of the RTO backoff's maximum is a self-test build's seam, the C's
 // `#if CONFIG_SELFTEST`, here compiler.h's constant macro read into a static, which the C compiler folds.
 
-@header("nettest.h", "kernel/compiler.h", "kernel/net/inet.h", "kernel/net/tcp.h", "kernel/netif.h", "kernel/percpu.h", "kernel/socket.h", "kernel/selftest.h", "kernel/thread.h", "kernel/timer.h")
+@header(
+    "nettest.h",
+    "kernel/compiler.h",
+    "kernel/net/inet.h",
+    "kernel/net/tcp.h",
+    "kernel/netif.h",
+    "kernel/percpu.h",
+    "kernel/socket.h",
+    "kernel/selftest.h",
+    "kernel/thread.h",
+    "kernel/timer.h",
+)
 extern "C" {
     struct socket;
     struct netaddr;

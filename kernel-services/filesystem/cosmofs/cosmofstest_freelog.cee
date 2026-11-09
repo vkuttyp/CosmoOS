@@ -8,8 +8,10 @@
 // shared helpers are cosmofstest_lib.cee's. The values this file writes as its own constants are the headers', which
 // the C compiler checks (ADR 0080).
 
-@header("kernel/blk.h", "kernel/vfs.h", "kernel/kmalloc.h", "kernel/ramblk.h", "kernel/string.h", "kernel/cosmofs.h",
-    "uapi/cosmo/syscall.h", "kernel/errno.h", "cosmofs_format.h")
+@header(
+    "kernel/blk.h", "kernel/vfs.h", "kernel/kmalloc.h", "kernel/ramblk.h", "kernel/string.h", "kernel/cosmofs.h",
+    "uapi/cosmo/syscall.h", "kernel/errno.h", "cosmofs_format.h",
+)
 extern "C" {
     struct blkdev;
     struct mount;
@@ -87,7 +89,9 @@ extern "C" {
     @cvalue("COSMO_DT_REG == 1 && COSMO_DT_LNK == 6 && CFS_DEAD_PER_BLOCK == 506")
     const COSMOFSTEST_FREELOG_FACT_0: bool = true;
     /// cosmofstest_freelog.cee's cosmo_stat offsets and the check report's slot
-    @cvalue("sizeof(struct cosmo_stat) <= 64 && offsetof(struct cosmo_stat, type) == 8 && offsetof(struct cosmo_stat, nlink) == 16 && sizeof(struct cosmofs_check_report) <= 2048")
+    @cvalue(
+        "sizeof(struct cosmo_stat) <= 64 && offsetof(struct cosmo_stat, type) == 8 && offsetof(struct cosmo_stat, nlink) == 16 && sizeof(struct cosmofs_check_report) <= 2048",
+    )
     const COSMOFSTEST_FREELOG_FACT_1: bool = true;
 }
 
@@ -340,8 +344,10 @@ unsafe fn selftestSymlink(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: n == 4 && memcmp(buf, \"file\", 4) == 0 && buf[4] == 'Z' at line 304\0");
     }
     if (!(statOf(c("/mnt/eng/link\0"), true, mut lst) == 0 && lst[0] == DT_LNK as u64)) {
-        return failed(reason,
-            "check failed: vfs_lstat(NULL, ENG \"/link\", &lst) == 0 && lst.type == COSMO_DT_LNK at line 308\0");
+        return failed(
+            reason,
+            "check failed: vfs_lstat(NULL, ENG \"/link\", &lst) == 0 && lst.type == COSMO_DT_LNK at line 308\0",
+        );
     }
     if (!cfst_read_matches(c("/mnt/eng/link\0"), "on-disk-bytes".ptr as *void, 13)) {
         return failed(reason, "check failed: cfst_read_matches(ENG \"/link\", \"on-disk-bytes\", 13) at line 311\0");
@@ -768,8 +774,10 @@ unsafe fn selftestFreelogSnapshot(reason: *mut *CChar) -> bool {
 
     // Something for the snapshot to hold.
     if (!cfst_write_file(c("/mnt/eng/held\0"), "the snapshot's copy".ptr as *void, 19)) {
-        return failed(reason,
-            "check failed: cfst_write_file(ENG \"/held\", \"the snapshot's copy\", 19) at line 736\0");
+        return failed(
+            reason,
+            "check failed: cfst_write_file(ENG \"/held\", \"the snapshot's copy\", 19) at line 736\0",
+        );
     }
     if (vfs_sync() != 0) {
         return failed(reason, "check failed: vfs_sync() == 0 at line 739\0");
@@ -836,8 +844,10 @@ unsafe fn selftestFreelogSnapshot(reason: *mut *CChar) -> bool {
 
     // And the snapshot still reads, which is what the blocks were for.
     if (!cfst_read_matches(c("/mnt/eng/.snapshots/keep/held\0"), "the snapshot's copy".ptr as *void, 19)) {
-        return failed(reason,
-            "check failed: read_matches(ENG \"/.snapshots/keep/held\", \"the snapshot's copy\", 19) at line 804\0");
+        return failed(
+            reason,
+            "check failed: read_matches(ENG \"/.snapshots/keep/held\", \"the snapshot's copy\", 19) at line 804\0",
+        );
     }
 
     if (!finish(bd, reason)) {
@@ -874,8 +884,10 @@ unsafe fn selftestSnapCow(reason: *mut *CChar) -> bool {
     }
 
     if (!cfst_write_file(c("/mnt/eng/held\0"), "the snapshot's copy".ptr as *void, 19)) {
-        return failed(reason,
-            "check failed: cfst_write_file(ENG \"/held\", \"the snapshot's copy\", 19) at line 842\0");
+        return failed(
+            reason,
+            "check failed: cfst_write_file(ENG \"/held\", \"the snapshot's copy\", 19) at line 842\0",
+        );
     }
     if (vfs_sync() != 0) {
         return failed(reason, "check failed: vfs_sync() == 0 at line 845\0");
@@ -921,8 +933,10 @@ unsafe fn selftestSnapCow(reason: *mut *CChar) -> bool {
     // The entries the commit did write are there, and none is doubled.
     var examined: u64 = 0;
     if (cosmofs_test_deadlist_dups(mnt(), borrow mut examined as *mut u64, 0 as *mut u64) != 0) {
-        return failed(reason,
-            "check failed: cosmofs_test_deadlist_dups(cfst_mount_of(ENG), &examined, NULL) == 0 at line 889\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_test_deadlist_dups(cfst_mount_of(ENG), &examined, NULL) == 0 at line 889\0",
+        );
     }
     if (examined == 0) {
         return failed(reason, "check failed: examined > 0 at line 892\0");
@@ -947,8 +961,10 @@ unsafe fn selftestSnapCow(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: rep.snapshots_seen == 1 at line 911\0");
     }
     if (!cfst_read_matches(c("/mnt/eng/.snapshots/one/held\0"), "the snapshot's copy".ptr as *void, 19)) {
-        return failed(reason,
-            "check failed: cfst_read_matches(ENG \"/.snapshots/one/held\", \"the snapshot's copy\", 19) at line 915\0");
+        return failed(
+            reason,
+            "check failed: cfst_read_matches(ENG \"/.snapshots/one/held\", \"the snapshot's copy\", 19) at line 915\0",
+        );
     }
 
     var buffer = [0u8; 192];
@@ -978,8 +994,10 @@ unsafe fn selftestSnapUnmount(reason: *mut *CChar) -> bool {
     }
 
     if (!cfst_write_file(c("/mnt/eng/held\0"), "the snapshot's copy".ptr as *void, 19)) {
-        return failed(reason,
-            "check failed: cfst_write_file(ENG \"/held\", \"the snapshot's copy\", 19) at line 946\0");
+        return failed(
+            reason,
+            "check failed: cfst_write_file(ENG \"/held\", \"the snapshot's copy\", 19) at line 946\0",
+        );
     }
     if (vfs_sync() != 0) {
         return failed(reason, "check failed: vfs_sync() == 0 at line 949\0");
@@ -1015,8 +1033,10 @@ unsafe fn selftestSnapUnmount(reason: *mut *CChar) -> bool {
     var examined: u64 = 0;
     var first: u64 = 0;
     if (cosmofs_test_deadlist_dups(mnt(), borrow mut examined as *mut u64, borrow mut first as *mut u64) != 0) {
-        return failed(reason,
-            "check failed: cosmofs_test_deadlist_dups(cfst_mount_of(ENG), &examined, &first) == 0 at line 983\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_test_deadlist_dups(cfst_mount_of(ENG), &examined, &first) == 0 at line 983\0",
+        );
     }
     if (examined == 0) {
         return failed(reason, "check failed: examined > 0 at line 986\0");
@@ -1024,8 +1044,10 @@ unsafe fn selftestSnapUnmount(reason: *mut *CChar) -> bool {
 
     // The blocks are still the snapshot's, which is what holding them was for.
     if (!cfst_read_matches(c("/mnt/eng/.snapshots/keep/held\0"), "the snapshot's copy".ptr as *void, 19)) {
-        return failed(reason,
-            "check failed: read_matches(ENG \"/.snapshots/keep/held\", \"the snapshot's copy\", 19) at line 992\0");
+        return failed(
+            reason,
+            "check failed: read_matches(ENG \"/.snapshots/keep/held\", \"the snapshot's copy\", 19) at line 992\0",
+        );
     }
 
     var buffer = [0u8; 160];
@@ -1134,8 +1156,10 @@ unsafe fn selftestSnapNogrow(reason: *mut *CChar) -> bool {
     }
     var examined: u64 = 0;
     if (cosmofs_test_deadlist_dups(mnt(), borrow mut examined as *mut u64, 0 as *mut u64) != 0) {
-        return failed(reason,
-            "check failed: cosmofs_test_deadlist_dups(cfst_mount_of(ENG), &examined, NULL) == 0 at line 1102\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_test_deadlist_dups(cfst_mount_of(ENG), &examined, NULL) == 0 at line 1102\0",
+        );
     }
     if (examined == 0) {
         return failed(reason, "check failed: examined > 0 at line 1105\0");
@@ -1218,8 +1242,10 @@ unsafe fn selftestSnapReserved(reason: *mut *CChar) -> bool {
     }
     var examined: u64 = 0;
     if (cosmofs_test_deadlist_dups(mnt(), borrow mut examined as *mut u64, 0 as *mut u64) != 0) {
-        return failed(reason,
-            "check failed: cosmofs_test_deadlist_dups(cfst_mount_of(ENG), &examined, NULL) == 0 at line 1186\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_test_deadlist_dups(cfst_mount_of(ENG), &examined, NULL) == 0 at line 1186\0",
+        );
     }
     if (examined != entries) {
         return failed(reason, "check failed: examined == entries at line 1189\0");
@@ -1579,8 +1605,10 @@ unsafe fn selftestFreelogNotHeld(reason: *mut *CChar) -> bool {
     // A record exists, and *then* the snapshot is taken: its bitmap marks that record's blocks allocated, which is
     // the difficulty.
     if (!cfst_write_file(c("/mnt/eng/held\0"), "the snapshot's copy".ptr as *void, 19)) {
-        return failed(reason,
-            "check failed: cfst_write_file(ENG \"/held\", \"the snapshot's copy\", 19) at line 1547\0");
+        return failed(
+            reason,
+            "check failed: cfst_write_file(ENG \"/held\", \"the snapshot's copy\", 19) at line 1547\0",
+        );
     }
     if (vfs_sync() != 0) {
         return failed(reason, "check failed: vfs_sync() == 0 at line 1550\0");
@@ -1645,8 +1673,10 @@ unsafe fn selftestFreelogNotHeld(reason: *mut *CChar) -> bool {
     // a record lands on a block number this snapshot's bitmap remembers and goes on the list, permanently -- one
     // block, too small to separate from the noise of a transaction in flight, and unambiguous here.
     if (cosmofs_test_deadlist_len(mnt(), 0) != deadBefore) {
-        return failed(reason,
-            "check failed: cosmofs_test_deadlist_len(cfst_mount_of(ENG), 0) == dead_before at line 1613\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_test_deadlist_len(cfst_mount_of(ENG), 0) == dead_before at line 1613\0",
+        );
     }
 
     // And the snapshot is intact: nothing this exception frees was its.
@@ -1666,8 +1696,10 @@ unsafe fn selftestFreelogNotHeld(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: rep.snapshots_seen == 1 at line 1630\0");
     }
     if (!cfst_read_matches(c("/mnt/eng/.snapshots/keep/held\0"), "the snapshot's copy".ptr as *void, 19)) {
-        return failed(reason,
-            "check failed: read_matches(ENG \"/.snapshots/keep/held\", \"the snapshot's copy\", 19) at line 1634\0");
+        return failed(
+            reason,
+            "check failed: read_matches(ENG \"/.snapshots/keep/held\", \"the snapshot's copy\", 19) at line 1634\0",
+        );
     }
 
     if (!finish(bd, reason)) {
@@ -1821,8 +1853,10 @@ unsafe fn selftestFreelogMalformed(reason: *mut *CChar) -> bool {
 
     // Re-sealed, so the checksum is good and only the count is wrong.
     if (cosmofs_test_poison_freelog_count(bd, DEAD_PER_BLOCK + 1) != 0) {
-        return failed(reason,
-            "check failed: cosmofs_test_poison_freelog_count(bd, CFS_DEAD_PER_BLOCK + 1) == 0 at line 1789\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_test_poison_freelog_count(bd, CFS_DEAD_PER_BLOCK + 1) == 0 at line 1789\0",
+        );
     }
     if (mountEng(bd) != 0) {
         return failed(reason, "check failed: vfs_mount(ENG, \"cosmofs\", bd, 0) == 0 at line 1792\0");
@@ -1901,8 +1935,10 @@ unsafe fn selftestFreelogChain(reason: *mut *CChar) -> bool {
             }
             // More than one record block holds.
             if (!(before.freeBlocks.wrappingSub(full.freeBlocks) > DEAD_PER_BLOCK)) {
-                return failed(reason,
-                    "check failed: before.free_blocks - full.free_blocks > CFS_DEAD_PER_BLOCK at line 1869\0");
+                return failed(
+                    reason,
+                    "check failed: before.free_blocks - full.free_blocks > CFS_DEAD_PER_BLOCK at line 1869\0",
+                );
             }
         }
         if (vfs_unlink(nov(), c("/mnt/eng/wide\0")) != 0) {

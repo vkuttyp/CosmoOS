@@ -10,8 +10,10 @@
 // once-per-root mark called a function its argument named; a field holding a function cannot be called here, so the
 // mark says which of the two counts it feeds.
 
-@header("kernel/vfs.h", "kernel/kmalloc.h", "kernel/mutex.h", "kernel/string.h", "kernel/cosmofs.h",
-    "cosmofs_internal.h")
+@header(
+    "kernel/vfs.h", "kernel/kmalloc.h", "kernel/mutex.h", "kernel/string.h", "kernel/cosmofs.h",
+    "cosmofs_internal.h",
+)
 extern "C" {
     struct mount {
         fs_priv: *mut void;
@@ -82,11 +84,20 @@ extern "C" {
     fn kzalloc(size: usize) -> *mut void;
     fn cfs_rollback_read(fs: *mut cfs, out: *mut cfs_rollback) -> i32;
     fn cfs_snapshot_list(fs: *mut cfs, out: *mut cfs_snapshot, max: u32, count: *mut u32) -> i32;
-    fn cfs_tree_walk(fs: *mut cfs, imapRoot: u64, nextIno: u64, mark: extern "C" fn(*mut void, u64), arg: *mut void)
-        -> i32;
+    fn cfs_tree_walk(
+        fs: *mut cfs,
+        imapRoot: u64,
+        nextIno: u64,
+        mark: extern "C" fn(*mut void, u64),
+        arg: *mut void,
+    ) -> i32;
     fn cfs_alloc_walk(fs: *mut cfs, root: u64, mark: extern "C" fn(*mut void, u64), arg: *mut void) -> i32;
-    fn cfs_snapshot_walk_held(fs: *mut cfs, s: *cfs_snapshot, mark: extern "C" fn(*mut void, u64), arg: *mut void)
-        -> i32;
+    fn cfs_snapshot_walk_held(
+        fs: *mut cfs,
+        s: *cfs_snapshot,
+        mark: extern "C" fn(*mut void, u64),
+        arg: *mut void,
+    ) -> i32;
     fn cfs_tree_roots(fs: *mut cfs, s: *cfs_snapshot, imapRoot: *mut u64, nextIno: *mut u64);
     fn cfs_sync_vnodes(fs: *mut cfs) -> i32;
     fn cfs_snapshot_create(fs: *mut cfs, name: *CChar, identity: bool, out: *mut cfs_snapshot) -> i32;
@@ -361,8 +372,9 @@ unsafe fn snapListSized(fs: *mut cfs, req: *mut cosmofs_snap_req) -> i32 {
     var i: u32 = 1;
     while (rc == 0 && i < n) {
         var j = i;
-        while (j > 0 && Ptr.toBorrow(entry(all, j - 1) as *cfs_snapshot).id > Ptr.toBorrow(entry(all, j) as
-            *cfs_snapshot).id) {
+        while (j > 0 && Ptr.toBorrow(
+            entry(all, j - 1) as *cfs_snapshot,
+        ).id > Ptr.toBorrow(entry(all, j) as *cfs_snapshot).id) {
             let t = borrow mut tmp as *mut [u64; 16] as *mut void;
             memcpy(t, entry(all, j) as *void, SNAP_SIZE);
             memcpy(entry(all, j) as *mut void, entry(all, j - 1) as *void, SNAP_SIZE);

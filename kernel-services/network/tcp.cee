@@ -16,7 +16,16 @@
 // the host test's state-change hook, and the debug builds' self-test seams (a held timer callback, a held ACK).
 // Headers are bytes.
 
-@header("kernel/net/tcp.h", "kernel/net/cksum.h", "kernel/net/ether.h", "kernel/random.h", "kernel/sched.h", "kernel/socket.h", "kernel/netif.h", "kernel/kmalloc.h")
+@header(
+    "kernel/net/tcp.h",
+    "kernel/net/cksum.h",
+    "kernel/net/ether.h",
+    "kernel/random.h",
+    "kernel/sched.h",
+    "kernel/socket.h",
+    "kernel/netif.h",
+    "kernel/kmalloc.h",
+)
 extern "C" {
     struct in6_addr {
         s6_addr: [u8; 16];
@@ -894,10 +903,10 @@ unsafe fn keepTimer(t: *mut timer, arg: *mut void) {
 /// Safety: `p` is a live pcb.
 unsafe fn timerOf(p: *mut tcp_pcb, which: u32) -> *mut timer {
     let b = Ptr.toBorrowMut(p);
-    return if (which ==
-        WORK_REXMIT) borrow mut b.rexmit as *mut timer else if (which ==
-        WORK_DELACK) borrow mut b.delack as *mut timer else if (which ==
-        WORK_TIMEWAIT) borrow mut b.timewait as *mut timer else borrow mut b.keep as *mut timer;
+    return if (which == WORK_REXMIT) borrow mut b.rexmit as *mut timer
+        else if (which == WORK_DELACK) borrow mut b.delack as *mut timer
+        else if (which == WORK_TIMEWAIT) borrow mut b.timewait as *mut timer
+        else borrow mut b.keep as *mut timer;
 }
 
 /// tcp.h's tcp_pcb_new: a CLOSED pcb with two references, the state machine's and the caller's.
@@ -3222,16 +3231,17 @@ unsafe fn getStats(out: *mut tcp_stats) {
 @export("tcp_state_name")
 fn stateName(st: u32) -> *CChar {
     let name =
-        if (st ==
-            TCP_CLOSED) "CLOSED\0" else if (st ==
-            TCP_LISTEN) "LISTEN\0" else if (st ==
-            TCP_SYN_SENT) "SYN_SENT\0" else if (st ==
-            TCP_SYN_RCVD) "SYN_RCVD\0" else if (st ==
-            TCP_ESTABLISHED) "ESTABLISHED\0" else if (st ==
-            TCP_FIN_WAIT_1) "FIN_WAIT_1\0" else if (st ==
-            TCP_FIN_WAIT_2) "FIN_WAIT_2\0" else if (st ==
-            TCP_CLOSE_WAIT) "CLOSE_WAIT\0" else if (st ==
-            TCP_CLOSING) "CLOSING\0" else if (st ==
-            TCP_LAST_ACK) "LAST_ACK\0" else if (st == TCP_TIME_WAIT) "TIME_WAIT\0" else "?\0";
+        if (st == TCP_CLOSED) "CLOSED\0"
+            else if (st == TCP_LISTEN) "LISTEN\0"
+            else if (st == TCP_SYN_SENT) "SYN_SENT\0"
+            else if (st == TCP_SYN_RCVD) "SYN_RCVD\0"
+            else if (st == TCP_ESTABLISHED) "ESTABLISHED\0"
+            else if (st == TCP_FIN_WAIT_1) "FIN_WAIT_1\0"
+            else if (st == TCP_FIN_WAIT_2) "FIN_WAIT_2\0"
+            else if (st == TCP_CLOSE_WAIT) "CLOSE_WAIT\0"
+            else if (st == TCP_CLOSING) "CLOSING\0"
+            else if (st == TCP_LAST_ACK) "LAST_ACK\0"
+            else if (st == TCP_TIME_WAIT) "TIME_WAIT\0"
+            else "?\0";
     return name.ptr as *CChar;
 }

@@ -172,7 +172,9 @@ extern "C" {
     @cvalue("offsetof(struct cfs_label, crc)")
     const LABEL_CRC_AT: usize = 72;
     /// The copy record holds the pool's dirty bitmap and four copies in their states, and fits one block.
-    @cvalue("CFS_COPY_DIRTY_BYTES == POOL_DIRTY_BYTES && sizeof(struct cfs_copy_rec) == 1000 && sizeof(struct cfs_copystate) <= CFS_BLOCK - CFS_MHDR_SIZE && CFS_MAX_COPIES == 4 && POOL_MAX_COPIES == 4 && CFS_COPY_ONLINE == POOL_COPY_ONLINE && CFS_COPY_MISSING == POOL_COPY_MISSING && CFS_COPY_OFFLINE == POOL_COPY_OFFLINE && CFS_COPY_FAULTED == POOL_COPY_FAULTED && CFS_COPY_RESILVERING == POOL_COPY_RESILVERING")
+    @cvalue(
+        "CFS_COPY_DIRTY_BYTES == POOL_DIRTY_BYTES && sizeof(struct cfs_copy_rec) == 1000 && sizeof(struct cfs_copystate) <= CFS_BLOCK - CFS_MHDR_SIZE && CFS_MAX_COPIES == 4 && POOL_MAX_COPIES == 4 && CFS_COPY_ONLINE == POOL_COPY_ONLINE && CFS_COPY_MISSING == POOL_COPY_MISSING && CFS_COPY_OFFLINE == POOL_COPY_OFFLINE && CFS_COPY_FAULTED == POOL_COPY_FAULTED && CFS_COPY_RESILVERING == POOL_COPY_RESILVERING",
+    )
     const COPY_RECORD_IS_POOLS: bool = true;
     fn memcpy(dst: *mut void, src: *void, n: usize) -> *mut void;
     fn memset(p: *mut void, c: i32, n: usize) -> *mut void;
@@ -374,7 +376,15 @@ unsafe fn labelBase(block: *mut u8, version: u32, vdev: u32, uuid: *u8, nblocks:
 /// its own.
 /// Safety: `pool` is a pool, `mac` null or a MAC key, `uuid` 16 bytes.
 @export("cfs_label_write")
-unsafe fn labelWrite(pool: *mut spool, mac: *cfs_mac, vdev: u32, copy: u32, generation: u64, uuid: *u8, nblocks: u64) -> i32 {
+unsafe fn labelWrite(
+    pool: *mut spool,
+    mac: *cfs_mac,
+    vdev: u32,
+    copy: u32,
+    generation: u64,
+    uuid: *u8,
+    nblocks: u64,
+) -> i32 {
     let block = kmalloc(CFS_BLOCK, KMEM_ZERO) as *mut u8;
     if (block.isNull()) {
         return -ENOMEM;
@@ -483,7 +493,7 @@ unsafe fn labelCurrent(fs: *mut cfs, l: borrow cfs_label) -> bool => l.generatio
 
 /// What copyHere found.
 struct Here {
-    stale: bool; // ours and behind
+    stale: bool;     // ours and behind
     wrongSize: bool; // this pool's member and the wrong disk: a different thing from the member being absent
 }
 
@@ -738,7 +748,10 @@ unsafe fn labelledFor(fs: *mut cfs, cand: *mut blkdev, flags: u64, tag: u64) -> 
         return null;
     }
     let l = labelOf(lp as *cfs_label);
-    if (!same16(borrow l.uuid as *[u8; 16] as *u8, uuidOf(fs)) || (l.flags & flags) == 0 || (tag != 0 && l.tag != tag)) {
+    if (!same16(
+        borrow l.uuid as *[u8; 16] as *u8,
+        uuidOf(fs),
+    ) || (l.flags & flags) == 0 || (tag != 0 && l.tag != tag)) {
         return null;
     }
     return l.tag;
@@ -1129,7 +1142,9 @@ unsafe fn copystatePrepare(fs: *mut cfs) -> i32 {
             line.decimal(was as u64);
             line.text(" -> 13 (copy state): member ");
             line.decimal(v as u64);
-            line.text(" is degraded; a kernel that reads format 12 at most (CosmoOS 1.0.10 and older) cannot mount this pool");
+            line.text(
+                " is degraded; a kernel that reads format 12 at most (CosmoOS 1.0.10 and older) cannot mount this pool",
+            );
             KernelLog.send(LogLevel.Info, line);
         }
         var b = 0 as *mut cfs_buf;

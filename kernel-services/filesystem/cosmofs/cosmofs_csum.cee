@@ -9,8 +9,10 @@
 // (tests/host/test_cfscsum.c): a CeeSafe local cannot hold C state. The fault-injection seam is faultinject.h's, an
 // inline function in a build without fault injection.
 
-@header("kernel/faultinject.h", "kernel/kmalloc.h", "kernel/string.h", "kernel/chacha20.h", "kernel/lz4.h", "kernel/crc32c.h",
-    "cosmofs_internal.h")
+@header(
+    "kernel/faultinject.h", "kernel/kmalloc.h", "kernel/string.h", "kernel/chacha20.h", "kernel/lz4.h", "kernel/crc32c.h",
+    "cosmofs_internal.h",
+)
 extern "C" {
     struct cfs_mhdr {
         kind: u32;
@@ -56,10 +58,14 @@ extern "C" {
     fn cfs_buf_hdr(b: *mut cfs_buf) -> *mut cfs_mhdr;
     fn cfs_free_block_deferred(fs: *mut cfs, blk: u64);
     fn cfs_dva_valid(fs: *cfs, dva: u64) -> bool;
-    fn cfs_read_repair(fs: *mut cfs, dva: u64, buf: *mut void, verify: extern "C" fn(*void, *mut void) -> bool,
-        arg: *mut void, repaired: *mut bool, readOk: *mut bool) -> i32;
-    fn cfs_verify_all(fs: *mut cfs, dva: u64, buf: *mut void, verify: extern "C" fn(*void, *mut void) -> bool,
-        arg: *mut void, repair: bool, bad: *mut u32, repaired: *mut u32) -> i32;
+    fn cfs_read_repair(
+        fs: *mut cfs, dva: u64, buf: *mut void, verify: extern "C" fn(*void, *mut void) -> bool,
+        arg: *mut void, repaired: *mut bool, readOk: *mut bool,
+    ) -> i32;
+    fn cfs_verify_all(
+        fs: *mut cfs, dva: u64, buf: *mut void, verify: extern "C" fn(*void, *mut void) -> bool,
+        arg: *mut void, repair: bool, bad: *mut u32, repaired: *mut u32,
+    ) -> i32;
     fn cfs_file_key(fs: *cfs, ino: u64, out: *mut u8);
     fn chacha20_open(key: *u8, nonce: *u8, aad: *void, aadLen: usize, data: *mut void, len: usize, tag: *u8) -> bool;
     fn lz4_decompress(src: *void, slen: usize, dst: *mut void, dcap: usize) -> usize;
@@ -233,7 +239,11 @@ unsafe fn csumLevel(fs: *mut cfs, slot: *mut u64, kind: u32, writable: bool, out
     }
     if (writable) {
         // The test seam (cosmofs-encrypted-root): an index block's copy cannot be had, as when the pool is full.
-        rc = if (kind == CFS_KIND_CSUMIDX && faultinject_should_fail(FI_COSMOFS_CSUM_COW)) -ENOMEM else cfs_buf_cow(fs, out, slot);
+        rc = if (kind == CFS_KIND_CSUMIDX && faultinject_should_fail(FI_COSMOFS_CSUM_COW)) -ENOMEM else cfs_buf_cow(
+            fs,
+            out,
+            slot,
+        );
         if (rc != 0) {
             cfs_buf_put(fs, out.read());
             out.write(0 as *mut cfs_buf); // a two-level walk's cleanup releases `mid` (Codex on #447)
@@ -300,16 +310,20 @@ unsafe fn csumBlockAt(fs: *mut cfs, inp: *mut cfs_inode, index: u32, writable: b
     var root = 0 as *mut cfs_buf;
     var mid = 0 as *mut cfs_buf;
     var cb = 0 as *mut cfs_buf;
-    rc = csumLevel(fs, borrow mut i.csum_root as *mut u64, if (two) CFS_KIND_CSUMIDX2 else CFS_KIND_CSUMIDX,
-        writable, borrow mut root as *mut *mut cfs_buf);
+    rc = csumLevel(
+        fs, borrow mut i.csum_root as *mut u64, if (two) CFS_KIND_CSUMIDX2 else CFS_KIND_CSUMIDX,
+        writable, borrow mut root as *mut *mut cfs_buf,
+    );
     if (rc != 0) {
         return rc;
     }
     var idx = root;
     var at = index;
     if (two) {
-        rc = csumLevel(fs, slotOf(root, index / CFS_CSUMIDX_SPAN), CFS_KIND_CSUMIDX, writable,
-            borrow mut mid as *mut *mut cfs_buf);
+        rc = csumLevel(
+            fs, slotOf(root, index / CFS_CSUMIDX_SPAN), CFS_KIND_CSUMIDX, writable,
+            borrow mut mid as *mut *mut cfs_buf,
+        );
         idx = mid;
         at = index % CFS_CSUMIDX_SPAN;
     }
@@ -431,8 +445,10 @@ unsafe fn readEncrypted(fs: *mut cfs, inp: *mut cfs_inode, lblk: u64, dva: u64, 
     // Reading the ciphertext needs no key: the CRC beside the tag is what a mirror repairs against (design.md,
     // "Integrity").
     var w = DataWant { crc: Ptr.toBorrow(e as *cfs_csum_aead).crc, haveCrc: true };
-    rc = cfs_read_repair(fs, dva, buf, cipherCrcOk, borrow mut w as *mut DataWant as *mut void, 0 as *mut bool,
-        0 as *mut bool);
+    rc = cfs_read_repair(
+        fs, dva, buf, cipherCrcOk, borrow mut w as *mut DataWant as *mut void, 0 as *mut bool,
+        0 as *mut bool,
+    );
     let f = fsOf(fs);
     if (rc != 0) {
         blockError(ino, lblk, "no copy matches its checksum");
@@ -446,8 +462,10 @@ unsafe fn readEncrypted(fs: *mut cfs, inp: *mut cfs_inode, lblk: u64, dva: u64, 
     cfs_file_key(fs as *cfs, ino, borrow mut key as *mut [u8; 32] as *mut u8);
     var aad = [ino, lblk];
     let en = Ptr.toBorrow(e as *cfs_csum_aead);
-    let ok = chacha20_open(borrow key as *[u8; 32] as *u8, borrow en.nonce as *[u8; 12] as *u8,
-        borrow aad as *[u64; 2] as *void, 16, buf, CFS_BLOCK, borrow en.tag as *[u8; 16] as *u8);
+    let ok = chacha20_open(
+        borrow key as *[u8; 32] as *u8, borrow en.nonce as *[u8; 12] as *u8,
+        borrow aad as *[u64; 2] as *void, 16, buf, CFS_BLOCK, borrow en.tag as *[u8; 16] as *u8,
+    );
     key = [0u8; 32];
     if (!ok) {
         blockError(ino, lblk, "authentication failed");
@@ -482,8 +500,10 @@ unsafe fn dataReadVerified(fs: *mut cfs, inp: *mut cfs_inode, lblk: u64, dva: u6
     if (!cfs_dva_valid(fs as *cfs, dva)) {
         return -EIO;
     }
-    let rc = cfs_read_repair(fs, dva, buf, dataOk, borrow mut w as *mut DataWant as *mut void, 0 as *mut bool,
-        0 as *mut bool);
+    let rc = cfs_read_repair(
+        fs, dva, buf, dataOk, borrow mut w as *mut DataWant as *mut void, 0 as *mut bool,
+        0 as *mut bool,
+    );
     if (rc != 0 && w.haveCrc) {
         blockError(Ptr.toBorrow(inp as *cfs_inode).ino, lblk, "no copy matches its checksum");
         let f = fsOf(fs);
@@ -514,15 +534,19 @@ unsafe fn recordRead(fs: *mut cfs, inp: *mut cfs_inode, e: *cfs_extent, out: *mu
     var rc: i32 = 0;
     var i: u32 = 0;
     while (i < psize && rc == 0) {
-        rc = dataReadVerified(fs, inp, r.lblk.wrappingAdd(i) as u64, r.start.wrappingAdd(i as u64),
-            packed.add(i as usize * CFS_BLOCK) as *mut void);
+        rc = dataReadVerified(
+            fs, inp, r.lblk.wrappingAdd(i) as u64, r.start.wrappingAdd(i as u64),
+            packed.add(i as usize * CFS_BLOCK) as *mut void,
+        );
         i += 1;
     }
     if (rc == 0) {
         // The compressed length is not stored: the record occupies whole blocks and the codec stops when it has
         // produced the logical length, so the padding after it is never read.
-        let got = lz4_decompress(packed as *void, psize as usize * CFS_BLOCK, out as *mut void,
-            count as usize * CFS_BLOCK);
+        let got = lz4_decompress(
+            packed as *void, psize as usize * CFS_BLOCK, out as *mut void,
+            count as usize * CFS_BLOCK,
+        );
         if (got != count as usize * CFS_BLOCK) {
             var buffer = [0u8; 128];
             var line = TextWriter.create(mut buffer[..]);
@@ -546,8 +570,10 @@ unsafe fn recordRead(fs: *mut cfs, inp: *mut cfs_inode, e: *cfs_extent, out: *mu
 /// Every copy of a data block checked, and with `repair` the bad ones written back from a good one.
 /// Safety: as csumBlockAt; `buf` CFS_BLOCK writable bytes; `bad` and `repaired` writable.
 @export("cfs_data_scrub_block")
-unsafe fn dataScrubBlock(fs: *mut cfs, inp: *mut cfs_inode, lblk: u64, dva: u64, buf: *mut void, repair: bool,
-    bad: *mut u32, repaired: *mut u32) -> i32 {
+unsafe fn dataScrubBlock(
+    fs: *mut cfs, inp: *mut cfs_inode, lblk: u64, dva: u64, buf: *mut void, repair: bool,
+    bad: *mut u32, repaired: *mut u32,
+) -> i32 {
     let f = fsOf(fs);
     if (Ptr.toBorrow(inp as *cfs_inode).csum_algo == CFS_CSUM_POLY1305) {
         // The keyless CRC of the ciphertext: a scrub runs, and repairs, on a machine that cannot decrypt any of this.
@@ -561,8 +587,10 @@ unsafe fn dataScrubBlock(fs: *mut cfs, inp: *mut cfs_inode, lblk: u64, dva: u64,
             return -EIO;
         }
         var w = DataWant { crc: Ptr.toBorrow(e as *cfs_csum_aead).crc, haveCrc: true };
-        rc = cfs_verify_all(fs, dva, buf, cipherCrcOk, borrow mut w as *mut DataWant as *mut void, repair, bad,
-            repaired);
+        rc = cfs_verify_all(
+            fs, dva, buf, cipherCrcOk, borrow mut w as *mut DataWant as *mut void, repair, bad,
+            repaired,
+        );
         if (rc != 0) {
             f.csum_failures = f.csum_failures.wrappingAdd(1);
         }

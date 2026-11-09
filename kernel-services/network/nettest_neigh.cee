@@ -8,7 +8,18 @@
 // constant macro). Its racing caller's state (the C's struct down_race, in the test's frame) is static, so no thread
 // outlives what it reads.
 
-@header("nettest.h", "kernel/net/inet.h", "kernel/net/ip.h", "kernel/net/ether.h", "kernel/netif.h", "kernel/mbuf.h", "kernel/selftest.h", "kernel/thread.h", "kernel/sched.h", "kernel/timer.h")
+@header(
+    "nettest.h",
+    "kernel/net/inet.h",
+    "kernel/net/ip.h",
+    "kernel/net/ether.h",
+    "kernel/netif.h",
+    "kernel/mbuf.h",
+    "kernel/selftest.h",
+    "kernel/thread.h",
+    "kernel/sched.h",
+    "kernel/timer.h",
+)
 extern "C" {
     struct thread;
     struct ipv6_hdr;

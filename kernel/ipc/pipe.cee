@@ -11,7 +11,15 @@
 //
 // It was first drafted by Nova's c2nova (docs/tooling.md §9.4), then written over by hand.
 
-@header("kernel/kmalloc.h", "kernel/object.h", "kernel/spinlock.h", "kernel/string.h", "kernel/thread.h", "kernel/wait.h", "uapi/cosmo/syscall.h")
+@header(
+    "kernel/kmalloc.h",
+    "kernel/object.h",
+    "kernel/spinlock.h",
+    "kernel/string.h",
+    "kernel/thread.h",
+    "kernel/wait.h",
+    "uapi/cosmo/syscall.h",
+)
 extern "C" {
     @ctype("spinlock_t")
     struct spinlock_t;
@@ -51,7 +59,7 @@ extern "C" {
 
 // pipe.h's and the headers' constants, which pipe_floor.c checks.
 const PIPE_SIZE: u32 = 16384; // ring capacity
-const PIPE_BUF: u32 = 4096; // writes up to this size are never interleaved
+const PIPE_BUF: u32 = 4096;   // writes up to this size are never interleaved
 const COSMO_IO_READABLE: u32 = 1;
 const COSMO_IO_WRITABLE: u32 = 2;
 const COSMO_IO_HANGUP: u32 = 4;
@@ -307,7 +315,8 @@ unsafe fn ringReadyWrite(p: *mut pipe) -> u32 {
 unsafe fn endOf(obj: *mut kobject) -> *mut pipe_end => (obj as *mut u8).sub(offsetOf<pipe_end>(obj)) as *mut pipe_end;
 
 /// Safety: `obj` is a live end's object.
-unsafe fn ringOf(obj: *mut kobject) -> *mut pipe => Ptr.toBorrow(Ptr.toBorrow(endOf(obj) as *pipe_end).pair as *pipe_pair).ring;
+unsafe fn ringOf(obj: *mut kobject) -> *mut pipe =>
+    Ptr.toBorrow(Ptr.toBorrow(endOf(obj) as *pipe_end).pair as *pipe_pair).ring;
 
 /// An atomic view of an end's mode.
 /// Safety: `e` is a live end, whose `nonblock` is only ever accessed atomically.

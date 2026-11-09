@@ -7,7 +7,15 @@
 // is written as Linux writes its absence -- zero counters, uid 0 and inode 0 for every socket (a socket here records
 // no inode and its pcb no owner) -- never invented. The file names (procnet_names, data) are procnet_floor.c's.
 
-@header("kernel/net/procnet.h", "kernel/net/ether.h", "kernel/net/inet.h", "kernel/net/ip.h", "kernel/net/tcp.h", "kernel/net/udp.h", "kernel/netif.h")
+@header(
+    "kernel/net/procnet.h",
+    "kernel/net/ether.h",
+    "kernel/net/inet.h",
+    "kernel/net/ip.h",
+    "kernel/net/tcp.h",
+    "kernel/net/udp.h",
+    "kernel/netif.h",
+)
 extern "C" {
     struct in6_addr {
         s6_addr: [u8; 16];

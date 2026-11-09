@@ -14,17 +14,18 @@
 // file's, the /proc/version strings and procnet_names C's data (ADR 0080 §3.1–§3.2), and the debug build's count of
 // live texts a `cfg` block (§3.3).
 
-@header("kernel/cred.h", "kernel/errno.h", "kernel/handle.h", "kernel/kmalloc.h", "kernel/mountns.h",
+@header(
+    "kernel/cred.h", "kernel/errno.h", "kernel/handle.h", "kernel/kmalloc.h", "kernel/mountns.h",
     "kernel/net/procnet.h", "kernel/pagecache.h", "kernel/percpu.h", "kernel/pmm.h", "kernel/process.h",
     "kernel/sched.h", "kernel/string.h", "kernel/thread.h", "kernel/timer.h", "kernel/tty.h", "kernel/vfs.h",
-    "arch/cpu.h", "kernel/version.h")
+    "arch/cpu.h", "kernel/version.h",
+)
 extern "C" {
     enum vnode_type: u32;
     /// vfs.h's operations, the members procfs's tables set.
     struct vnode_ops {
         lookup: extern "C" fn(*mut vnode, *CChar, usize, *mut *mut vnode) -> i32;
-        readdir: extern "C" fn(*mut vnode, *mut u64, extern "C" fn(*mut void, *CChar, usize, u64, vnode_type) -> i32,
-            *mut void) -> i32;
+        readdir: extern "C" fn(*mut vnode, *mut u64, extern "C" fn(*mut void, *CChar, usize, u64, vnode_type) -> i32, *mut void) -> i32;
         readlink: extern "C" fn(*mut vnode, *mut CChar, usize) -> i32;
         readpage: extern "C" fn(*mut vnode, u64, *mut void) -> i32;
         evict: extern "C" fn(*mut vnode);
@@ -203,13 +204,19 @@ extern "C" {
     @cvalue("offsetof(struct vnode, type) == 56 && sizeof(((struct vnode *)0)->type) == 4")
     const PROCFS_FACT_0: bool = true;
     /// procfs.cee's process.h, thread.h, cred.h, handle.h and uapi values
-    @cvalue("COSMO_RLIM_INFINITY == ~0ull && COSMO_RLIMIT_COUNT == 6 && COSMO_PRIV_COUNT == 6 && PROCESS_NAME_MAX == 32 && PROCESS_CMDLINE_MAX == 256 && sizeof(pid_t) == 4")
+    @cvalue(
+        "COSMO_RLIM_INFINITY == ~0ull && COSMO_RLIMIT_COUNT == 6 && COSMO_PRIV_COUNT == 6 && PROCESS_NAME_MAX == 32 && PROCESS_CMDLINE_MAX == 256 && sizeof(pid_t) == 4",
+    )
     const PROCFS_FACT_1: bool = true;
     /// procfs.cee's process and thread field sizes
-    @cvalue("sizeof(((struct process *)0)->cwd_path_locked) == 1024 && sizeof(((struct process *)0)->state) == 4 && sizeof(((struct thread *)0)->state) == 4 && sizeof(unsigned long) == 8")
+    @cvalue(
+        "sizeof(((struct process *)0)->cwd_path_locked) == 1024 && sizeof(((struct process *)0)->state) == 4 && sizeof(((struct thread *)0)->state) == 4 && sizeof(unsigned long) == 8",
+    )
     const PROCFS_FACT_2: bool = true;
     /// procfs.cee's slots for pmm_stats, pagecache_stats and cputime_pair
-    @cvalue("sizeof(struct pmm_stats) <= 16 * 8 && offsetof(struct pmm_stats, total_pages) == 0 && offsetof(struct pmm_stats, free_pages) == 8 && sizeof(struct pagecache_stats) <= 16 * 8 && offsetof(struct pagecache_stats, pages) == 24 && sizeof(struct cputime_pair) == 16 && offsetof(struct cputime_pair, user_ns) == 0 && offsetof(struct cputime_pair, system_ns) == 8")
+    @cvalue(
+        "sizeof(struct pmm_stats) <= 16 * 8 && offsetof(struct pmm_stats, total_pages) == 0 && offsetof(struct pmm_stats, free_pages) == 8 && sizeof(struct pagecache_stats) <= 16 * 8 && offsetof(struct pagecache_stats, pages) == 24 && sizeof(struct cputime_pair) == 16 && offsetof(struct cputime_pair, user_ns) == 0 && offsetof(struct cputime_pair, system_ns) == 8",
+    )
     const PROCFS_FACT_3: bool = true;
 }
 
@@ -234,9 +241,9 @@ static mut OPS: [vnode_ops; 9] = [
 unsafe fn opsOf(which: u32) -> *vnode_ops => borrow mut OPS[which as usize] as *mut vnode_ops as *vnode_ops;
 
 /// /proc/version's strings: the release, the compiler, uname's name, version and build.
-fn versionPart(which: u32) -> *CChar => if (which == 0) KERNEL_LINUX_RELEASE else if (which == 1) PROCFS_COMPILER else
-    if (which == 2) KERNEL_NAME else if (which == 3) KERNEL_VERSION else if (which == 4) COSMO_BUILD_ID else
-    "\0".ptr as *CChar;
+fn versionPart(which: u32) -> *CChar => if (which == 0) KERNEL_LINUX_RELEASE else if (which == 1) PROCFS_COMPILER
+    else if (which == 2) KERNEL_NAME else if (which == 3) KERNEL_VERSION else if (which == 4) COSMO_BUILD_ID
+    else "\0".ptr as *CChar;
 
 /// Rendered texts alive now: the proc-exit-read self-test's leak check, counted in a debug build only.
 static PROC_TEXTS: AtomicU32 = AtomicU32.constant(0);
@@ -255,7 +262,8 @@ fn countText(delta: i32) {
 
 /// A thread from its link in its process's list.
 /// Safety: `link` is a thread's proc_link.
-unsafe fn threadOfLink(link: *mut list_node) -> *mut thread => containerOf(link, offsetOf<thread>(proc_link)) as *mut thread;
+unsafe fn threadOfLink(link: *mut list_node) -> *mut thread =>
+    containerOf(link, offsetOf<thread>(proc_link)) as *mut thread;
 
 /// /proc/net's file `i`'s name.
 /// Safety: `i` below PROCNET_COUNT.
@@ -544,7 +552,7 @@ struct Threads {
 unsafe fn threadsOf(p: *mut process) -> Threads {
     let now = clock_now_ns();
     var out = Threads {
-        count: 0, live: 0, cpu: 0, stopped: false, runNs: 0, selfUser: 0, selfSystem: 0, childUser: 0, childSystem: 0
+        count: 0, live: 0, cpu: 0, stopped: false, runNs: 0, selfUser: 0, selfSystem: 0, childUser: 0, childSystem: 0,
     };
     var mine: [u64; 2] = [0; 2]; // struct cputime_pair: user_ns, system_ns
     var theirs: [u64; 2] = [0; 2];
@@ -553,8 +561,10 @@ unsafe fn threadsOf(p: *mut process) -> Threads {
     out.count = pp.nr_threads;
     out.stopped = pp.stopped;
     out.runNs = pp.cputime.gone_run_ns;
-    process_cpu_times_locked(p, now, borrow mut mine as *mut [u64; 2] as *mut cputime_pair,
-        borrow mut theirs as *mut [u64; 2] as *mut cputime_pair);
+    process_cpu_times_locked(
+        p, now, borrow mut mine as *mut [u64; 2] as *mut cputime_pair,
+        borrow mut theirs as *mut [u64; 2] as *mut cputime_pair,
+    );
     let head = borrow mut Ptr.toBorrowMut(p).threads as *mut list_node;
     var link = Ptr.toBorrow(head as *list_node).next;
     while (link != head) {
@@ -1175,7 +1185,7 @@ unsafe fn procFile(mnt: *mut mount, pid: u32, kind: u32, out: *mut *mut vnode) -
             kfree(t);
             return len;
         }
-        let n = truncate<usize>(len); // not negative here
+        let n = truncate<usize>(len);                         // not negative here
         (t as *mut usize).write(if (n < cap) n else cap - 1); // ksnprintf returns what it wanted
     }
     let vn = newVnode(mnt, ino, VNODE_REG, 0x124, OPS_FILE); // 0444
@@ -1513,7 +1523,12 @@ fn digitsOf(v: u64, out: SliceMut<u8>) -> usize {
 
 /// Safety: `dir` is an fd directory of this filesystem; `pos` writable; `cb` a vfs_dirent_cb.
 @export("procfs_fd_readdir")
-unsafe fn fdReaddir(dir: *mut vnode, pos: *mut u64, cb: extern "C" fn(*mut void, *CChar, usize, u64, vnode_type) -> i32, arg: *mut void) -> i32 {
+unsafe fn fdReaddir(
+    dir: *mut vnode,
+    pos: *mut u64,
+    cb: extern "C" fn(*mut void, *CChar, usize, u64, vnode_type) -> i32,
+    arg: *mut void,
+) -> i32 {
     let ino = Ptr.toBorrow(dir as *vnode).ino;
     let pid = inoPid(ino);
     while (pos.read() < 2) {
@@ -1532,8 +1547,10 @@ unsafe fn fdReaddir(dir: *mut vnode, pos: *mut u64, cb: extern "C" fn(*mut void,
     var fd = truncate<i32>(pos.read() - 2);
     while (fd < HANDLE_TABLE_SIZE) {
         var rights: u32 = 0;
-        let obj = handle_get(borrow mut Ptr.toBorrowMut(p).handles as *mut handle_table, fd,
-            borrow mut rights as *mut u32);
+        let obj = handle_get(
+            borrow mut Ptr.toBorrowMut(p).handles as *mut handle_table, fd,
+            borrow mut rights as *mut u32,
+        );
         if (!obj.isNull()) {
             kobject_put(obj);
             var name: [u8; 8] = [0; 8];
@@ -1624,10 +1641,10 @@ unsafe fn pidLookup(dir: *mut vnode, name: *CChar, len: usize, out: *mut *mut vn
 
 const PID_FILES: [StringView; 9] = ["status", "limits", "fd", "stat", "cmdline", "environ", "cwd", "exe", "root"];
 const PID_KINDS: [u32; 9] = [
-    PROC_STATUS, PROC_LIMITS, PROC_FD_DIR, PROC_PID_STAT, PROC_CMDLINE, PROC_ENVIRON, PROC_CWD, PROC_EXE, PROC_ROOT_LINK
+    PROC_STATUS, PROC_LIMITS, PROC_FD_DIR, PROC_PID_STAT, PROC_CMDLINE, PROC_ENVIRON, PROC_CWD, PROC_EXE, PROC_ROOT_LINK,
 ];
 const PID_TYPES: [u32; 9] = [
-    VNODE_REG, VNODE_REG, VNODE_DIR, VNODE_REG, VNODE_REG, VNODE_REG, VNODE_LNK, VNODE_LNK, VNODE_LNK
+    VNODE_REG, VNODE_REG, VNODE_DIR, VNODE_REG, VNODE_REG, VNODE_REG, VNODE_LNK, VNODE_LNK, VNODE_LNK,
 ];
 
 /// A name of this file's own, zero-terminated, for the reader.
@@ -1635,15 +1652,22 @@ fn cName(s: StringView) -> *CChar => s.bytes().ptr as *CChar;
 
 /// Safety: `dir` is a pid directory of this filesystem; `pos` writable; `cb` a vfs_dirent_cb.
 @export("procfs_pid_readdir")
-unsafe fn pidReaddir(dir: *mut vnode, pos: *mut u64, cb: extern "C" fn(*mut void, *CChar, usize, u64, vnode_type) -> i32, arg: *mut void) -> i32 {
+unsafe fn pidReaddir(
+    dir: *mut vnode,
+    pos: *mut u64,
+    cb: extern "C" fn(*mut void, *CChar, usize, u64, vnode_type) -> i32,
+    arg: *mut void,
+) -> i32 {
     let ino = Ptr.toBorrow(dir as *vnode).ino;
     let pid = inoPid(ino);
     while (pos.read() < 11) {
         let i = pos.read();
         let rc = if (i == 0) emit(cb, arg, ".\0".ptr as *CChar, 1, ino, VNODE_DIR)
             else if (i == 1) emit(cb, arg, "..\0".ptr as *CChar, 2, PROC_ROOT_INO, VNODE_DIR)
-            else emitNamed(cb, arg, PID_FILES[i as usize - 2], procIno(pid, PID_KINDS[i as usize - 2]),
-                PID_TYPES[i as usize - 2]);
+            else emitNamed(
+                cb, arg, PID_FILES[i as usize - 2], procIno(pid, PID_KINDS[i as usize - 2]),
+                PID_TYPES[i as usize - 2],
+            );
         if (rc != 0) {
             return rc;
         }
@@ -1654,12 +1678,25 @@ unsafe fn pidReaddir(dir: *mut vnode, pos: *mut u64, cb: extern "C" fn(*mut void
 
 /// One entry to the reader: nonzero when it wants no more.
 /// Safety: `arg` is `cb`'s argument; `name` holds `len` bytes.
-unsafe fn emit(cb: extern "C" fn(*mut void, *CChar, usize, u64, vnode_type) -> i32, arg: *mut void, name: *CChar, len: usize, ino: u64, kind: u32) -> i32 =>
+unsafe fn emit(
+    cb: extern "C" fn(*mut void, *CChar, usize, u64, vnode_type) -> i32,
+    arg: *mut void,
+    name: *CChar,
+    len: usize,
+    ino: u64,
+    kind: u32,
+) -> i32 =>
     cb(arg, name, len, ino, kind as vnode_type);
 
 /// One entry named by text of this file's own: the name is copied out zero-terminated, as the C's literals were.
 /// Safety: `cb` is a vfs_dirent_cb and `arg` its argument; `name` is at most 15 bytes.
-unsafe fn emitNamed(cb: extern "C" fn(*mut void, *CChar, usize, u64, vnode_type) -> i32, arg: *mut void, name: StringView, ino: u64, kind: u32) -> i32 {
+unsafe fn emitNamed(
+    cb: extern "C" fn(*mut void, *CChar, usize, u64, vnode_type) -> i32,
+    arg: *mut void,
+    name: StringView,
+    ino: u64,
+    kind: u32,
+) -> i32 {
     var buf: [u8; 16] = [0; 16];
     let b = name.bytes();
     for (i in 0..b.length) {
@@ -1725,7 +1762,12 @@ fn equalBytes(a: Slice<u8>, b: Slice<u8>) -> bool {
 
 /// Safety: `dir` is /proc/net; `pos` writable; `cb` a vfs_dirent_cb.
 @export("procfs_net_readdir")
-unsafe fn netReaddir(dir: *mut vnode, pos: *mut u64, cb: extern "C" fn(*mut void, *CChar, usize, u64, vnode_type) -> i32, arg: *mut void) -> i32 {
+unsafe fn netReaddir(
+    dir: *mut vnode,
+    pos: *mut u64,
+    cb: extern "C" fn(*mut void, *CChar, usize, u64, vnode_type) -> i32,
+    arg: *mut void,
+) -> i32 {
     let ino = Ptr.toBorrow(dir as *vnode).ino;
     while (pos.read() < 2 + PROCNET_COUNT as u64) {
         let i = pos.read();
@@ -1785,7 +1827,7 @@ unsafe fn selfReadlink(vn: *mut vnode, buf: *mut CChar, len: usize) -> i32 {
 /// The system files (P4): a fixed list, by Linux's names.
 const SYSTEM_FILES: [StringView; 7] = ["meminfo", "stat", "loadavg", "uptime", "mounts", "version", "cpuinfo"];
 const SYSTEM_KINDS: [u32; 7] = [
-    PROC_MEMINFO, PROC_STAT, PROC_LOADAVG, PROC_UPTIME, PROC_MOUNTS, PROC_VERSION, PROC_CPUINFO
+    PROC_MEMINFO, PROC_STAT, PROC_LOADAVG, PROC_UPTIME, PROC_MOUNTS, PROC_VERSION, PROC_CPUINFO,
 ];
 
 /// Safety: `dir` is /proc; `name` holds `len` bytes; `out` writable.
@@ -1842,7 +1884,12 @@ const ROOT_FIXED: [StringView; 4] = [".", "..", "self", "net"];
 /// one.
 /// Safety: `dir` is /proc; `pos` writable; `cb` a vfs_dirent_cb.
 @export("procfs_root_readdir")
-unsafe fn rootReaddir(dir: *mut vnode, pos: *mut u64, cb: extern "C" fn(*mut void, *CChar, usize, u64, vnode_type) -> i32, arg: *mut void) -> i32 {
+unsafe fn rootReaddir(
+    dir: *mut vnode,
+    pos: *mut u64,
+    cb: extern "C" fn(*mut void, *CChar, usize, u64, vnode_type) -> i32,
+    arg: *mut void,
+) -> i32 {
     let ino = Ptr.toBorrow(dir as *vnode).ino;
     while (pos.read() < 4) {
         let i = pos.read();
@@ -1876,8 +1923,10 @@ unsafe fn rootReaddir(dir: *mut vnode, pos: *mut u64, cb: extern "C" fn(*mut voi
     while (i < total) {
         var name: [u8; 12] = [0; 12];
         let n = digitsOf(listed[i as usize] as u64, mut name[..]);
-        rc = emit(cb, arg, borrow name as *[u8; 12] as *CChar, n, procIno(listed[i as usize],
-            PROC_PID_DIR), VNODE_DIR);
+        rc = emit(cb, arg, borrow name as *[u8; 12] as *CChar, n, procIno(
+            listed[i as usize],
+            PROC_PID_DIR,
+        ), VNODE_DIR);
         if (rc != 0) {
             break;
         }

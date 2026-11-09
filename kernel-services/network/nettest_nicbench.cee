@@ -6,7 +6,19 @@
 // return before its removal leaves nothing dangling; the payload is a room. The chaos build's relaxed assertion is the
 // C's `#if CONFIG_SCHED_CHAOS`, here nettest.h's constant macro read into a static, which the C compiler folds.
 
-@header("nettest.h", "kernel/net/inet.h", "kernel/net/ip.h", "kernel/net/ether.h", "kernel/net/cksum.h", "kernel/netif.h", "kernel/mbuf.h", "kernel/socket.h", "kernel/selftest.h", "kernel/thread.h", "kernel/timer.h")
+@header(
+    "nettest.h",
+    "kernel/net/inet.h",
+    "kernel/net/ip.h",
+    "kernel/net/ether.h",
+    "kernel/net/cksum.h",
+    "kernel/netif.h",
+    "kernel/mbuf.h",
+    "kernel/socket.h",
+    "kernel/selftest.h",
+    "kernel/thread.h",
+    "kernel/timer.h",
+)
 extern "C" {
     struct socket;
     struct netaddr;

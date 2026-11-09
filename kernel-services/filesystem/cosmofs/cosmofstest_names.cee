@@ -8,8 +8,10 @@
 // this file writes as its own constants are the headers', which the C compiler checks, and a release build runs
 // neither test (a `cfg` block; ADR 0080).
 
-@header("kernel/blk.h", "kernel/vfs.h", "kernel/kmalloc.h", "kernel/ramblk.h", "kernel/string.h", "kernel/cosmofs.h",
-    "uapi/cosmo/syscall.h", "kernel/errno.h", "kernel/selftest.h", "cosmofs_format.h")
+@header(
+    "kernel/blk.h", "kernel/vfs.h", "kernel/kmalloc.h", "kernel/ramblk.h", "kernel/string.h", "kernel/cosmofs.h",
+    "uapi/cosmo/syscall.h", "kernel/errno.h", "kernel/selftest.h", "cosmofs_format.h",
+)
 extern "C" {
     struct blkdev;
     struct mount;
@@ -105,13 +107,19 @@ extern "C" {
     const CFS_NAME_MAX_LONG: usize = 255;
     const CFS_DIRENTS_PER_BLOCK: u32 = 64;
     /// cosmofstest_names.cee's errno.h, syscall.h and vfs.h values
-    @cvalue("COSMO_O_RDONLY == 0 && COSMO_O_WRONLY == 1 && COSMO_O_RDWR == 2 && COSMO_O_CREAT == 0x40 && COSMO_DT_LNK == 6")
+    @cvalue(
+        "COSMO_O_RDONLY == 0 && COSMO_O_WRONLY == 1 && COSMO_O_RDWR == 2 && COSMO_O_CREAT == 0x40 && COSMO_DT_LNK == 6",
+    )
     const COSMOFSTEST_NAMES_FACT_0: bool = true;
     /// cosmofstest_names.cee's cosmofs_format.h and cosmofs.h values
-    @cvalue("COSMOFS_SNAP_CREATE == 1 && COSMOFS_SNAP_LIST == 2 && COSMOFS_SNAP_DELETE == 3 && COSMOFS_CHECK_REPAIR == 1 && COSMOFS_CORRUPT_DUP_NAME == 13 && COSMOFS_CORRUPT_SNAP_UUID == 17 && COSMOFS_CORRUPT_LONGNAME_EXTRA == 20 && COSMOFS_CORRUPT_LONGNAME_CONT == 21")
+    @cvalue(
+        "COSMOFS_SNAP_CREATE == 1 && COSMOFS_SNAP_LIST == 2 && COSMOFS_SNAP_DELETE == 3 && COSMOFS_CHECK_REPAIR == 1 && COSMOFS_CORRUPT_DUP_NAME == 13 && COSMOFS_CORRUPT_SNAP_UUID == 17 && COSMOFS_CORRUPT_LONGNAME_EXTRA == 20 && COSMOFS_CORRUPT_LONGNAME_CONT == 21",
+    )
     const COSMOFSTEST_NAMES_FACT_1: bool = true;
     /// cosmofstest_names.cee's sizes and offsets
-    @cvalue("sizeof(struct cosmofs_snap_info) == 104 && sizeof(struct cosmo_dirent) == 16 && offsetof(struct cosmo_dirent, reclen) == 8 && offsetof(struct cosmo_dirent, namelen) == 11 && offsetof(struct cosmo_dirent, name) == 12 && sizeof(struct cosmo_stat) <= 64 && offsetof(struct cosmo_stat, type) == 8 && offsetof(struct cosmo_stat, nlink) == 16 && sizeof(struct cosmofs_check_report) <= 2048")
+    @cvalue(
+        "sizeof(struct cosmofs_snap_info) == 104 && sizeof(struct cosmo_dirent) == 16 && offsetof(struct cosmo_dirent, reclen) == 8 && offsetof(struct cosmo_dirent, namelen) == 11 && offsetof(struct cosmo_dirent, name) == 12 && sizeof(struct cosmo_stat) <= 64 && offsetof(struct cosmo_stat, type) == 8 && offsetof(struct cosmo_stat, nlink) == 16 && sizeof(struct cosmofs_check_report) <= 2048",
+    )
     const COSMOFSTEST_NAMES_FACT_2: bool = true;
 }
 
@@ -359,8 +367,10 @@ unsafe fn selftestV3(reason: *mut *CChar) -> bool {
     }
 
     if (!cfst_write_file(c("/mnt/eng/old\0"), "written by a new kernel".ptr as *void, 23)) {
-        return failed(reason,
-            "check failed: cfst_write_file(ENG \"/old\", \"written by a new kernel\", 23) at line 352\0");
+        return failed(
+            reason,
+            "check failed: cfst_write_file(ENG \"/old\", \"written by a new kernel\", 23) at line 352\0",
+        );
     }
     if (vfs_mkdir(nov(), c("/mnt/eng/dir\0"), 493) != 0) {
         return failed(reason, "check failed: vfs_mkdir(NULL, ENG \"/dir\", 0755) == 0 at line 355\0");
@@ -380,8 +390,10 @@ unsafe fn selftestV3(reason: *mut *CChar) -> bool {
     }
     cosmofs_test_set_writeback(mnt(), false);
     if (!cfst_read_matches(c("/mnt/eng/old\0"), "written by a new kernel".ptr as *void, 23)) {
-        return failed(reason,
-            "check failed: cfst_read_matches(ENG \"/old\", \"written by a new kernel\", 23) at line 373\0");
+        return failed(
+            reason,
+            "check failed: cfst_read_matches(ENG \"/old\", \"written by a new kernel\", 23) at line 373\0",
+        );
     }
     if (!cfst_read_matches(c("/mnt/eng/dir/deep\0"), "deep".ptr as *void, 4)) {
         return failed(reason, "check failed: cfst_read_matches(ENG \"/dir/deep\", \"deep\", 4) at line 376\0");
@@ -395,8 +407,10 @@ unsafe fn selftestV3(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: cfst_write_file(ENG \"/old\", \"changed\", 7) at line 384\0");
     }
     if (!cfst_read_matches(c("/mnt/eng/.snapshots/v3/old\0"), "written by a new kernel".ptr as *void, 23)) {
-        return failed(reason,
-            "check failed: read_matches(ENG \"/.snapshots/v3/old\", \"written by a new kernel\", 23) at line 388\0");
+        return failed(
+            reason,
+            "check failed: read_matches(ENG \"/.snapshots/v3/old\", \"written by a new kernel\", 23) at line 388\0",
+        );
     }
     // And the hold is *recorded*, on a filesystem too old to have a free record. The deadlist's blocks come from the
     // commit's reservation, and that reservation is not gated on the record's version: gating it would leave this
@@ -408,8 +422,10 @@ unsafe fn selftestV3(reason: *mut *CChar) -> bool {
     }
     var v3Dead: u64 = 0;
     if (cosmofs_test_deadlist_dups(mnt(), borrow mut v3Dead as *mut u64, 0 as *mut u64) != 0) {
-        return failed(reason,
-            "check failed: cosmofs_test_deadlist_dups(cfst_mount_of(ENG), &v3_dead, NULL) == 0 at line 401\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_test_deadlist_dups(cfst_mount_of(ENG), &v3_dead, NULL) == 0 at line 401\0",
+        );
     }
     if (v3Dead == 0) {
         return failed(reason, "check failed: v3_dead > 0 at line 404\0");
@@ -517,13 +533,17 @@ unsafe fn selftestPool2(reason: *mut *CChar) -> bool {
     for (i in 0u32..24) {
         var f = 0 as *mut file;
         if (vfs_open(nov(), fpath(mut name, i), O_RDWR | O_CREAT, 420, borrow mut f as *mut *mut file) != 0) {
-            return failed(reason,
-                "check failed: vfs_open(NULL, name, COSMO_O_RDWR | COSMO_O_CREAT, 0644, &f) == 0 at line 510\0");
+            return failed(
+                reason,
+                "check failed: vfs_open(NULL, name, COSMO_O_RDWR | COSMO_O_CREAT, 0644, &f) == 0 at line 510\0",
+            );
         }
         for (k in 0usize..16) {
             if (file_write(f, buf.add(k * 4096) as *void, 4096) != 4096) {
-                return failed(reason,
-                    "check failed: file_write(f, buf + (size_t)k * 4096, 4096) == 4096 at line 515\0");
+                return failed(
+                    reason,
+                    "check failed: file_write(f, buf + (size_t)k * 4096, 4096) == 4096 at line 515\0",
+                );
             }
         }
         filePut(f);
@@ -551,8 +571,10 @@ unsafe fn selftestPool2(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: f0 + f1 == st.free_blocks at line 540\0");
     }
     if (cosmofs_test_member_free(mnt(), 2) != 0xFFFFFFFFFFFFFFFF) {
-        return failed(reason,
-            "check failed: cosmofs_test_member_free(cfst_mount_of(ENG), 2) == UINT64_MAX at line 544\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_test_member_free(cfst_mount_of(ENG), 2) == UINT64_MAX at line 544\0",
+        );
     }
 
     // A remount is handed member 0 only and has to find the other one by its label; the data reads back through
@@ -565,8 +587,10 @@ unsafe fn selftestPool2(reason: *mut *CChar) -> bool {
     }
     cosmofs_test_set_writeback(mnt(), false);
     if (!(stats(mut st) && st[2] == 2048)) {
-        return failed(reason,
-            "check failed: cosmofs_stats(cfst_mount_of(ENG), &st) == 0 && st.total_blocks == 2048 at line 558\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_stats(cfst_mount_of(ENG), &st) == 0 && st.total_blocks == 2048 at line 558\0",
+        );
     }
     for (i in 0u32..24) {
         var s = [0u64; 4];
@@ -710,8 +734,10 @@ unsafe fn selftestSnapIdentity(reason: *mut *CChar) -> bool {
     }
     cosmofs_test_snap_no_raise(mnt(), false);
     if (poolVersion() != 11) {
-        return failed(reason,
-            "check failed: cosmofs_stats(cfst_mount_of(ENG), &st) == 0 && st.version == 11 at line 699\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_stats(cfst_mount_of(ENG), &st) == 0 && st.version == 11 at line 699\0",
+        );
     }
 
     // The first snapshot with identity raises the pool and the list.
@@ -719,23 +745,31 @@ unsafe fn selftestSnapIdentity(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: cfst_write_file(ENG \"/f\", \"new\", 3) at line 704\0");
     }
     if (!(cfst_snapctl(SNAP_CREATE, c("a\0"), info(), 1, np) == 0 && n == 1)) {
-        return failed(reason,
-            "check failed: cfst_snapctl(COSMOFS_SNAP_CREATE, \"a\", info, 1, &n) == 0 && n == 1 at line 708\0");
+        return failed(
+            reason,
+            "check failed: cfst_snapctl(COSMOFS_SNAP_CREATE, \"a\", info, 1, &n) == 0 && n == 1 at line 708\0",
+        );
     }
     if (poolVersion() != 12) {
-        return failed(reason,
-            "check failed: cosmofs_stats(cfst_mount_of(ENG), &st) == 0 && st.version == 12 at line 712\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_stats(cfst_mount_of(ENG), &st) == 0 && st.version == 12 at line 712\0",
+        );
     }
     if (!(!uuidZero(info() as *cosmofs_snap_info) && Ptr.toBorrow(infoAt(0)).format == 12)) {
-        return failed(reason,
-            "check failed: memcmp(info[0].uuid, zero, 16) != 0 && info[0].format == 12 at line 716\0");
+        return failed(
+            reason,
+            "check failed: memcmp(info[0].uuid, zero, 16) != 0 && info[0].format == 12 at line 716\0",
+        );
     }
     var uuidA = [0u8; 16];
     let info0 = infoAt(0);
     memcpy(borrow mut uuidA as *mut [u8; 16] as *mut void, borrow Ptr.toBorrow(info0).uuid as *[u8; 16] as *void, 16);
     if (cfst_snapctl(SNAP_CREATE, c("a\0"), info(), 1, np) != -EEXIST) {
-        return failed(reason,
-            "check failed: cfst_snapctl(COSMOFS_SNAP_CREATE, \"a\", info, 1, &n) == -EEXIST at line 723\0");
+        return failed(
+            reason,
+            "check failed: cfst_snapctl(COSMOFS_SNAP_CREATE, \"a\", info, 1, &n) == -EEXIST at line 723\0",
+        );
     }
     if (cfst_snapctl(SNAP_CREATE, c("b\0"), info(), 1, np) != 0) {
         return failed(reason, "check failed: cfst_snapctl(COSMOFS_SNAP_CREATE, \"b\", info, 1, &n) == 0 at line 726\0");
@@ -746,8 +780,10 @@ unsafe fn selftestSnapIdentity(reason: *mut *CChar) -> bool {
     }
     let idB = Ptr.toBorrow(infoAt(0)).id;
     if (!cfst_read_matches(c("/mnt/eng/.snapshots/legacy/f\0"), "old".ptr as *void, 3)) { // converted, still readable
-        return failed(reason,
-            "check failed: cfst_read_matches(ENG \"/.snapshots/legacy/f\", \"old\", 3) at line 735\0");
+        return failed(
+            reason,
+            "check failed: cfst_read_matches(ENG \"/.snapshots/legacy/f\", \"old\", 3) at line 735\0",
+        );
     }
     if (!cfst_read_matches(c("/mnt/eng/.snapshots/a/f\0"), "new".ptr as *void, 3)) {
         return failed(reason, "check failed: cfst_read_matches(ENG \"/.snapshots/a/f\", \"new\", 3) at line 738\0");
@@ -755,8 +791,10 @@ unsafe fn selftestSnapIdentity(reason: *mut *CChar) -> bool {
 
     // Every entry, the converted one included, has a uuid of its own.
     if (!(cfst_snapctl(SNAP_LIST, 0 as *CChar, info(), 8, np) == 0 && n == 3)) {
-        return failed(reason,
-            "check failed: cfst_snapctl(COSMOFS_SNAP_LIST, NULL, info, 8, &n) == 0 && n == 3 at line 744\0");
+        return failed(
+            reason,
+            "check failed: cfst_snapctl(COSMOFS_SNAP_LIST, NULL, info, 8, &n) == 0 && n == 3 at line 744\0",
+        );
     }
     let legacy = cfst_info_named(info() as *cosmofs_snap_info, n, c("legacy\0"));
     if (!(!legacy.isNull())) {
@@ -772,8 +810,10 @@ unsafe fn selftestSnapIdentity(reason: *mut *CChar) -> bool {
     // Ids are never reused, across a remount (CFS-3): delete the newest, remount, take another -- it gets a new id,
     // not b's.
     if (cfst_snapctl(SNAP_DELETE, c("b\0"), 0 as *mut cosmofs_snap_info, 0, 0 as *mut u32) != 0) {
-        return failed(reason,
-            "check failed: cfst_snapctl(COSMOFS_SNAP_DELETE, \"b\", NULL, 0, NULL) == 0 at line 761\0");
+        return failed(
+            reason,
+            "check failed: cfst_snapctl(COSMOFS_SNAP_DELETE, \"b\", NULL, 0, NULL) == 0 at line 761\0",
+        );
     }
     if (umountEng() != 0) {
         return failed(reason, "check failed: vfs_umount(ENG) == 0 at line 764\0");
@@ -812,8 +852,10 @@ unsafe fn selftestSnapIdentity(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: vfs_sync() == 0 at line 797\0");
     }
     if (!(cfst_snapctl(SNAP_LIST, 0 as *CChar, info(), 8, np) == 0 && n == 4)) { // legacy, a, c, d
-        return failed(reason,
-            "check failed: cfst_snapctl(COSMOFS_SNAP_LIST, NULL, info, 8, &n) == 0 && n == 4 at line 801\0");
+        return failed(
+            reason,
+            "check failed: cfst_snapctl(COSMOFS_SNAP_LIST, NULL, info, 8, &n) == 0 && n == 4 at line 801\0",
+        );
     }
     let d = cfst_info_named(info() as *cosmofs_snap_info, n, c("d\0"));
     let cs = cfst_info_named(info() as *cosmofs_snap_info, n, c("c\0"));
@@ -836,61 +878,87 @@ unsafe fn selftestSnapIdentity(reason: *mut *CChar) -> bool {
 
     // The checker: clean, then a snapshot with no uuid is named and repaired.
     if (!(check(0) == 0 && Ptr.toBorrow(r()).clean)) {
-        return failed(reason,
-            "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, 0) == 0 && rep.clean at line 825\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, 0) == 0 && rep.clean at line 825\0",
+        );
     }
     var victim: u64 = 0;
     if (cosmofs_test_corrupt(mnt(), CORRUPT_SNAP_UUID, 0, borrow mut victim as *mut u64) != 0) {
-        return failed(reason,
-            "check failed: cosmofs_test_corrupt(mount_of(ENG), CORRUPT_SNAP_UUID, 0, &victim) == 0 at line 830\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_test_corrupt(mount_of(ENG), CORRUPT_SNAP_UUID, 0, &victim) == 0 at line 830\0",
+        );
     }
     if (!(check(0) == 0 && !Ptr.toBorrow(r()).clean)) {
-        return failed(reason,
-            "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, 0) == 0 && !rep.clean at line 834\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, 0) == 0 && !rep.clean at line 834\0",
+        );
     }
     if (!(Ptr.toBorrow(r()).snap_identity.count == 1 && Ptr.toBorrow(r()).snap_identity.name[0] == victim)) {
-        return failed(reason,
-            "check failed: rep.snap_identity.count == 1 && rep.snap_identity.name[0] == victim at line 838\0");
+        return failed(
+            reason,
+            "check failed: rep.snap_identity.count == 1 && rep.snap_identity.name[0] == victim at line 838\0",
+        );
     }
     if (!(check(CHECK_REPAIR) == 0)) {
-        return failed(reason,
-            "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, COSMOFS_CHECK_REPAIR) == 0 at line 842\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, COSMOFS_CHECK_REPAIR) == 0 at line 842\0",
+        );
     }
     if (!(Ptr.toBorrow(r()).snap_identity.repaired == 1)) {
         return failed(reason, "check failed: rep.snap_identity.repaired == 1 at line 845\0");
     }
     if (!(check(0) == 0 && Ptr.toBorrow(r()).clean)) {
-        return failed(reason,
-            "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, 0) == 0 && rep.clean at line 849\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, 0) == 0 && rep.clean at line 849\0",
+        );
     }
 
     if (cfst_snapctl(SNAP_DELETE, c("nope\0"), 0 as *mut cosmofs_snap_info, 0, 0 as *mut u32) != -ENOENT) {
-        return failed(reason,
-            "check failed: cfst_snapctl(COSMOFS_SNAP_DELETE, \"nope\", NULL, 0, NULL) == -ENOENT at line 854\0");
+        return failed(
+            reason,
+            "check failed: cfst_snapctl(COSMOFS_SNAP_DELETE, \"nope\", NULL, 0, NULL) == -ENOENT at line 854\0",
+        );
     }
     if (cfst_snapctl(SNAP_CREATE, c("bad/name\0"), info(), 1, np) != -EINVAL) {
-        return failed(reason,
-            "check failed: cfst_snapctl(COSMOFS_SNAP_CREATE, \"bad/name\", info, 1, &n) == -EINVAL at line 858\0");
+        return failed(
+            reason,
+            "check failed: cfst_snapctl(COSMOFS_SNAP_CREATE, \"bad/name\", info, 1, &n) == -EINVAL at line 858\0",
+        );
     }
     if (cfst_snapctl(SNAP_DELETE, c("legacy\0"), 0 as *mut cosmofs_snap_info, 0, 0 as *mut u32) != 0) {
-        return failed(reason,
-            "check failed: cfst_snapctl(COSMOFS_SNAP_DELETE, \"legacy\", NULL, 0, NULL) == 0 at line 862\0");
+        return failed(
+            reason,
+            "check failed: cfst_snapctl(COSMOFS_SNAP_DELETE, \"legacy\", NULL, 0, NULL) == 0 at line 862\0",
+        );
     }
     if (cfst_snapctl(SNAP_DELETE, c("a\0"), 0 as *mut cosmofs_snap_info, 0, 0 as *mut u32) != 0) {
-        return failed(reason,
-            "check failed: cfst_snapctl(COSMOFS_SNAP_DELETE, \"a\", NULL, 0, NULL) == 0 at line 866\0");
+        return failed(
+            reason,
+            "check failed: cfst_snapctl(COSMOFS_SNAP_DELETE, \"a\", NULL, 0, NULL) == 0 at line 866\0",
+        );
     }
     if (cfst_snapctl(SNAP_DELETE, c("c\0"), 0 as *mut cosmofs_snap_info, 0, 0 as *mut u32) != 0) {
-        return failed(reason,
-            "check failed: cfst_snapctl(COSMOFS_SNAP_DELETE, \"c\", NULL, 0, NULL) == 0 at line 870\0");
+        return failed(
+            reason,
+            "check failed: cfst_snapctl(COSMOFS_SNAP_DELETE, \"c\", NULL, 0, NULL) == 0 at line 870\0",
+        );
     }
     if (cfst_snapctl(SNAP_DELETE, c("d\0"), 0 as *mut cosmofs_snap_info, 0, 0 as *mut u32) != 0) {
-        return failed(reason,
-            "check failed: cfst_snapctl(COSMOFS_SNAP_DELETE, \"d\", NULL, 0, NULL) == 0 at line 874\0");
+        return failed(
+            reason,
+            "check failed: cfst_snapctl(COSMOFS_SNAP_DELETE, \"d\", NULL, 0, NULL) == 0 at line 874\0",
+        );
     }
     if (!(check(0) == 0 && Ptr.toBorrow(r()).clean)) {
-        return failed(reason,
-            "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, 0) == 0 && rep.clean at line 878\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, 0) == 0 && rep.clean at line 878\0",
+        );
     }
     if (!cfst_engine_unmount(bd, reason)) {
         return failed(reason, "check failed: cfst_engine_unmount(bd, reason) at line 881\0");
@@ -901,15 +969,19 @@ unsafe fn selftestSnapIdentity(reason: *mut *CChar) -> bool {
         return false;
     }
     if (cfst_snapctl(SNAP_CREATE, c("x\0"), info(), 1, np) != -EOPNOTSUPP) {
-        return failed(reason,
-            "check failed: cfst_snapctl(COSMOFS_SNAP_CREATE, \"x\", info, 1, &n) == -EOPNOTSUPP at line 890\0");
+        return failed(
+            reason,
+            "check failed: cfst_snapctl(COSMOFS_SNAP_CREATE, \"x\", info, 1, &n) == -EOPNOTSUPP at line 890\0",
+        );
     }
     if (vfs_mkdir(nov(), c("/mnt/eng/.snapshots/old\0"), 493) != 0) {
         return failed(reason, "check failed: vfs_mkdir(NULL, ENG \"/.snapshots/old\", 0755) == 0 at line 893\0");
     }
     if (poolVersion() != 10) {
-        return failed(reason,
-            "check failed: cosmofs_stats(cfst_mount_of(ENG), &st) == 0 && st.version == 10 at line 897\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_stats(cfst_mount_of(ENG), &st) == 0 && st.version == 10 at line 897\0",
+        );
     }
     if (vfs_rmdir(nov(), c("/mnt/eng/.snapshots/old\0")) != 0) {
         return failed(reason, "check failed: vfs_rmdir(NULL, ENG \"/.snapshots/old\") == 0 at line 900\0");
@@ -965,16 +1037,20 @@ unsafe fn selftestLongname(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: pool_version() == CFS_FORMAT_VERSION at line 950\0");
     }
     if (vfs_open(nov(), lname(p105, 105, 102), O_RDONLY, 0, fp) != -ENOENT) {
-        return failed(reason,
-            "check failed: vfs_open(NULL, lname(p105, 105, 'f'), COSMO_O_RDONLY, 0, &f) == -ENOENT at line 954\0");
+        return failed(
+            reason,
+            "check failed: vfs_open(NULL, lname(p105, 105, 'f'), COSMO_O_RDONLY, 0, &f) == -ENOENT at line 954\0",
+        );
     }
     if (poolVersion() != CFS_FORMAT_VERSION) { // a lookup raises nothing
         return failed(reason, "check failed: pool_version() == CFS_FORMAT_VERSION at line 957\0");
     }
 
     if (!(cfst_write_file(lname(p48, 48, 97), "48".ptr as *void, 2) && poolVersion() == 15)) {
-        return failed(reason,
-            "check failed: cfst_write_file(lname(p48, 48, 'a'), \"48\", 2) && pool_version() == 15 at line 962\0");
+        return failed(
+            reason,
+            "check failed: cfst_write_file(lname(p48, 48, 'a'), \"48\", 2) && pool_version() == 15 at line 962\0",
+        );
     }
     if (!cfst_write_file(lname(p49, 49, 98), "49".ptr as *void, 2)) {
         return failed(reason, "check failed: cfst_write_file(lname(p49, 49, 'b'), \"49\", 2) at line 965\0");
@@ -995,8 +1071,10 @@ unsafe fn selftestLongname(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: vfs_symlink(NULL, lname(plnk, 150, 'h'), \"a\") == 0 at line 980\0");
     }
     if (vfs_open(nov(), lname(p256, 256, 105), O_WRONLY | O_CREAT, 420, fp) != -ENAMETOOLONG) {
-        return failed(reason,
-            "check failed: vfs_open(NULL, lname(p256, 256, 'i'), ..., &f) == -ENAMETOOLONG at line 984\0");
+        return failed(
+            reason,
+            "check failed: vfs_open(NULL, lname(p256, 256, 'i'), ..., &f) == -ENAMETOOLONG at line 984\0",
+        );
     }
     if (!(cfst_read_matches(p48 as *CChar, "48".ptr as *void, 2))) {
         return failed(reason, "check failed: cfst_read_matches(p48, \"48\", 2) at line 987\0");
@@ -1023,8 +1101,10 @@ unsafe fn selftestLongname(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: total == 2 + 8 at line 1008\0");
     }
     if (!(listCount(c(ENG), one, lbase(pdir as *CChar), mut cnt) && cnt[0] == 1)) {
-        return failed(reason,
-            "check failed: list_count(ENG, one, LBASE(pdir), &hits, &total) && hits == 1 at line 1012\0");
+        return failed(
+            reason,
+            "check failed: list_count(ENG, one, LBASE(pdir), &hits, &total) && hits == 1 at line 1012\0",
+        );
     }
     if (!(listCount(c(ENG), 4096, lbase(p49 as *CChar), mut cnt))) {
         return failed(reason, "check failed: list_count(ENG, 4096, LBASE(p49), &hits, &total) at line 1015\0");
@@ -1059,8 +1139,10 @@ unsafe fn selftestLongname(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: cfst_read_matches(p104, \"104\", 3) at line 1044\0");
     }
     if (!(vfs_unlink(nov(), p49 as *CChar) == 0 && statOf(p49 as *CChar, false, mut st) == -ENOENT)) {
-        return failed(reason,
-            "check failed: vfs_unlink(NULL, p49) == 0 && vfs_stat(NULL, p49, &st) == -ENOENT at line 1048\0");
+        return failed(
+            reason,
+            "check failed: vfs_unlink(NULL, p49) == 0 && vfs_stat(NULL, p49, &st) == -ENOENT at line 1048\0",
+        );
     }
     if (!(listCount(c(ENG), one, lbase(pnew as *CChar), mut cnt))) {
         return failed(reason, "check failed: list_count(ENG, one, LBASE(pnew), &hits, &total) at line 1051\0");
@@ -1154,15 +1236,19 @@ unsafe fn selftestLongname(reason: *mut *CChar) -> bool {
         return false;
     }
     if (vfs_open(nov(), p48 as *CChar, O_WRONLY | O_CREAT, 420, fp) != -ENAMETOOLONG) {
-        return failed(reason,
-            "check failed: vfs_open(NULL, p48, O_WRONLY | O_CREAT, 0644, &f) == -ENAMETOOLONG at line 1143\0");
+        return failed(
+            reason,
+            "check failed: vfs_open(NULL, p48, O_WRONLY | O_CREAT, 0644, &f) == -ENAMETOOLONG at line 1143\0",
+        );
     }
     if (vfs_mkdir(nov(), p105 as *CChar, 493) != -ENAMETOOLONG) {
         return failed(reason, "check failed: vfs_mkdir(NULL, p105, 0755) == -ENAMETOOLONG at line 1146\0");
     }
     if (!(cfst_write_file(c("/mnt/eng/a\0"), "short".ptr as *void, 5) && poolVersion() == 10)) {
-        return failed(reason,
-            "check failed: cfst_write_file(ENG \"/a\", \"short\", 5) && pool_version() == 10 at line 1150\0");
+        return failed(
+            reason,
+            "check failed: cfst_write_file(ENG \"/a\", \"short\", 5) && pool_version() == 10 at line 1150\0",
+        );
     }
     var buffer = [0u8; 224];
     var line = TextWriter.create(mut buffer[..]);
@@ -1200,12 +1286,16 @@ unsafe fn selftestCheckLongname(reason: *mut *CChar) -> bool {
             return failed(reason, "check failed: vfs_stat(NULL, ENG \"/sub\", &st) == 0 at line 1185\0");
         }
         if (!(check(0) == 0 && Ptr.toBorrow(r()).dir_bad.count == 0)) {
-            return failed(reason,
-                "check failed: cosmofs_check(cfst_mount_of(ENG), &r, 0) == 0 && r.dir_bad.count == 0 at line 1189\0");
+            return failed(
+                reason,
+                "check failed: cosmofs_check(cfst_mount_of(ENG), &r, 0) == 0 && r.dir_bad.count == 0 at line 1189\0",
+            );
         }
         if (cosmofs_test_corrupt(mnt(), kinds[k], st[0], borrow mut what as *mut u64) != 0) {
-            return failed(reason,
-                "check failed: cosmofs_test_corrupt(mount_of(ENG), kinds[k], st.ino, &what) == 0 at line 1193\0");
+            return failed(
+                reason,
+                "check failed: cosmofs_test_corrupt(mount_of(ENG), kinds[k], st.ino, &what) == 0 at line 1193\0",
+            );
         }
         if (check(0) != 0) {
             return failed(reason, "check failed: cosmofs_check(cfst_mount_of(ENG), &r, 0) == 0 at line 1196\0");
@@ -1229,15 +1319,19 @@ unsafe fn selftestCheckLongname(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: vfs_stat(NULL, ENG \"/sub\", &st) == 0 at line 1214\0");
     }
     if (cosmofs_test_corrupt(mnt(), CORRUPT_DUP_NAME, st[0], borrow mut what as *mut u64) != 0) {
-        return failed(reason,
-            "check failed: cosmofs_test_corrupt(mount_of(ENG), CORRUPT_DUP_NAME, st.ino, &what) == 0 at line 1218\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_test_corrupt(mount_of(ENG), CORRUPT_DUP_NAME, st.ino, &what) == 0 at line 1218\0",
+        );
     }
     if (check(0) != 0) {
         return failed(reason, "check failed: cosmofs_check(cfst_mount_of(ENG), &r, 0) == 0 at line 1221\0");
     }
     if (!(Ptr.toBorrow(r()).dir_dup_name.count >= 1 && Ptr.toBorrow(r()).dir_dup_name.name[0] == st[0])) {
-        return failed(reason,
-            "check failed: r.dir_dup_name.count >= 1 && r.dir_dup_name.name[0] == st.ino at line 1225\0");
+        return failed(
+            reason,
+            "check failed: r.dir_dup_name.count >= 1 && r.dir_dup_name.name[0] == st.ino at line 1225\0",
+        );
     }
     cfst_check_teardown(bd);
 
@@ -1280,12 +1374,16 @@ unsafe fn selftestLink(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: vfs_link(NULL, ENG \"/a\", NULL, ENG \"/b\", false) == 0 at line 1265\0");
     }
     if (vfs_link(nov(), c("/mnt/eng/a\0"), nov(), c("/mnt/eng/d/c\0"), false) != 0) {
-        return failed(reason,
-            "check failed: vfs_link(NULL, ENG \"/a\", NULL, ENG \"/d/c\", false) == 0 at line 1269\0");
+        return failed(
+            reason,
+            "check failed: vfs_link(NULL, ENG \"/a\", NULL, ENG \"/d/c\", false) == 0 at line 1269\0",
+        );
     }
     if (!(vfs_link(nov(), c("/mnt/eng/b\0"), nov(), lname(lng, 60, 110), false) == 0)) {
-        return failed(reason,
-            "check failed: vfs_link(NULL, ENG \"/b\", NULL, lname(lng, 60, 'n'), false) == 0 at line 1273\0");
+        return failed(
+            reason,
+            "check failed: vfs_link(NULL, ENG \"/b\", NULL, lname(lng, 60, 'n'), false) == 0 at line 1273\0",
+        );
     }
     if (!(poolVersion() == 15)) {
         return failed(reason, "check failed: pool_version() == 15 at line 1276\0");
@@ -1300,12 +1398,16 @@ unsafe fn selftestLink(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: st.ino == st2.ino && st.nlink == 4 at line 1285\0");
     }
     if (vfs_link(nov(), c("/mnt/eng/d\0"), nov(), c("/mnt/eng/e\0"), false) != -EPERM) {
-        return failed(reason,
-            "check failed: vfs_link(NULL, ENG \"/d\", NULL, ENG \"/e\", false) == -EPERM at line 1289\0");
+        return failed(
+            reason,
+            "check failed: vfs_link(NULL, ENG \"/d\", NULL, ENG \"/e\", false) == -EPERM at line 1289\0",
+        );
     }
     if (vfs_link(nov(), c("/mnt/eng/a\0"), nov(), c("/mnt/eng/b\0"), false) != -EEXIST) {
-        return failed(reason,
-            "check failed: vfs_link(NULL, ENG \"/a\", NULL, ENG \"/b\", false) == -EEXIST at line 1293\0");
+        return failed(
+            reason,
+            "check failed: vfs_link(NULL, ENG \"/a\", NULL, ENG \"/b\", false) == -EEXIST at line 1293\0",
+        );
     }
     if (!(vfs_symlink(nov(), c("/mnt/eng/s\0"), c("a\0")) == 0)) {
         return failed(reason, "check failed: vfs_symlink(NULL, ENG \"/s\", \"a\") == 0 at line 1296\0");
@@ -1355,16 +1457,22 @@ unsafe fn selftestLink(reason: *mut *CChar) -> bool {
     // Read-only both ways in a snapshot: no name made there, none taken out.
     var n: u32 = 0;
     if (cfst_snapctl(SNAP_CREATE, c("lk\0"), info(), 1, borrow mut n as *mut u32) != 0) {
-        return failed(reason,
-            "check failed: cfst_snapctl(COSMOFS_SNAP_CREATE, \"lk\", info, 1, &n) == 0 at line 1344\0");
+        return failed(
+            reason,
+            "check failed: cfst_snapctl(COSMOFS_SNAP_CREATE, \"lk\", info, 1, &n) == 0 at line 1344\0",
+        );
     }
     if (vfs_link(nov(), c("/mnt/eng/b\0"), nov(), c("/mnt/eng/.snapshots/lk/z\0"), false) != -EROFS) {
-        return failed(reason,
-            "check failed: vfs_link(NULL, ENG \"/b\", NULL, ENG \"/.snapshots/lk/z\", false) == -EROFS at line 1348\0");
+        return failed(
+            reason,
+            "check failed: vfs_link(NULL, ENG \"/b\", NULL, ENG \"/.snapshots/lk/z\", false) == -EROFS at line 1348\0",
+        );
     }
     if (vfs_link(nov(), c("/mnt/eng/.snapshots/lk/b\0"), nov(), c("/mnt/eng/z\0"), false) != -EROFS) {
-        return failed(reason,
-            "check failed: vfs_link(NULL, ENG \"/.snapshots/lk/b\", NULL, ENG \"/z\", false) == -EROFS at line 1352\0");
+        return failed(
+            reason,
+            "check failed: vfs_link(NULL, ENG \"/.snapshots/lk/b\", NULL, ENG \"/z\", false) == -EROFS at line 1352\0",
+        );
     }
     if (vfs_rmdir(nov(), c("/mnt/eng/.snapshots/lk\0")) != 0) {
         return failed(reason, "check failed: vfs_rmdir(NULL, ENG \"/.snapshots/lk\") == 0 at line 1355\0");

@@ -10,9 +10,11 @@
 // what this file reads of a record it reads at offsets the C compiler checks, and a build without CONFIG_DEBUG runs
 // none of the engine tests (a `cfg` block; ADR 0080).
 
-@header("kernel/blk.h", "kernel/vfs.h", "kernel/kmalloc.h", "kernel/string.h", "kernel/storage.h", "kernel/timer.h",
+@header(
+    "kernel/blk.h", "kernel/vfs.h", "kernel/kmalloc.h", "kernel/string.h", "kernel/storage.h", "kernel/timer.h",
     "kernel/wait.h", "kernel/crc32c.h", "kernel/cosmofs.h", "uapi/cosmo/syscall.h", "cosmofs_internal.h",
-    "kernel/errno.h", "kernel/selftest.h", "cosmofs_format.h")
+    "kernel/errno.h", "kernel/selftest.h", "cosmofs_format.h",
+)
 extern "C" {
     struct blkdev {
         obj: kobject;
@@ -109,13 +111,19 @@ extern "C" {
     const MHDR_OK: u32 = 0;
     const MHDR_ALGO: u32 = 4;
     /// cosmofstest_basic.cee's syscall.h, storage.h and cosmofs.h values
-    @cvalue("COSMO_O_RDONLY == 0 && COSMO_O_WRONLY == 1 && COSMO_O_RDWR == 2 && COSMO_O_CREAT == 0x40 && COSMO_O_TRUNC == 0x200 && COSMO_DT_DIR == 2 && sizeof(struct cosmo_stat) <= 64 && sizeof(struct cosmofs_stats) <= 128")
+    @cvalue(
+        "COSMO_O_RDONLY == 0 && COSMO_O_WRONLY == 1 && COSMO_O_RDWR == 2 && COSMO_O_CREAT == 0x40 && COSMO_O_TRUNC == 0x200 && COSMO_DT_DIR == 2 && sizeof(struct cosmo_stat) <= 64 && sizeof(struct cosmofs_stats) <= 128",
+    )
     const COSMOFSTEST_BASIC_FACT_0: bool = true;
     /// cosmofstest_basic.cee's metadata header values
-    @cvalue("CFS_BLOCK == 4096 && CFS_MHDR_SIZE == 32 && offsetof(struct cfs_mhdr, crc) == 24 && offsetof(struct cfs_mhdr, csum_algo) == 28 && CFS_KIND_INODES == 3 && CFS_CSUM_NONE == 0 && CFS_CSUM_CRC32C == 1 && CFS_CSUM_POLY1305 == 2 && MHDR_CRC == 5")
+    @cvalue(
+        "CFS_BLOCK == 4096 && CFS_MHDR_SIZE == 32 && offsetof(struct cfs_mhdr, crc) == 24 && offsetof(struct cfs_mhdr, csum_algo) == 28 && CFS_KIND_INODES == 3 && CFS_CSUM_NONE == 0 && CFS_CSUM_CRC32C == 1 && CFS_CSUM_POLY1305 == 2 && MHDR_CRC == 5",
+    )
     const COSMOFSTEST_BASIC_FACT_1: bool = true;
     /// cosmofstest_basic.cee's superblock and directory entry offsets
-    @cvalue("sizeof(CFS_MAGIC) - 1 == 8 && offsetof(struct cfs_super, magic) == 0 && offsetof(struct cfs_super, generation) == 24 && offsetof(struct cfs_super, imap_root) == 32 && sizeof(struct cfs_dirent) == 64 && offsetof(struct cfs_dirent, ino) == 0 && offsetof(struct cfs_dirent, namelen) == 9 && offsetof(struct cfs_dirent, name) == 16")
+    @cvalue(
+        "sizeof(CFS_MAGIC) - 1 == 8 && offsetof(struct cfs_super, magic) == 0 && offsetof(struct cfs_super, generation) == 24 && offsetof(struct cfs_super, imap_root) == 32 && sizeof(struct cfs_dirent) == 64 && offsetof(struct cfs_dirent, ino) == 0 && offsetof(struct cfs_dirent, namelen) == 9 && offsetof(struct cfs_dirent, name) == 16",
+    )
     const COSMOFSTEST_BASIC_FACT_2: bool = true;
 }
 
@@ -188,8 +196,10 @@ unsafe fn selftestPool(reason: *mut *CChar) -> bool {
     let m0 = Ptr.toBorrow(ps.m as *spool_member);
     let shape = ps.block_size == 4096 && ps.nmembers == 1 && m0.ncopies == 1 && m0.copy[0].sectors_per_block == 8;
     if (!(shape && ps.nblocks == Ptr.toBorrow(bd as *blkdev).capacity / 8)) {
-        return failed(reason,
-            "check failed: p->block_size == 4096 && p->nmembers == 1 && p->...locks == bd->capacity / 8 at line 179\0");
+        return failed(
+            reason,
+            "check failed: p->block_size == 4096 && p->nmembers == 1 && p->...locks == bd->capacity / 8 at line 179\0",
+        );
     }
     let w = kmalloc(BLOCK, 0) as *mut u8;
     let r = kmalloc(BLOCK, 0) as *mut u8;
@@ -248,8 +258,10 @@ unsafe fn selftestFormat(reason: *mut *CChar) -> bool {
     }
     let total = Ptr.toBorrow(bd as *blkdev).capacity / 8;
     if (!(sv(st).generation == 1 && sv(st).total_blocks == total && sv(st).inode_count == 1)) {
-        return failed(reason,
-            "check failed: st.generation == 1 && st.total_blocks == bd->cap... 8 && st.inode_count == 1 at line 239\0");
+        return failed(
+            reason,
+            "check failed: st.generation == 1 && st.total_blocks == bd->cap... 8 && st.inode_count == 1 at line 239\0",
+        );
     }
     // 2 supers, members, index, bitmap, L1, L0, inodes
     if (!(sv(st).free_blocks == sv(st).total_blocks - 8)) {
@@ -258,8 +270,10 @@ unsafe fn selftestFormat(reason: *mut *CChar) -> bool {
     var sSlot = [0u64; 8];
     let s = borrow mut sSlot as *mut [u64; 8] as *mut cosmo_stat;
     if (!(vfs_stat(0 as *mut vnode, mnt, s) == 0 && cs(s).dtype == DT_DIR && cs(s).ino == 1 && cs(s).nlink == 2)) {
-        return failed(reason,
-            "check failed: vfs_stat(NULL, \"/mnt\", &s) == 0 && s.type == CO...ino == 1 && s.nlink == 2 at line 249\0");
+        return failed(
+            reason,
+            "check failed: vfs_stat(NULL, \"/mnt\", &s) == 0 && s.type == CO...ino == 1 && s.nlink == 2 at line 249\0",
+        );
     }
     if (!(vfs_stat(0 as *mut vnode, c("/mnt/anything\0"), s) == -ENOENT)) {
         return failed(reason, "check failed: vfs_stat(NULL, \"/mnt/anything\", &s) == -ENOENT at line 252\0");
@@ -272,8 +286,10 @@ unsafe fn selftestFormat(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: vfs_mount(\"/mnt\", \"cosmofs\", bd, 0) == 0 at line 259\0");
     }
     if (!(cfst_stats(cfst_mount_of(mnt), st as *mut cosmofs_stats) == 0 && sv(st).generation == 1)) {
-        return failed(reason,
-            "check failed: cosmofs_stats(mount_of(\"/mnt\"), &st) == 0 && st.generation == 1 at line 263\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_stats(mount_of(\"/mnt\"), &st) == 0 && st.generation == 1 at line 263\0",
+        );
     }
     if (!(umount(mnt) == 0)) {
         return failed(reason, "check failed: vfs_umount(\"/mnt\") == 0 at line 266\0");
@@ -309,8 +325,10 @@ unsafe fn selftestOps(reason: *mut *CChar) -> bool {
 
     // Files and directories.
     if (!(cfst_write_file(c("/mnt/hello.txt\0"), hello.ptr as *void, 21))) {
-        return failed(reason,
-            "check failed: write_file(\"/mnt/hello.txt\", \"hello from the kernel\", 21) at line 300\0");
+        return failed(
+            reason,
+            "check failed: write_file(\"/mnt/hello.txt\", \"hello from the kernel\", 21) at line 300\0",
+        );
     }
     if (!(vfs_mkdir(none, c("/mnt/dir\0"), 493) == 0)) {
         return failed(reason, "check failed: vfs_mkdir(NULL, \"/mnt/dir\", 0755) == 0 at line 303\0");
@@ -319,8 +337,10 @@ unsafe fn selftestOps(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: write_file(\"/mnt/dir/nested.txt\", \"nested\", 6) at line 306\0");
     }
     if (!(cfst_read_matches(c("/mnt/hello.txt\0"), hello.ptr as *void, 21))) {
-        return failed(reason,
-            "check failed: read_matches(\"/mnt/hello.txt\", \"hello from the kernel\", 21) at line 310\0");
+        return failed(
+            reason,
+            "check failed: read_matches(\"/mnt/hello.txt\", \"hello from the kernel\", 21) at line 310\0",
+        );
     }
     var sSlot = [0u64; 8];
     let s = borrow mut sSlot as *mut [u64; 8] as *mut cosmo_stat;
@@ -353,8 +373,10 @@ unsafe fn selftestOps(reason: *mut *CChar) -> bool {
     let mid: usize = 20 * 4096 + 10;
     memset(buf.add(mid) as *mut void, 0xee, 5000);
     if (!(file_pwrite(f, buf.add(mid) as *void, 5000, mid as u64) == 5000)) {
-        return failed(reason,
-            "check failed: file_pwrite(f, buf + 20 * 4096 + 10, 5000, 20 * 4096 + 10) == 5000 at line 344\0");
+        return failed(
+            reason,
+            "check failed: file_pwrite(f, buf + 20 * 4096 + 10, 5000, 20 * 4096 + 10) == 5000 at line 344\0",
+        );
     }
     if (!(file_sync(f) == 0)) {
         return failed(reason, "check failed: file_sync(f) == 0 at line 347\0");
@@ -363,9 +385,14 @@ unsafe fn selftestOps(reason: *mut *CChar) -> bool {
     if (!(cfst_read_matches(c("/mnt/big.bin\0"), buf as *void, big))) {
         return failed(reason, "check failed: read_matches(\"/mnt/big.bin\", buf, big) at line 351\0");
     }
-    if (!(cfst_stats(cfst_mount_of(mnt), st as *mut cosmofs_stats) == 0 && sv(st).generation == sv(st0).generation + 1)) {
-        return failed(reason,
-            "check failed: cosmofs_stats(mount_of(\"/mnt\"), &st) == 0 && st...on == st0.generation + 1 at line 355\0");
+    if (!(cfst_stats(
+        cfst_mount_of(mnt),
+        st as *mut cosmofs_stats,
+    ) == 0 && sv(st).generation == sv(st0).generation + 1)) {
+        return failed(
+            reason,
+            "check failed: cosmofs_stats(mount_of(\"/mnt\"), &st) == 0 && st...on == st0.generation + 1 at line 355\0",
+        );
     }
     s0Slot = s1Slot;
 
@@ -374,15 +401,19 @@ unsafe fn selftestOps(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: write_file(\"/mnt/dir/other.txt\", \"other\", 5) at line 361\0");
     }
     if (!(vfs_rename(none, c("/mnt/dir/other.txt\0"), c("/mnt/dir/nested.txt\0")) == 0)) {
-        return failed(reason,
-            "check failed: vfs_rename(NULL, \"/mnt/dir/other.txt\", \"/mnt/dir/nested.txt\") == 0 at line 365\0");
+        return failed(
+            reason,
+            "check failed: vfs_rename(NULL, \"/mnt/dir/other.txt\", \"/mnt/dir/nested.txt\") == 0 at line 365\0",
+        );
     }
     if (!(cfst_read_matches(c("/mnt/dir/nested.txt\0"), "other".ptr as *void, 5))) {
         return failed(reason, "check failed: read_matches(\"/mnt/dir/nested.txt\", \"other\", 5) at line 368\0");
     }
     if (!(vfs_rename(none, c("/mnt/dir/nested.txt\0"), c("/mnt/moved.txt\0")) == 0)) {
-        return failed(reason,
-            "check failed: vfs_rename(NULL, \"/mnt/dir/nested.txt\", \"/mnt/moved.txt\") == 0 at line 372\0");
+        return failed(
+            reason,
+            "check failed: vfs_rename(NULL, \"/mnt/dir/nested.txt\", \"/mnt/moved.txt\") == 0 at line 372\0",
+        );
     }
     if (!(vfs_stat(none, c("/mnt/dir/nested.txt\0"), s) == -ENOENT)) {
         return failed(reason, "check failed: vfs_stat(NULL, \"/mnt/dir/nested.txt\", &s) == -ENOENT at line 375\0");
@@ -413,9 +444,14 @@ unsafe fn selftestOps(reason: *mut *CChar) -> bool {
     if (!(vfs_sync() == 0)) {
         return failed(reason, "check failed: vfs_sync() == 0 at line 401\0");
     }
-    if (!(cfst_stats(cfst_mount_of(mnt), st as *mut cosmofs_stats) == 0 && sv(st).generation == sv(st0).generation + 1)) {
-        return failed(reason,
-            "check failed: cosmofs_stats(mount_of(\"/mnt\"), &st) == 0 && st...on == st0.generation + 1 at line 405\0");
+    if (!(cfst_stats(
+        cfst_mount_of(mnt),
+        st as *mut cosmofs_stats,
+    ) == 0 && sv(st).generation == sv(st0).generation + 1)) {
+        return failed(
+            reason,
+            "check failed: cosmofs_stats(mount_of(\"/mnt\"), &st) == 0 && st...on == st0.generation + 1 at line 405\0",
+        );
     }
     if (!(umount(mnt) == 0)) {
         return failed(reason, "check failed: vfs_umount(\"/mnt\") == 0 at line 408\0");
@@ -424,8 +460,10 @@ unsafe fn selftestOps(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: vfs_mount(\"/mnt\", \"cosmofs\", bd, 0) == 0 at line 411\0");
     }
     if (!(cfst_read_matches(c("/mnt/hello.txt\0"), hello.ptr as *void, 21))) {
-        return failed(reason,
-            "check failed: read_matches(\"/mnt/hello.txt\", \"hello from the kernel\", 21) at line 415\0");
+        return failed(
+            reason,
+            "check failed: read_matches(\"/mnt/hello.txt\", \"hello from the kernel\", 21) at line 415\0",
+        );
     }
     if (!(cfst_read_matches(c("/mnt/big.bin\0"), buf as *void, big))) {
         return failed(reason, "check failed: read_matches(\"/mnt/big.bin\", buf, big) at line 418\0");
@@ -464,12 +502,16 @@ unsafe fn selftestOps(reason: *mut *CChar) -> bool {
 
     // Truncate through O_TRUNC and re-extend.
     if (!(cfst_write_file(c("/mnt/hello.txt\0"), hello.ptr as *void, 21))) {
-        return failed(reason,
-            "check failed: write_file(\"/mnt/hello.txt\", \"hello from the kernel\", 21) at line 455\0");
+        return failed(
+            reason,
+            "check failed: write_file(\"/mnt/hello.txt\", \"hello from the kernel\", 21) at line 455\0",
+        );
     }
     if (!(vfs_stat(none, c("/mnt/hello.txt\0"), s) == 0 && cs(s).size == 21)) {
-        return failed(reason,
-            "check failed: vfs_stat(NULL, \"/mnt/hello.txt\", &s) == 0 && s.size == 21 at line 459\0");
+        return failed(
+            reason,
+            "check failed: vfs_stat(NULL, \"/mnt/hello.txt\", &s) == 0 && s.size == 21 at line 459\0",
+        );
     }
 
     // Errors. A name longer than 255 bytes; one of 48 to 255 is format 15's (design.md, "Format version 15";
@@ -553,8 +595,10 @@ unsafe fn selftestCrash(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: cosmofs_stats(mount_of(\"/mnt\"), &after) == 0 at line 540\0");
     }
     if (!(sv(after).generation == sv(before).generation && sv(after).free_blocks == sv(before).free_blocks)) {
-        return failed(reason,
-            "check failed: after.generation == before.generation && after.f...cks == before.free_blocks at line 544\0");
+        return failed(
+            reason,
+            "check failed: after.generation == before.generation && after.f...cks == before.free_blocks at line 544\0",
+        );
     }
     if (!(vfs_stat(none, c("/mnt/lost.txt\0"), s) == -ENOENT)) {
         return failed(reason, "check failed: vfs_stat(NULL, \"/mnt/lost.txt\", &s) == -ENOENT at line 547\0");
@@ -563,8 +607,10 @@ unsafe fn selftestCrash(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: vfs_stat(NULL, \"/mnt/lostdir\", &s) == -ENOENT at line 550\0");
     }
     if (!(cfst_read_matches(c("/mnt/hello.txt\0"), hello.ptr as *void, 21))) {
-        return failed(reason,
-            "check failed: read_matches(\"/mnt/hello.txt\", \"hello from the kernel\", 21) at line 554\0");
+        return failed(
+            reason,
+            "check failed: read_matches(\"/mnt/hello.txt\", \"hello from the kernel\", 21) at line 554\0",
+        );
     }
     if (!(cfst_read_matches(c("/mnt/dir/nested.txt\0"), "nested".ptr as *void, 6))) {
         return failed(reason, "check failed: read_matches(\"/mnt/dir/nested.txt\", \"nested\", 6) at line 557\0");
@@ -610,8 +656,10 @@ unsafe fn selftestCrash(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: cosmofs_stats(mount_of(\"/mnt\"), &after) == 0 at line 597\0");
     }
     if (!(sv(after).generation == sv(before).generation - 1 || sv(after).generation == sv(before).generation)) {
-        return failed(reason,
-            "check failed: after.generation == before.generation - 1 || aft...tion == before.generation at line 601\0");
+        return failed(
+            reason,
+            "check failed: after.generation == before.generation - 1 || aft...tion == before.generation at line 601\0",
+        );
     }
     var buffer = [0u8; 96];
     var line = TextWriter.create(mut buffer[..]);
@@ -620,10 +668,12 @@ unsafe fn selftestCrash(reason: *mut *CChar) -> bool {
     line.text(" after a torn slot");
     KernelLog.send(LogLevel.Info, line);
     // Leave a healthy pair behind: a commit rewrites the torn slot.
-    if (!(cfst_write_file(c("/mnt/touch.txt\0"), "x".ptr as *void, 1)
-            && vfs_unlink(none, c("/mnt/touch.txt\0")) == 0)) {
-        return failed(reason,
-            "check failed: write_file(\"/mnt/touch.txt\", \"x\", 1) && vfs_... \"/mnt/touch.txt\") == 0 at line 613\0");
+    if (!(cfst_write_file(c("/mnt/touch.txt\0"), "x".ptr as *void, 1) &&
+        vfs_unlink(none, c("/mnt/touch.txt\0")) == 0)) {
+        return failed(
+            reason,
+            "check failed: write_file(\"/mnt/touch.txt\", \"x\", 1) && vfs_... \"/mnt/touch.txt\") == 0 at line 613\0",
+        );
     }
     if (!(vfs_sync() == 0)) {
         return failed(reason, "check failed: vfs_sync() == 0 at line 616\0");
@@ -635,8 +685,10 @@ unsafe fn selftestCrash(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: vfs_mount(\"/mnt\", \"cosmofs\", bd, 0) == 0 at line 622\0");
     }
     if (!(cfst_read_matches(c("/mnt/hello.txt\0"), hello.ptr as *void, 21))) {
-        return failed(reason,
-            "check failed: read_matches(\"/mnt/hello.txt\", \"hello from the kernel\", 21) at line 626\0");
+        return failed(
+            reason,
+            "check failed: read_matches(\"/mnt/hello.txt\", \"hello from the kernel\", 21) at line 626\0",
+        );
     }
     if (!(cfst_read_matches(c("/mnt/dir/nested.txt\0"), "nested".ptr as *void, 6))) {
         return failed(reason, "check failed: read_matches(\"/mnt/dir/nested.txt\", \"nested\", 6) at line 629\0");
@@ -675,8 +727,10 @@ unsafe fn selftestHoles(reason: *mut *CChar) -> bool {
     }
     var f = 0 as *mut file;
     if (!(vfs_open(none, sparse, O_RDWR | O_CREAT, 420, borrow mut f as *mut *mut file) == 0)) {
-        return failed(reason,
-            "check failed: vfs_open(NULL, ENG \"/sparse\", COSMO_O_RDWR | COSMO_O_CREAT, 0644, &f) == 0 at line 664\0");
+        return failed(
+            reason,
+            "check failed: vfs_open(NULL, ENG \"/sparse\", COSMO_O_RDWR | COSMO_O_CREAT, 0644, &f) == 0 at line 664\0",
+        );
     }
     let tail = "tail".ptr as *void;
     if (!(file_pwrite(f, tail, 4, 200u64 << 20) == 4)) {
@@ -703,8 +757,10 @@ unsafe fn selftestHoles(reason: *mut *CChar) -> bool {
         }
     }
     if (!(file_pread(f, buf as *mut void, 4, 200u64 << 20) == 4 && memcmp(buf as *void, tail, 4) == 0)) {
-        return failed(reason,
-            "check failed: file_pread(f, buf, 4, 200ull << 20) == 4 && memcmp(buf, tail, 4) == 0 at line 692\0");
+        return failed(
+            reason,
+            "check failed: file_pread(f, buf, 4, 200ull << 20) == 4 && memcmp(buf, tail, 4) == 0 at line 692\0",
+        );
     }
     // A block in the middle of the hole, then the first block: the runs stay sorted and every read agrees.
     if (!(file_pwrite(f, "mid".ptr as *void, 3, 50u64 << 20) == 3)) {
@@ -717,20 +773,28 @@ unsafe fn selftestHoles(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: file_sync(f) == 0 at line 702\0");
     }
     if (!(file_pread(f, buf as *mut void, 4, 0) == 4 && memcmp(buf as *void, "head".ptr as *void, 4) == 0)) {
-        return failed(reason,
-            "check failed: file_pread(f, buf, 4, 0) == 4 && memcmp(buf, \"head\", 4) == 0 at line 706\0");
+        return failed(
+            reason,
+            "check failed: file_pread(f, buf, 4, 0) == 4 && memcmp(buf, \"head\", 4) == 0 at line 706\0",
+        );
     }
     if (!(file_pread(f, buf as *mut void, 3, 50u64 << 20) == 3 && memcmp(buf as *void, "mid".ptr as *void, 3) == 0)) {
-        return failed(reason,
-            "check failed: file_pread(f, buf, 3, 50ull << 20) == 3 && memcmp(buf, \"mid\", 3) == 0 at line 710\0");
+        return failed(
+            reason,
+            "check failed: file_pread(f, buf, 3, 50ull << 20) == 3 && memcmp(buf, \"mid\", 3) == 0 at line 710\0",
+        );
     }
     if (!(file_pread(f, buf as *mut void, 4, 200u64 << 20) == 4 && memcmp(buf as *void, tail, 4) == 0)) {
-        return failed(reason,
-            "check failed: file_pread(f, buf, 4, 200ull << 20) == 4 && memcmp(buf, tail, 4) == 0 at line 714\0");
+        return failed(
+            reason,
+            "check failed: file_pread(f, buf, 4, 200ull << 20) == 4 && memcmp(buf, tail, 4) == 0 at line 714\0",
+        );
     }
     if (!(file_pread(f, buf as *mut void, 4, 1u64 << 20) == 4 && bufArr[0] == 0 && bufArr[3] == 0)) {
-        return failed(reason,
-            "check failed: file_pread(f, buf, 4, 1ull << 20) == 4 && buf[0] == 0 && buf[3] == 0 at line 718\0");
+        return failed(
+            reason,
+            "check failed: file_pread(f, buf, 4, 1ull << 20) == 4 && buf[0] == 0 && buf[3] == 0 at line 718\0",
+        );
     }
     filePut(f);
     // Remount: the holes and the data survive the commit.
@@ -745,12 +809,16 @@ unsafe fn selftestHoles(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: read_matches(ENG \"/sparse\", \"head\", 4) == false at line 730\0");
     }
     if (!(vfs_open(none, sparse, O_RDONLY, 0, borrow mut f as *mut *mut file) == 0)) {
-        return failed(reason,
-            "check failed: vfs_open(NULL, ENG \"/sparse\", COSMO_O_RDONLY, 0, &f) == 0 at line 734\0");
+        return failed(
+            reason,
+            "check failed: vfs_open(NULL, ENG \"/sparse\", COSMO_O_RDONLY, 0, &f) == 0 at line 734\0",
+        );
     }
     if (!(file_pread(f, buf as *mut void, 3, 50u64 << 20) == 3 && memcmp(buf as *void, "mid".ptr as *void, 3) == 0)) {
-        return failed(reason,
-            "check failed: file_pread(f, buf, 3, 50ull << 20) == 3 && memcmp(buf, \"mid\", 3) == 0 at line 738\0");
+        return failed(
+            reason,
+            "check failed: file_pread(f, buf, 3, 50ull << 20) == 3 && memcmp(buf, \"mid\", 3) == 0 at line 738\0",
+        );
     }
     var sSlot = [0u64; 8];
     let s = borrow mut sSlot as *mut [u64; 8] as *mut cosmo_stat;
@@ -761,8 +829,10 @@ unsafe fn selftestHoles(reason: *mut *CChar) -> bool {
     filePut(f);
     // Truncate into the hole keeps the head, frees the tail.
     if (!(vfs_open(none, sparse, O_WRONLY | O_TRUNC, 0, borrow mut f as *mut *mut file) == 0)) {
-        return failed(reason,
-            "check failed: vfs_open(NULL, ENG \"/sparse\", COSMO_O_WRONLY | COSMO_O_TRUNC, 0, &f) == 0 at line 750\0");
+        return failed(
+            reason,
+            "check failed: vfs_open(NULL, ENG \"/sparse\", COSMO_O_WRONLY | COSMO_O_TRUNC, 0, &f) == 0 at line 750\0",
+        );
     }
     filePut(f);
     if (!(vfs_sync() == 0)) {
@@ -874,8 +944,10 @@ unsafe fn selftestCsum(reason: *mut *CChar) -> bool {
     var stSlot = [0u64; 16];
     let st = borrow mut stSlot as *mut [u64; 16] as *mut cosmofs_stats;
     if (!(cfst_stats(cfst_mount_of(eng()), st as *mut cosmofs_stats) == 0 && sv(st).csum_failures >= 1)) {
-        return failed(reason,
-            "check failed: cosmofs_stats(mount_of(ENG), &st) == 0 && st.csum_failures >= 1 at line 861\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_stats(mount_of(ENG), &st) == 0 && st.csum_failures >= 1 at line 861\0",
+        );
     }
     // Repair by rewriting: a new block, a new checksum.
     if (!(cfst_write_file(data, pat as *void, BLOCK))) {
@@ -935,8 +1007,10 @@ unsafe fn selftestCsum(reason: *mut *CChar) -> bool {
     }
     // this mount's count
     if (!(cfst_stats(cfst_mount_of(eng()), st as *mut cosmofs_stats) == 0 && sv(st).csum_failures >= 1)) {
-        return failed(reason,
-            "check failed: cosmofs_stats(mount_of(ENG), &st) == 0 && st.csum_failures >= 1 at line 922\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_stats(mount_of(ENG), &st) == 0 && st.csum_failures >= 1 at line 922\0",
+        );
     }
     kfree(pat as *mut void);
     var buffer = [0u8; 140];
@@ -969,8 +1043,10 @@ unsafe fn selftestFsync(reason: *mut *CChar) -> bool {
     }
     var f = 0 as *mut file;
     if (!(vfs_open(none, c("/mnt/eng/durable\0"), O_RDWR | O_CREAT, 420, borrow mut f as *mut *mut file) == 0)) {
-        return failed(reason,
-            "check failed: vfs_open(NULL, ENG \"/durable\", COSMO_O_RDWR | C..._O_CREAT, 0644, &f) == 0 at line 954\0");
+        return failed(
+            reason,
+            "check failed: vfs_open(NULL, ENG \"/durable\", COSMO_O_RDWR | C..._O_CREAT, 0644, &f) == 0 at line 954\0",
+        );
     }
     if (!(file_write(f, "kept".ptr as *void, 4) == 4)) {
         return failed(reason, "check failed: file_write(f, \"kept\", 4) == 4 at line 957\0");
@@ -983,8 +1059,10 @@ unsafe fn selftestFsync(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: cosmofs_stats(mount_of(ENG), &st1) == 0 at line 964\0");
     }
     if (!(sv(st1).generation == sv(st0).generation + 1 && sv(st1).commits == sv(st0).commits + 1)) {
-        return failed(reason,
-            "check failed: st1.generation == st0.generation + 1 && st1.commits == st0.commits + 1 at line 968\0");
+        return failed(
+            reason,
+            "check failed: st1.generation == st0.generation + 1 && st1.commits == st0.commits + 1 at line 968\0",
+        );
     }
     // not synced
     if (!(cfst_write_file(c("/mnt/eng/lost\0"), "gone".ptr as *void, 4))) {
@@ -1005,8 +1083,10 @@ unsafe fn selftestFsync(reason: *mut *CChar) -> bool {
     if (!(vfs_stat(none, c("/mnt/eng/lost\0"), s) == -ENOENT)) {
         return failed(reason, "check failed: vfs_stat(NULL, ENG \"/lost\", &s) == -ENOENT at line 987\0");
     }
-    KernelLog.write(LogLevel.Info,
-        "selftest: cosmofs-fsync: the synced file survived the discarded transaction, the unsynced one did not");
+    KernelLog.write(
+        LogLevel.Info,
+        "selftest: cosmofs-fsync: the synced file survived the discarded transaction, the unsynced one did not",
+    );
     return cfst_engine_unmount(bd, reason);
 }
 
@@ -1089,8 +1169,10 @@ unsafe fn selftestReserve(reason: *mut *CChar) -> bool {
     // Stopped at the reserve, less the allowance a dirty page is charged on top of its block (CF34: CFS_DIRTY_META, 4
     // blocks with no page dirty); before MEM-9 the write was taken and its commit failed.
     if (!(sv(st).free_blocks <= sv(st).reserve_blocks + 2 + 4 && sv(st).free_blocks > 0)) {
-        return failed(reason,
-            "check failed: st.free_blocks <= st.reserve_blocks + 2 + 4 && st.free_blocks > 0 at line 1072\0");
+        return failed(
+            reason,
+            "check failed: st.free_blocks <= st.reserve_blocks + 2 + 4 && st.free_blocks > 0 at line 1072\0",
+        );
     }
     let fullFree = sv(st).free_blocks;
     // Deletion needs metadata blocks: the reserve provides them.
@@ -1156,8 +1238,10 @@ unsafe fn selftestFallback(reason: *mut *CChar) -> bool {
     var stSlot = [0u64; 16];
     let st = borrow mut stSlot as *mut [u64; 16] as *mut cosmofs_stats;
     if (!(cfst_stats(cfst_mount_of(eng()), st as *mut cosmofs_stats) == 0 && sv(st).generation == 3)) {
-        return failed(reason,
-            "check failed: cosmofs_stats(mount_of(ENG), &st) == 0 && st.generation == 3 at line 1137\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_stats(mount_of(ENG), &st) == 0 && st.generation == 3 at line 1137\0",
+        );
     }
     // Unmount without the bitmap-only commit that reclaims the pending frees, so the slots hold exactly generations 2
     // and 3.
@@ -1200,8 +1284,10 @@ unsafe fn selftestFallback(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: vfs_mount(ENG, \"cosmofs\", bd, 0) == 0 at line 1177\0");
     }
     if (!(cfst_stats(cfst_mount_of(eng()), st as *mut cosmofs_stats) == 0 && sv(st).generation == 2)) {
-        return failed(reason,
-            "check failed: cosmofs_stats(mount_of(ENG), &st) == 0 && st.generation == 2 at line 1181\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_stats(mount_of(ENG), &st) == 0 && st.generation == 2 at line 1181\0",
+        );
     }
     if (!(cfst_read_matches(old, "old".ptr as *void, 3))) {
         return failed(reason, "check failed: read_matches(ENG \"/old\", \"old\", 3) at line 1184\0");
@@ -1227,16 +1313,22 @@ unsafe fn selftestFallback(reason: *mut *CChar) -> bool {
     }
     // 3, plus the unmount's bitmap commit
     if (!(cfst_stats(cfst_mount_of(eng()), st as *mut cosmofs_stats) == 0 && sv(st).generation >= 3)) {
-        return failed(reason,
-            "check failed: cosmofs_stats(mount_of(ENG), &st) == 0 && st.generation >= 3 at line 1208\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_stats(mount_of(ENG), &st) == 0 && st.generation >= 3 at line 1208\0",
+        );
     }
-    if (!(cfst_read_matches(c("/mnt/eng/after\0"), "after".ptr as *void, 5)
-            && cfst_read_matches(old, "old".ptr as *void, 3))) {
-        return failed(reason,
-            "check failed: read_matches(ENG \"/after\", \"after\", 5) && ...(ENG \"/old\", \"old\", 3) at line 1213\0");
+    if (!(cfst_read_matches(c("/mnt/eng/after\0"), "after".ptr as *void, 5) &&
+        cfst_read_matches(old, "old".ptr as *void, 3))) {
+        return failed(
+            reason,
+            "check failed: read_matches(ENG \"/after\", \"after\", 5) && ...(ENG \"/old\", \"old\", 3) at line 1213\0",
+        );
     }
-    KernelLog.write(LogLevel.Info,
-        "selftest: cosmofs-fallback: an unreadable generation-3 tree fell back to generation 2 and was replaced");
+    KernelLog.write(
+        LogLevel.Info,
+        "selftest: cosmofs-fallback: an unreadable generation-3 tree fell back to generation 2 and was replaced",
+    );
     return cfst_engine_unmount(bd, reason);
 }
 
@@ -1277,14 +1369,18 @@ unsafe fn selftestWriteback(reason: *mut *CChar) -> bool {
         }
     }
     if (!(sv(st1).generation == sv(st0).generation + 1 && sv(st1).wb_commits == sv(st0).wb_commits + 1)) {
-        return failed(reason,
-            "check failed: st1.generation == st0.generation + 1 && st1.wb_c...ts == st0.wb_commits + 1 at line 1256\0");
+        return failed(
+            reason,
+            "check failed: st1.generation == st0.generation + 1 && st1.wb_c...ts == st0.wb_commits + 1 at line 1256\0",
+        );
     }
     // Nothing more dirty: no further commits happen on their own.
     thread_sleep_ns(200000000);
     if (!(cfst_stats(mnt, st2 as *mut cosmofs_stats) == 0 && sv(st2).generation == sv(st1).generation)) {
-        return failed(reason,
-            "check failed: cosmofs_stats(mnt, &st2) == 0 && st2.generation == st1.generation at line 1262\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_stats(mnt, &st2) == 0 && st2.generation == st1.generation at line 1262\0",
+        );
     }
     // The data is on disk without anyone calling sync.
     cosmofs_test_discard_on_unmount(mnt, true);

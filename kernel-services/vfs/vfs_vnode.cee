@@ -15,9 +15,11 @@
 // wait_floor_until_killable_timeout; a debug build's poisoning of a freed vnode and a release build's idle seam are
 // `cfg` blocks (§3.3).
 
-@header("kernel/errno.h", "kernel/kmalloc.h", "kernel/list.h", "kernel/log.h", "kernel/mutex.h",
+@header(
+    "kernel/errno.h", "kernel/kmalloc.h", "kernel/list.h", "kernel/log.h", "kernel/mutex.h",
     "kernel/object.h", "kernel/pagecache.h", "kernel/process.h", "kernel/string.h", "kernel/thread.h",
-    "kernel/timer.h", "kernel/vfs.h", "kernel/wait.h")
+    "kernel/timer.h", "kernel/vfs.h", "kernel/wait.h",
+)
 extern "C" {
     struct waitqueue;
     struct thread;
@@ -113,8 +115,10 @@ extern "C" {
     fn vfs_mount_orphan_kick();
     /// wait.h's wait_event_killable_timeout, for a condition a callback tests: 0, -EINTR when the process is being
     /// killed, -ETIMEDOUT after `ns`.
-    fn wait_floor_until_killable_timeout(wq: *mut waitqueue, cond: extern "C" fn(*mut void) -> bool, arg: *mut void,
-        ns: u64) -> i32;
+    fn wait_floor_until_killable_timeout(
+        wq: *mut waitqueue, cond: extern "C" fn(*mut void) -> bool, arg: *mut void,
+        ns: u64,
+    ) -> i32;
 
     // The values and layout the C compiler checks (ADR 0080 §3.1), which the floor asserted.
     const EINTR: i32 = 4;
@@ -485,8 +489,10 @@ unsafe fn mineLocked() -> bool {
     if (PROC != 0) {
         return p as usize as u64 == PROC;
     }
-    return strcmp(borrow Ptr.toBorrow(p as *process).name as *[u8; 32] as *CChar,
-        borrow NAME as *[u8; 32] as *CChar) == 0;
+    return strcmp(
+        borrow Ptr.toBorrow(p as *process).name as *[u8; 32] as *CChar,
+        borrow NAME as *[u8; 32] as *CChar,
+    ) == 0;
 }
 
 /// The held walk's wait ends here.
@@ -613,7 +619,8 @@ unsafe fn swapperEnter() {
     // come, and wrote that timeout into the record.
     let p = process_current();
     if (p.isNull() || Ptr.toBorrow(borrow mut Ptr.toBorrowMut(p).nr_threads as *mut u32 as *AtomicU32).loadWith(
-        LoadOrdering.Acquire) < 2) {
+        LoadOrdering.Acquire,
+    ) < 2) {
         return;
     }
     let lock = cwdLock();

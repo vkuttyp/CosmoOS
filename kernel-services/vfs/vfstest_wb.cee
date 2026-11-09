@@ -7,9 +7,11 @@
 // cosmofs on a RAM block device, which completes every bio in its submitter's context, so FI_BLK_COMPLETE scoped to
 // this thread refuses exactly the next `budget` write-backs this thread issues.
 
-@header("kernel/cosmofs.h", "kernel/faultinject.h", "kernel/handle.h", "kernel/kmalloc.h", "kernel/log.h",
+@header(
+    "kernel/cosmofs.h", "kernel/faultinject.h", "kernel/handle.h", "kernel/kmalloc.h", "kernel/log.h",
     "kernel/page.h", "kernel/pagecache.h", "kernel/ramblk.h", "kernel/string.h", "kernel/vfs.h", "kernel/completion.h",
-    "kernel/errno.h", "kernel/syscall.h", "kernel/thread.h", "kernel/types.h", "kernel/utsns.h", "uapi/cosmo/fsctl.h")
+    "kernel/errno.h", "kernel/syscall.h", "kernel/thread.h", "kernel/types.h", "kernel/utsns.h", "uapi/cosmo/fsctl.h",
+)
 extern "C" {
     struct pagecache {
         nr_dirty: u32;
@@ -145,7 +147,7 @@ unsafe fn injectEnd() -> u64 {
 const PAGE_I: i64 = 4096;
 const PAGE_U: u64 = 4096;
 const MS: u64 = 1000000;
-const MODE_DIR: u32 = 0x1ED; // 0755
+const MODE_DIR: u32 = 0x1ED;  // 0755
 const MODE_FILE: u32 = 0x1A4; // 0644
 
 /// Safety: `reason` is writable; `why` ends in a zero byte.
@@ -279,8 +281,10 @@ unsafe fn selftestWbErrorFsync(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: vfs_open(NULL, \"/mnt/wb/f\", ..., 0644, &f) == 0 at line 235\0");
     }
     if (!(file_write(f, data as *void, 3 * PAGE) == 3 * PAGE_I)) {
-        return failed2(reason, "check failed: file_write(f, data, 3 * PAGE_SIZE) == 3 * (int64_t)PAGE_SIZE at line ",
-            "237\0");
+        return failed2(
+            reason, "check failed: file_write(f, data, 3 * PAGE_SIZE) == 3 * (int64_t)PAGE_SIZE at line ",
+            "237\0",
+        );
     }
     if (!(dirty(f) == 3)) {
         return failed(reason, "check failed: f->vn->pc.nr_dirty == 3 at line 242\0");
@@ -554,8 +558,10 @@ unsafe fn selftestWbErrorLost(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: file_sync(f) == 0 at line 501\0");
     }
     filePut(f);
-    KernelLog.write(LogLevel.Info,
-        "selftest: wb-error-lost: one page lost after three refusals, counted; the mount still writes");
+    KernelLog.write(
+        LogLevel.Info,
+        "selftest: wb-error-lost: one page lost after three refusals, counted; the mount still writes",
+    );
     kfree(page as *mut void);
     wbTeardown(bd);
     return true;
@@ -714,8 +720,10 @@ unsafe fn dirtyBound(reason: *mut *CChar, st: borrow mut DbState) -> bool {
     while (i < DB_WRITES) {
         dbNoise(st.buf, 65536, i);
         if (!(file_pread(st.a, st.back as *mut void, 65536, i as u64 * 65536) == 65536)) {
-            return failed2(reason, "check failed: file_pread(a, back, 65536, (uint64_t)i * 65536) == 65536 at line ",
-                "662\0");
+            return failed2(
+                reason, "check failed: file_pread(a, back, 65536, (uint64_t)i * 65536) == 65536 at line ",
+                "662\0",
+            );
         }
         if (!(memcmp(st.back as *void, st.buf as *void, 65536) == 0)) {
             return failed(reason, "check failed: memcmp(back, buf, 65536) == 0 at line 668\0");
@@ -733,8 +741,10 @@ unsafe fn dirtyBound(reason: *mut *CChar, st: borrow mut DbState) -> bool {
     for (k in 0..(bound + 32) / 16) {
         dbNoise(st.buf, 65536, truncate<u32>(1000 + k));
         if (!(file_pwrite_held(st.a, st.buf as *void, 65536, k * 65536) == 65536)) { // past the bound, unthrottled
-            return failed2(reason, "check failed: file_pwrite_held(a, buf, 65536, (uint64_t)i * 65536) == 65536 at ",
-                "line 0\0");
+            return failed2(
+                reason, "check failed: file_pwrite_held(a, buf, 65536, (uint64_t)i * 65536) == 65536 at ",
+                "line 0\0",
+            );
         }
     }
     if (!(pagecache_dirty_pages() >= bound)) {
@@ -744,8 +754,10 @@ unsafe fn dirtyBound(reason: *mut *CChar, st: borrow mut DbState) -> bool {
         return failed(reason, "check failed: vfs_open(NULL, \"/mnt/db/waits\", ..., 0644, &b) == 0 at line 691\0");
     }
     var sy = DbSyncer { f: st.a, rc: -1 };
-    let t = thread_create(dbSyncerThread, borrow mut sy as *mut DbSyncer as *mut void, c("db-syncer\0"),
-        SCHED_PRIO_DEFAULT);
+    let t = thread_create(
+        dbSyncerThread, borrow mut sy as *mut DbSyncer as *mut void, c("db-syncer\0"),
+        SCHED_PRIO_DEFAULT,
+    );
     if (!(!t.isNull())) {
         return failed(reason, "check failed: t != NULL at line 697\0");
     }
@@ -851,12 +863,16 @@ unsafe fn readBench(reason: *mut *CChar, buf: *mut u8) -> bool {
     filePut(f);
     for (i in 0..3 as u32) {
         if (!(remount(bd))) {
-            return failed2(reason, "check failed: vfs_umount(\"/mnt/wb\") == 0 && vfs_mount(... bd ...) == 0 at line ",
-                "0\0");
+            return failed2(
+                reason, "check failed: vfs_umount(\"/mnt/wb\") == 0 && vfs_mount(... bd ...) == 0 at line ",
+                "0\0",
+            );
         }
         if (!(open("/mnt/wb/bench\0", O_RDONLY, 0, borrow mut f as *mut *mut file) == 0)) {
-            return failed2(reason, "check failed: vfs_open(NULL, \"/mnt/wb/bench\", COSMO_O_RDONLY, 0, &f) == 0 at ",
-                "line 0\0");
+            return failed2(
+                reason, "check failed: vfs_open(NULL, \"/mnt/wb/bench\", COSMO_O_RDONLY, 0, &f) == 0 at ",
+                "line 0\0",
+            );
         }
         benchPass("cosmofs cold", f, buf, benchReq(i), false);
         benchPass("cosmofs warm", f, buf, benchReq(i), false);
@@ -892,8 +908,10 @@ unsafe fn selftestWriteBench(reason: *mut *CChar) -> bool {
         let flags = O_WRONLY | O_CREAT | O_TRUNC;
         if (!(open("/tmp/wbench.bin\0", flags, MODE_FILE, borrow mut f as *mut *mut file) == 0)) {
             kfree(buf as *mut void);
-            return failed2(reason, "check failed: vfs_open(NULL, \"/tmp/wbench.bin\", ..., 0644, &f) == 0 at line ",
-                "838\0");
+            return failed2(
+                reason, "check failed: vfs_open(NULL, \"/tmp/wbench.bin\", ..., 0644, &f) == 0 at line ",
+                "838\0",
+            );
         }
         benchPass("ramfs", f, buf, benchReq(i), true);
         filePut(f);
@@ -957,8 +975,10 @@ unsafe fn selftestPagecachePinned(reason: *mut *CChar) -> bool {
     }
     let hp = Ptr.toBorrow(held as *page);
     if (!(!held.isNull() && (hp.flags & PG_PAGECACHE) != 0 && hp.refcount == 2)) {
-        return failed2(reason, "check failed: held != NULL && (held->flags & PG_PAGECACHE) && held->refcount == 2 at ",
-            "line 0\0");
+        return failed2(
+            reason, "check failed: held != NULL && (held->flags & PG_PAGECACHE) && held->refcount == 2 at ",
+            "line 0\0",
+        );
     }
     // Past the end: the bound, not a zero page.
     var none = 0 as *mut page;
@@ -978,8 +998,10 @@ unsafe fn selftestPagecachePinned(reason: *mut *CChar) -> bool {
     pagecache_set_limit(if (p0.pages > (npages / 2) as u64) p0.pages - (npages / 2) as u64 else 1);
     for (i in 0..npages) {
         if (!(file_pread(f, buf, PAGE, i as u64 * PAGE_U) == PAGE_I)) {
-            return failed2(reason, "check failed: file_pread(f, buf, PAGE_SIZE, (uint64_t)i * PAGE_SIZE) == PAGE_SIZE ",
-                "at line 929\0");
+            return failed2(
+                reason, "check failed: file_pread(f, buf, PAGE_SIZE, (uint64_t)i * PAGE_SIZE) == PAGE_SIZE ",
+                "at line 929\0",
+            );
         }
     }
     let p1 = stats(mut s1b);
@@ -1006,8 +1028,10 @@ unsafe fn selftestPagecachePinned(reason: *mut *CChar) -> bool {
     for (i in 0..npages) {
         if (!(file_pread(f, buf, PAGE, i as u64 * PAGE_U) == PAGE_I)) {
             pagecache_set_limit(saved);
-            return failed2(reason, "check failed: file_pread(f, buf, PAGE_SIZE, (uint64_t)i * PAGE_SIZE) == PAGE_SIZE ",
-                "at line 957\0");
+            return failed2(
+                reason, "check failed: file_pread(f, buf, PAGE_SIZE, (uint64_t)i * PAGE_SIZE) == PAGE_SIZE ",
+                "at line 957\0",
+            );
         }
     }
     let p3 = stats(mut s3b);
@@ -1027,7 +1051,9 @@ unsafe fn selftestPagecachePinned(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: vfs_rmdir(NULL, \"/mnt/pin\") == 0 at line 974\0");
     }
     ramblk_destroy(bd);
-    KernelLog.write(LogLevel.Info,
-        "selftest: pagecache-pinned: a referenced frame survives reclaim and goes when the reference does");
+    KernelLog.write(
+        LogLevel.Info,
+        "selftest: pagecache-pinned: a referenced frame survives reclaim and goes when the reference does",
+    );
     return true;
 }

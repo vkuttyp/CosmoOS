@@ -55,7 +55,7 @@ struct wait_entry {
 @repr(C)
 struct waitqueue {
     lock: spinlock_t;
-    waiters: list_node; // sleeping threads
+    waiters: list_node;   // sleeping threads
     callbacks: list_node; // callback entries, run by every wake
 }
 
@@ -67,7 +67,8 @@ struct wait_timeout {
 }
 
 /// Safety: `wq` is a live queue; the lock is the queue's.
-unsafe fn lock(wq: *mut waitqueue) -> usize => spin_lock_irqsave(borrow mut Ptr.toBorrowMut(wq).lock as *mut spinlock_t);
+unsafe fn lock(wq: *mut waitqueue) -> usize =>
+    spin_lock_irqsave(borrow mut Ptr.toBorrowMut(wq).lock as *mut spinlock_t);
 
 /// Safety: the caller holds `wq`'s lock, taken with `state`.
 unsafe fn unlock(wq: *mut waitqueue, state: usize) {
@@ -89,7 +90,8 @@ unsafe fn after(head: *mut list_node, node: *mut list_node) -> *mut list_node {
 
 /// The entry whose `link` is `node`.
 /// Safety: `node` is a wait entry's link.
-unsafe fn entryOf(node: *mut list_node) -> *mut wait_entry => (node as *mut u8).sub(offsetOf<wait_entry>(link)) as *mut wait_entry;
+unsafe fn entryOf(node: *mut list_node) -> *mut wait_entry =>
+    (node as *mut u8).sub(offsetOf<wait_entry>(link)) as *mut wait_entry;
 
 /// Safety: `wq` points to storage for a queue nothing uses yet; `name` outlives it.
 @export("waitqueue_init")
@@ -294,4 +296,5 @@ unsafe fn timeoutFired(t: *mut timer, arg: *mut void) {
 
 /// Safety: `wt` is a live wait_timeout.
 @export("wait_timeout_expired")
-unsafe fn timeoutExpired(wt: *wait_timeout) -> bool => expiredOf(wt as *mut wait_timeout).loadWith(LoadOrdering.Acquire) != 0;
+unsafe fn timeoutExpired(wt: *wait_timeout) -> bool =>
+    expiredOf(wt as *mut wait_timeout).loadWith(LoadOrdering.Acquire) != 0;

@@ -57,7 +57,8 @@ struct handle_table {
 
 /// Takes the table's lock; the result is the interrupt state to restore.
 /// Safety: `t` is an initialised table.
-unsafe fn lock(t: *mut handle_table) -> usize => spin_lock_irqsave(borrow mut Ptr.toBorrowMut(t).lock as *mut spinlock_t);
+unsafe fn lock(t: *mut handle_table) -> usize =>
+    spin_lock_irqsave(borrow mut Ptr.toBorrowMut(t).lock as *mut spinlock_t);
 
 /// Safety: the caller holds `t`'s lock, taken with `state`.
 unsafe fn unlock(t: *mut handle_table, state: usize) {
@@ -166,7 +167,8 @@ fn installFlags(t: *mut handle_table, obj: *mut kobject, rights: u32, flags: u32
 
 /// Safety: as handle_install_at_flags.
 @export("handle_install_at")
-fn installAt(t: *mut handle_table, h: i32, obj: *mut kobject, rights: u32) -> i32 => installAtFlags(t, h, obj, rights, 0);
+fn installAt(t: *mut handle_table, h: i32, obj: *mut kobject, rights: u32) -> i32 =>
+    installAtFlags(t, h, obj, rights, 0);
 
 /// A reference to `obj` in slot `h`: -EBADF out of range or once exiting, -EBUSY if the slot is taken.
 /// Safety: as handle_install_flags.
@@ -254,7 +256,8 @@ unsafe fn getWith(t: *mut handle_table, h: i32, rights: *mut u32, flags: *mut u3
 
 /// Safety: `t` is an initialised table; `rights` is writable.
 @export("handle_get")
-fn get(t: *mut handle_table, h: i32, rights: *mut u32) -> *mut kobject => unsafe { getWith(t, h, rights, 0 as *mut u32) };
+fn get(t: *mut handle_table, h: i32, rights: *mut u32) -> *mut kobject =>
+    unsafe { getWith(t, h, rights, 0 as *mut u32) };
 
 /// Safety: `t` is an initialised table; `rights` and `flags` are writable.
 @export("handle_get_flags")

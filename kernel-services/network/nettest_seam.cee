@@ -8,7 +8,21 @@
 // structs, one in the test's frame) are static, so no thread or seam outlives what it reads; a C counter struct or
 // listing is read into a room.
 
-@header("nettest.h", "kernel/net/inet.h", "kernel/net/ip.h", "kernel/net/tcp.h", "kernel/net/tap.h", "kernel/net/nat.h", "kernel/net/fw.h", "kernel/netif.h", "kernel/mbuf.h", "kernel/random.h", "kernel/vfs.h", "kernel/selftest.h", "kernel/thread.h")
+@header(
+    "nettest.h",
+    "kernel/net/inet.h",
+    "kernel/net/ip.h",
+    "kernel/net/tcp.h",
+    "kernel/net/tap.h",
+    "kernel/net/nat.h",
+    "kernel/net/fw.h",
+    "kernel/netif.h",
+    "kernel/mbuf.h",
+    "kernel/random.h",
+    "kernel/vfs.h",
+    "kernel/selftest.h",
+    "kernel/thread.h",
+)
 extern "C" {
     struct thread;
     struct tap;

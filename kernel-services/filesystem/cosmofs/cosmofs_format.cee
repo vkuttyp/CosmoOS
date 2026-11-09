@@ -9,8 +9,10 @@
 // zeroed slot of words, checked against its C size: a CeeSafe local cannot hold C state. The user key the C passed
 // through two statics is a parameter here, which is what the statics were standing in for.
 
-@header("kernel/blk.h", "kernel/storage.h", "kernel/kmalloc.h", "kernel/random.h", "kernel/string.h",
-    "kernel/cosmofs.h", "uapi/cosmo/keyslot.h", "cosmofs_internal.h")
+@header(
+    "kernel/blk.h", "kernel/storage.h", "kernel/kmalloc.h", "kernel/random.h", "kernel/string.h",
+    "kernel/cosmofs.h", "uapi/cosmo/keyslot.h", "cosmofs_internal.h",
+)
 extern "C" {
     struct blkdev {
         name: [u8; 16];
@@ -77,12 +79,20 @@ extern "C" {
     fn cfs_mhdr_seal(fs: *mut cfs, block: *mut u8, kind: u32, blkno: u64);
     fn cfs_super_write(fs: *mut cfs, slot: u32, flags: u32) -> i32;
     fn cfs_block_crc(block: *u8, crcAt: usize) -> u32;
-    fn cfs_label_write(pool: *mut spool, mac: *cfs_mac, vdev: u32, copy: u32, generation: u64, uuid: *u8,
-        nblocks: u64) -> i32;
+    fn cfs_label_write(
+        pool: *mut spool, mac: *cfs_mac, vdev: u32, copy: u32, generation: u64, uuid: *u8,
+        nblocks: u64,
+    ) -> i32;
     fn cfs_mac_derive(master: *u8, out: *mut cfs_mac);
     fn cfs_keyslot_valid(index: u32, s: *cfs_keyslot) -> bool;
-    fn cfs_keys2_write(pool: *mut spool, mac: *cfs_mac, dva: u64, generation: u64, uuid: *u8, slots: *cfs_keyslot)
-        -> i32;
+    fn cfs_keys2_write(
+        pool: *mut spool,
+        mac: *cfs_mac,
+        dva: u64,
+        generation: u64,
+        uuid: *u8,
+        slots: *cfs_keyslot,
+    ) -> i32;
     fn cfs_keys_write(pool: *mut spool, dva: u64, generation: u64, master: *u8, userKey: *void, keyLen: usize) -> i32;
     fn cfs_keytab_install(uuid: *u8, master: *u8) -> i32;
     fn cfs_need_seeded(what: *CChar) -> i32;
@@ -192,8 +202,10 @@ fn seededWhat() -> *CChar => "create an encrypted pool\0".ptr as *CChar;
 /// with; null for a filesystem in the clear.
 /// Safety: `bd` is `n * copies` devices; `label` null or a terminated string; `fk` null or a key set; `userKey` null or
 /// `keyLen` readable bytes.
-unsafe fn formatAt(bd: *mut *mut blkdev, n: u32, copies: u32, version0: u32, label: *CChar, fk: *cfs_format_keys,
-    userKey: *void, keyLen: usize) -> i32 {
+unsafe fn formatAt(
+    bd: *mut *mut blkdev, n: u32, copies: u32, version0: u32, label: *CChar, fk: *cfs_format_keys,
+    userKey: *void, keyLen: usize,
+) -> i32 {
     if (n == 0 || n > CFS_MAX_MEMBERS || copies == 0 || copies > CFS_MAX_COPIES) {
         return -EINVAL;
     }
@@ -429,8 +441,10 @@ unsafe fn formatAt(bd: *mut *mut blkdev, n: u32, copies: u32, version0: u32, lab
     }
     // The installer mounts what it just made: the key is loaded, as the boot's unlock would load it.
     if (rc == 0 && keyed) {
-        rc = cfs_keytab_install(borrow uuid as *[u8; 16] as *u8,
-            borrow Ptr.toBorrow(fk).master as *[u8; 32] as *u8);
+        rc = cfs_keytab_install(
+            borrow uuid as *[u8; 16] as *u8,
+            borrow Ptr.toBorrow(fk).master as *[u8; 32] as *u8,
+        );
     }
     memset(borrow mut Ptr.toBorrowMut(tmp).mac as *mut cfs_mac as *mut void, 0, layoutOf<cfs_mac>().size);
     kfree(block as *mut void);
@@ -484,8 +498,10 @@ unsafe fn formatMirrorDevs(bd: *mut *mut blkdev, n: u32, label: *CChar) -> i32 {
 @export("cosmofs_format")
 unsafe fn format(bd: *mut blkdev) -> i32 {
     var one = bd;
-    return formatAt(borrow mut one as *mut *mut blkdev, 1, 1, CFS_FORMAT_VERSION, 0 as *CChar, 0 as *cfs_format_keys,
-        0 as *void, 0);
+    return formatAt(
+        borrow mut one as *mut *mut blkdev, 1, 1, CFS_FORMAT_VERSION, 0 as *CChar, 0 as *cfs_format_keys,
+        0 as *void, 0,
+    );
 }
 
 /// A single-device pool named `label` (null or "" for none): the fs_type's format, which /dev/blkctl reaches (shell
@@ -497,8 +513,10 @@ unsafe fn formatLabel(bd: *mut blkdev, label: *CChar) -> i32 {
         return -EINVAL;
     }
     var one = bd;
-    return formatAt(borrow mut one as *mut *mut blkdev, 1, 1, CFS_FORMAT_VERSION, label, 0 as *cfs_format_keys,
-        0 as *void, 0);
+    return formatAt(
+        borrow mut one as *mut *mut blkdev, 1, 1, CFS_FORMAT_VERSION, label, 0 as *cfs_format_keys,
+        0 as *void, 0,
+    );
 }
 
 /// Format with encryption: a random master key, wrapped with `key`.
@@ -513,8 +531,10 @@ unsafe fn formatEncrypted(bd: *mut blkdev, key: *void, len: usize) -> i32 {
         return rc;
     }
     var one = bd;
-    return formatAt(borrow mut one as *mut *mut blkdev, 1, 1, CFS_FORMAT_VERSION, 0 as *CChar, 0 as *cfs_format_keys,
-        key, len);
+    return formatAt(
+        borrow mut one as *mut *mut blkdev, 1, 1, CFS_FORMAT_VERSION, 0 as *CChar, 0 as *cfs_format_keys,
+        key, len,
+    );
 }
 
 /// An encrypted pool (roadmap 1.2 B5): one member on `n` devices (a mirror when n is 2), version 14, the slots as user
@@ -576,8 +596,14 @@ unsafe fn keySetFree(fk: *mut u8) {
 /// Safety: `bd` is `n` devices; `label` null or a terminated string; `uuid` 16 bytes, `master` 32, `slots` the key
 /// slots.
 @export("cosmofs_format_keys")
-unsafe fn formatKeys(bd: *mut *mut blkdev, n: u32, label: *CChar, uuid: *u8, master: *u8, slots: *cosmo_keyslot)
-    -> i32 {
+unsafe fn formatKeys(
+    bd: *mut *mut blkdev,
+    n: u32,
+    label: *CChar,
+    uuid: *u8,
+    master: *u8,
+    slots: *cosmo_keyslot,
+) -> i32 {
     let fk = keySet(uuid, master, slots);
     if (fk.isNull()) {
         return -ENOMEM;
@@ -592,8 +618,13 @@ unsafe fn formatKeys(bd: *mut *mut blkdev, n: u32, label: *CChar, uuid: *u8, mas
 /// Safety: as formatKeys.
 @cfg("CONFIG_DEBUG")
 @export("cosmofs_test_format_keyed_members")
-unsafe fn testFormatKeyedMembers(bd: *mut *mut blkdev, members: u32, uuid: *u8, master: *u8, slots: *cosmo_keyslot)
-    -> i32 {
+unsafe fn testFormatKeyedMembers(
+    bd: *mut *mut blkdev,
+    members: u32,
+    uuid: *u8,
+    master: *u8,
+    slots: *cosmo_keyslot,
+) -> i32 {
     let fk = keySet(uuid, master, slots);
     if (fk.isNull()) {
         return -ENOMEM;
@@ -612,8 +643,10 @@ unsafe fn testFormatVersion(bd: *mut blkdev, version: u32) -> i32 {
         return -EINVAL;
     }
     var one = bd;
-    return formatAt(borrow mut one as *mut *mut blkdev, 1, 1, version, 0 as *CChar, 0 as *cfs_format_keys, 0 as *void,
-        0);
+    return formatAt(
+        borrow mut one as *mut *mut blkdev, 1, 1, version, 0 as *CChar, 0 as *cfs_format_keys, 0 as *void,
+        0,
+    );
 }
 
 /// A block read and given a fresh CRC32C at `crcAt` after `edit` changed it, written back and flushed.

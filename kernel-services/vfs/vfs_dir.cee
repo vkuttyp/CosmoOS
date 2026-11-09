@@ -9,8 +9,10 @@
 //
 // The vnodes stay C (vfs.h). The values this file writes as its own constants are the headers', which C checks.
 
-@header("kernel/cred.h", "kernel/errno.h", "kernel/lockdep.h", "kernel/mutex.h", "kernel/string.h",
-    "kernel/types.h", "kernel/vfs.h")
+@header(
+    "kernel/cred.h", "kernel/errno.h", "kernel/lockdep.h", "kernel/mutex.h", "kernel/string.h",
+    "kernel/types.h", "kernel/vfs.h",
+)
 extern "C" {
     enum vnode_type: u32;
     struct cosmo_stat;
@@ -73,8 +75,10 @@ extern "C" {
     fn vfs_permission(vn: *vnode, mask: u32) -> i32;
     fn vfs_lookup(start: *mut vnode, path: *CChar, out: *mut *mut vnode) -> i32;
     fn vfs_lookup_nofollow(start: *mut vnode, path: *CChar, out: *mut *mut vnode) -> i32;
-    fn vfs_walk_parent(start: *mut vnode, path: *CChar, namebuf: *mut CChar, parent: *mut *mut vnode,
-        lastLen: *mut usize, trailingSlash: *mut bool) -> i32;
+    fn vfs_walk_parent(
+        start: *mut vnode, path: *CChar, namebuf: *mut CChar, parent: *mut *mut vnode,
+        lastLen: *mut usize, trailingSlash: *mut bool,
+    ) -> i32;
     fn vfs_dot_name(name: *CChar, len: usize) -> bool;
     fn vfs_text_busy_locked(vn: *mut vnode) -> bool;
     fn vfs_covering_mount(dir: *vnode) -> *mut mount;
@@ -161,8 +165,10 @@ unsafe fn stickyDenies(dir: *mut vnode, entry: *mut vnode) -> bool {
 /// Resolve the parent directory for a mutation. The last component is copied into `namebuf` (VFS_NAME_MAX + 1) and is
 /// never followed: these calls name an entry in a directory, not what it points at.
 /// Safety: `start` null or a directory the caller holds; `path` null or NUL-terminated; the rest writable.
-unsafe fn parentForMutation(start: *mut vnode, path: *CChar, namebuf: *mut CChar, parent: *mut *mut vnode,
-    len: *mut usize) -> i32 {
+unsafe fn parentForMutation(
+    start: *mut vnode, path: *CChar, namebuf: *mut CChar, parent: *mut *mut vnode,
+    len: *mut usize,
+) -> i32 {
     var rc = vfs_walk_parent(start, path, namebuf, parent, len, 0 as *mut bool);
     if (rc != 0) {
         return rc;
@@ -308,8 +314,10 @@ unsafe fn mknod(start: *mut vnode, path: *CChar, mode: u32, nodeType: vnode_type
             vn = 0 as *mut vnode;
             rc = -EEXIST;
         } else if (rc == -ENOENT) {
-            rc = Ptr.toBorrow(ops).mknod(parent, name as *CChar, len, mode & 0o7777, nodeType,
-                borrow mut vn as *mut *mut vnode);
+            rc = Ptr.toBorrow(ops).mknod(
+                parent, name as *CChar, len, mode & 0o7777, nodeType,
+                borrow mut vn as *mut *mut vnode,
+            );
         }
     }
     mutex_unlock(lockOf(parent));
@@ -429,7 +437,13 @@ unsafe fn rename2(ostart: *mut vnode, oldpath: *CChar, nstart: *mut vnode, newpa
     let nname = borrow mut nlast as *mut [u8; 256] as *mut CChar;
     var olen: usize = 0;
     var nlen: usize = 0;
-    var rc = parentForMutation(ostart, oldpath, oname, borrow mut odir as *mut *mut vnode, borrow mut olen as *mut usize);
+    var rc = parentForMutation(
+        ostart,
+        oldpath,
+        oname,
+        borrow mut odir as *mut *mut vnode,
+        borrow mut olen as *mut usize,
+    );
     if (rc != 0) {
         return rc;
     }
@@ -458,8 +472,14 @@ unsafe fn rename2(ostart: *mut vnode, oldpath: *CChar, nstart: *mut vnode, newpa
 /// The rename itself, under the mount's rename_lock, retried while the entry is replaced between its two looks.
 /// Safety: `odir` and `ndir` are writable directories of one mount the caller holds; its rename_lock held; the names
 /// hold their lengths.
-unsafe fn renameLocked(odir: *mut vnode, oname: *CChar, olen: usize, ndir: *mut vnode, nname: *CChar, nlen: usize)
-    -> i32 {
+unsafe fn renameLocked(
+    odir: *mut vnode,
+    oname: *CChar,
+    olen: usize,
+    ndir: *mut vnode,
+    nname: *CChar,
+    nlen: usize,
+) -> i32 {
     var rc: i32 = 0;
     var attempt: u32 = 0;
     loop {
@@ -513,7 +533,10 @@ unsafe fn renameLocked(odir: *mut vnode, oname: *CChar, olen: usize, ndir: *mut 
                 rc = -EBUSY;
             } else if (stickyDenies(odir, victim)) {
                 rc = -EACCES;
-            } else if (kindOf(victim) == VNODE_DIR && odir != ndir && vfs_permission(victim as *vnode, VFS_MAY_WRITE) != 0) {
+            } else if (kindOf(victim) == VNODE_DIR && odir != ndir && vfs_permission(
+                victim as *vnode,
+                VFS_MAY_WRITE,
+            ) != 0) {
                 rc = -EACCES; // moving a directory rewrites its ".."
             } else if (opLookup(ndir, nname, nlen, borrow mut replaced as *mut *mut vnode) == 0) {
                 if (replaced == victim) {
@@ -718,8 +741,10 @@ unsafe fn link(ostart: *mut vnode, oldpath: *CChar, nstart: *mut vnode, newpath:
     var last: [u8; 256] = [0; 256];
     let name = borrow mut last as *mut [u8; 256] as *mut CChar;
     var len: usize = 0;
-    rc = vfs_walk_parent(nstart, newpath, name, borrow mut parent as *mut *mut vnode, borrow mut len as *mut usize,
-        0 as *mut bool);
+    rc = vfs_walk_parent(
+        nstart, newpath, name, borrow mut parent as *mut *mut vnode, borrow mut len as *mut usize,
+        0 as *mut bool,
+    );
     if (rc != 0) {
         vnode_put(target);
         return rc;

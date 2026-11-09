@@ -9,8 +9,10 @@
 // through /dev/fsctl. All of them run in a debug build only; the layout this file writes as constants is the headers',
 // which the C compiler checks (ADR 0080).
 
-@header("kernel/blk.h", "kernel/vfs.h", "kernel/kmalloc.h", "kernel/ramblk.h", "kernel/string.h", "kernel/storage.h",
-    "kernel/cosmofs.h", "uapi/cosmo/syscall.h", "uapi/cosmo/fsctl.h", "kernel/errno.h", "cosmofs_format.h")
+@header(
+    "kernel/blk.h", "kernel/vfs.h", "kernel/kmalloc.h", "kernel/ramblk.h", "kernel/string.h", "kernel/storage.h",
+    "kernel/cosmofs.h", "uapi/cosmo/syscall.h", "uapi/cosmo/fsctl.h", "kernel/errno.h", "cosmofs_format.h",
+)
 extern "C" {
     struct blkdev;
     struct mount {
@@ -113,16 +115,24 @@ extern "C" {
     @cvalue("COSMO_O_RDONLY == 0 && COSMO_O_RDWR == 2")
     const COSMOFSTEST_ORPHAN_FACT_0: bool = true;
     /// cosmofstest_orphan.cee's cosmofs_format.h and cosmofs.h values
-    @cvalue("COSMOFS_CHECK_REPAIR == 1 && COSMOFS_CORRUPT_LEAK == 0 && COSMOFS_CORRUPT_ORPHAN == 4 && COSMOFS_CORRUPT_INO_SLOT == 8 && sizeof(struct cfs_dirent) == 64 && offsetof(struct cfs_dirent, ino) == 0 && offsetof(struct cfs_dirent, namelen) == 9 && offsetof(struct cfs_dirent, name) == 16")
+    @cvalue(
+        "COSMOFS_CHECK_REPAIR == 1 && COSMOFS_CORRUPT_LEAK == 0 && COSMOFS_CORRUPT_ORPHAN == 4 && COSMOFS_CORRUPT_INO_SLOT == 8 && sizeof(struct cfs_dirent) == 64 && offsetof(struct cfs_dirent, ino) == 0 && offsetof(struct cfs_dirent, namelen) == 9 && offsetof(struct cfs_dirent, name) == 16",
+    )
     const COSMOFSTEST_ORPHAN_FACT_1: bool = true;
     /// cosmofstest_orphan.cee's fsctl.h values
-    @cvalue("COSMO_FSCTL_VERSION == 3 && COSMO_FSCTL_LIST == 1 && COSMO_FSCTL_CHECK == 2 && COSMO_FSCTL_SCRUB == 3 && COSMO_FSCTL_F_REPAIR == 1 && COSMO_FSCTL_CLASSES == 16 && COSMO_FSCTL_R_PARTIAL == 1 && COSMO_FSCTL_R_CLEAN == 2 && COSMO_FSCTL_R_REPAIR_REFUSED == 4")
+    @cvalue(
+        "COSMO_FSCTL_VERSION == 3 && COSMO_FSCTL_LIST == 1 && COSMO_FSCTL_CHECK == 2 && COSMO_FSCTL_SCRUB == 3 && COSMO_FSCTL_F_REPAIR == 1 && COSMO_FSCTL_CLASSES == 16 && COSMO_FSCTL_R_PARTIAL == 1 && COSMO_FSCTL_R_CLEAN == 2 && COSMO_FSCTL_R_REPAIR_REFUSED == 4",
+    )
     const COSMOFSTEST_ORPHAN_FACT_2: bool = true;
     /// cosmofstest_orphan.cee's fsctl.h command and result layout
-    @cvalue("sizeof(struct cosmo_fsctl) == 88 && sizeof(struct cosmo_fsctl) <= 11 * 8 && offsetof(struct cosmo_fsctl, version) == 0 && offsetof(struct cosmo_fsctl, op) == 2 && offsetof(struct cosmo_fsctl, flags) == 4 && offsetof(struct cosmo_fsctl, mount_id) == 8 && sizeof(struct cosmo_fsctl_result) == 16 && offsetof(struct cosmo_fsctl_result, kind) == 2 && offsetof(struct cosmo_fsctl_result, count) == 4 && offsetof(struct cosmo_fsctl_result, bytes) == 12")
+    @cvalue(
+        "sizeof(struct cosmo_fsctl) == 88 && sizeof(struct cosmo_fsctl) <= 11 * 8 && offsetof(struct cosmo_fsctl, version) == 0 && offsetof(struct cosmo_fsctl, op) == 2 && offsetof(struct cosmo_fsctl, flags) == 4 && offsetof(struct cosmo_fsctl, mount_id) == 8 && sizeof(struct cosmo_fsctl_result) == 16 && offsetof(struct cosmo_fsctl_result, kind) == 2 && offsetof(struct cosmo_fsctl_result, count) == 4 && offsetof(struct cosmo_fsctl_result, bytes) == 12",
+    )
     const COSMOFSTEST_ORPHAN_FACT_3: bool = true;
     /// cosmofstest_orphan.cee's fsctl.h check and scrub records
-    @cvalue("sizeof(struct cosmo_fsctl_check) == 1480 && offsetof(struct cosmo_fsctl_check, nclasses) == 0 && offsetof(struct cosmo_fsctl_check, flags) == 4 && offsetof(struct cosmo_fsctl_check, blocks_seen) == 8 && offsetof(struct cosmo_fsctl_check, inodes_seen) == 16 && offsetof(struct cosmo_fsctl_check, counted_free) == 40 && offsetof(struct cosmo_fsctl_check, class) == 72 && offsetof(struct cosmo_fsctl_class, count) == 0 && offsetof(struct cosmo_fsctl_class, repaired) == 8 && offsetof(struct cosmo_fsctl_class, name) == 16 && offsetof(struct cosmo_fsctl_class, named) == 80 && sizeof(struct cosmo_fsctl_scrub) == 32 && offsetof(struct cosmo_fsctl_scrub, blocks_read) == 0 && offsetof(struct cosmo_fsctl_scrub, unrecoverable) == 24")
+    @cvalue(
+        "sizeof(struct cosmo_fsctl_check) == 1480 && offsetof(struct cosmo_fsctl_check, nclasses) == 0 && offsetof(struct cosmo_fsctl_check, flags) == 4 && offsetof(struct cosmo_fsctl_check, blocks_seen) == 8 && offsetof(struct cosmo_fsctl_check, inodes_seen) == 16 && offsetof(struct cosmo_fsctl_check, counted_free) == 40 && offsetof(struct cosmo_fsctl_check, class) == 72 && offsetof(struct cosmo_fsctl_class, count) == 0 && offsetof(struct cosmo_fsctl_class, repaired) == 8 && offsetof(struct cosmo_fsctl_class, name) == 16 && offsetof(struct cosmo_fsctl_class, named) == 80 && sizeof(struct cosmo_fsctl_scrub) == 32 && offsetof(struct cosmo_fsctl_scrub, blocks_read) == 0 && offsetof(struct cosmo_fsctl_scrub, unrecoverable) == 24",
+    )
     const COSMOFSTEST_ORPHAN_FACT_4: bool = true;
 }
 
@@ -309,8 +319,10 @@ unsafe fn selftestOrphanCrash(reason: *mut *CChar) -> bool {
     }
     var f = 0 as *mut file;
     if (!(vfs_open(0 as *mut vnode, c("/mnt/eng/doomed\0"), O_RDONLY, 0, borrow mut f as *mut *mut file) == 0)) {
-        return failed2(reason, "check failed: vfs_open(NULL, ENG \"/doomed\", COSMO_O_RDONLY, 0, &f) == 0 ",
-            "at line 295\0");
+        return failed2(
+            reason, "check failed: vfs_open(NULL, ENG \"/doomed\", COSMO_O_RDONLY, 0, &f) == 0 ",
+            "at line 295\0",
+        );
     }
     if (!(vfs_unlink(0 as *mut vnode, c("/mnt/eng/doomed\0")) == 0)) {
         return failed(reason, "check failed: vfs_unlink(NULL, ENG \"/doomed\") == 0 at line 298\0");
@@ -400,8 +412,10 @@ unsafe fn selftestOrphanCancels(reason: *mut *CChar) -> bool {
     }
 
     if (!(cfst_write_file(c("/mnt/eng/plain\0"), "no handle on this one".ptr as *void, 21))) {
-        return failed2(reason, "check failed: cfst_write_file(ENG \"/plain\", \"no handle on this one\", 21) ",
-            "at line 386\0");
+        return failed2(
+            reason, "check failed: cfst_write_file(ENG \"/plain\", \"no handle on this one\", 21) ",
+            "at line 386\0",
+        );
     }
     if (!(vfs_sync() == 0)) {
         return failed(reason, "check failed: vfs_sync() == 0 at line 389\0");
@@ -473,8 +487,10 @@ unsafe fn selftestOrphanCancels(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: after.pending_orphans == 0 at line 455\0");
     }
 
-    say2("selftest: cosmofs-orphan-cancels: an unlink with nothing holding it wrote no record, one with a handle ",
-        "wrote and retired one");
+    say2(
+        "selftest: cosmofs-orphan-cancels: an unlink with nothing holding it wrote no record, one with a handle ",
+        "wrote and retired one",
+    );
     return cfst_engine_unmount(bd, reason);
 }
 
@@ -618,8 +634,10 @@ unsafe fn selftestOrphanRename(reason: *mut *CChar) -> bool {
 
     var f = 0 as *mut file;
     if (!(vfs_open(0 as *mut vnode, c("/mnt/eng/victim\0"), O_RDONLY, 0, borrow mut f as *mut *mut file) == 0)) {
-        return failed2(reason, "check failed: vfs_open(NULL, ENG \"/victim\", COSMO_O_RDONLY, 0, &f) == 0 ",
-            "at line 604\0");
+        return failed2(
+            reason, "check failed: vfs_open(NULL, ENG \"/victim\", COSMO_O_RDONLY, 0, &f) == 0 ",
+            "at line 604\0",
+        );
     }
     if (!(vfs_rename(0 as *mut vnode, c("/mnt/eng/winner\0"), c("/mnt/eng/victim\0")) == 0)) {
         return failed(reason, "check failed: vfs_rename(NULL, ENG \"/winner\", ENG \"/victim\") == 0 at line 607\0");
@@ -956,8 +974,10 @@ unsafe fn selftestOrphanSupersede(reason: *mut *CChar) -> bool {
     }
     var f = 0 as *mut file;
     if (!(cfst_write_file(c("/mnt/eng/held\0"), "open across all of it".ptr as *void, 21))) {
-        return failed2(reason, "check failed: cfst_write_file(ENG \"/held\", \"open across all of it\", 21) ",
-            "at line 942\0");
+        return failed2(
+            reason, "check failed: cfst_write_file(ENG \"/held\", \"open across all of it\", 21) ",
+            "at line 942\0",
+        );
     }
     if (!(vfs_open(0 as *mut vnode, c("/mnt/eng/held\0"), O_RDONLY, 0, borrow mut f as *mut *mut file) == 0)) {
         return failed(reason, "check failed: vfs_open(NULL, ENG \"/held\", COSMO_O_RDONLY, 0, &f) == 0 at line 945\0");
@@ -1124,8 +1144,10 @@ unsafe fn selftestOrphanSuspect(reason: *mut *CChar) -> bool {
     }
 
     if (!(cfst_write_file(c("/mnt/eng/live\0"), "still very much in use".ptr as *void, 22))) {
-        return failed2(reason, "check failed: cfst_write_file(ENG \"/live\", \"still very much in use\", 22) ",
-            "at line 1110\0");
+        return failed2(
+            reason, "check failed: cfst_write_file(ENG \"/live\", \"still very much in use\", 22) ",
+            "at line 1110\0",
+        );
     }
     if (!(vfs_sync() == 0)) {
         return failed(reason, "check failed: vfs_sync() == 0 at line 1113\0");
@@ -1159,8 +1181,10 @@ unsafe fn selftestOrphanSuspect(reason: *mut *CChar) -> bool {
 
     // The file is still there, with its contents and its name.
     if (!(cfst_read_matches(c("/mnt/eng/live\0"), "still very much in use".ptr as *void, 22))) {
-        return failed2(reason, "check failed: cfst_read_matches(ENG \"/live\", \"still very much in use\", 22) ",
-            "at line 1145\0");
+        return failed2(
+            reason, "check failed: cfst_read_matches(ENG \"/live\", \"still very much in use\", 22) ",
+            "at line 1145\0",
+        );
     }
     if (!(vfs_stat(0 as *mut vnode, c("/mnt/eng/live\0"), st) == 0)) {
         return failed(reason, "check failed: vfs_stat(NULL, ENG \"/live\", &st) == 0 at line 1148\0");
@@ -1218,8 +1242,10 @@ unsafe fn selftestCheckOrphanCrash(reason: *mut *CChar) -> bool {
     // a lost record still would.
     var lost: u64 = 0;
     if (!(cosmofs_test_corrupt(mnt(), CORRUPT_ORPHAN, 0, borrow mut lost as *mut u64) == 0)) {
-        return failed2(reason, "check failed: cosmofs_test_corrupt(cfst_mount_of(ENG), COSMOFS_CORRUPT_ORPHAN, 0, ",
-            "&lost) == 0 at line 1204\0");
+        return failed2(
+            reason, "check failed: cosmofs_test_corrupt(cfst_mount_of(ENG), COSMOFS_CORRUPT_ORPHAN, 0, ",
+            "&lost) == 0 at line 1204\0",
+        );
     }
     if (!(lost != 0)) {
         return failed(reason, "check failed: lost != 0 at line 1207\0");
@@ -1239,8 +1265,10 @@ unsafe fn selftestCheckOrphanCrash(reason: *mut *CChar) -> bool {
     }
 
     if (!(check(CHECK_REPAIR) == 0)) {
-        return failed2(reason, "check failed: cosmofs_check(cfst_mount_of(ENG), &r, COSMOFS_CHECK_REPAIR) == 0 ",
-            "at line 1225\0");
+        return failed2(
+            reason, "check failed: cosmofs_check(cfst_mount_of(ENG), &r, COSMOFS_CHECK_REPAIR) == 0 ",
+            "at line 1225\0",
+        );
     }
     if (!(r.orphan.repaired == 1)) {
         return failed(reason, "check failed: r.orphan.repaired == 1 at line 1228\0");
@@ -1300,8 +1328,10 @@ unsafe fn selftestCheckManyOrphans(reason: *mut *CChar) -> bool {
     let many: u64 = 12; // more than CFS_CHECK_NAMES
     for (i in 0u64..many) {
         if (!(cosmofs_test_corrupt(mnt(), CORRUPT_ORPHAN, 0, borrow mut what as *mut u64) == 0)) {
-            return failed2(reason, "check failed: cosmofs_test_corrupt(cfst_mount_of(ENG), COSMOFS_CORRUPT_ORPHAN, 0, ",
-                "&what) == 0 at line 1286\0");
+            return failed2(
+                reason, "check failed: cosmofs_test_corrupt(cfst_mount_of(ENG), COSMOFS_CORRUPT_ORPHAN, 0, ",
+                "&what) == 0 at line 1286\0",
+            );
         }
     }
 
@@ -1323,8 +1353,10 @@ unsafe fn selftestCheckManyOrphans(reason: *mut *CChar) -> bool {
 
     // One pass, every one of them.
     if (!(check(CHECK_REPAIR) == 0)) {
-        return failed2(reason, "check failed: cosmofs_check(cfst_mount_of(ENG), &r, COSMOFS_CHECK_REPAIR) == 0 ",
-            "at line 1309\0");
+        return failed2(
+            reason, "check failed: cosmofs_check(cfst_mount_of(ENG), &r, COSMOFS_CHECK_REPAIR) == 0 ",
+            "at line 1309\0",
+        );
     }
     if (!(!r.repair_refused)) {
         return failed(reason, "check failed: !r.repair_refused at line 1312\0");
@@ -1387,8 +1419,10 @@ unsafe fn selftestCheckSlotIdentity(reason: *mut *CChar) -> bool {
     let freeBefore = r.counted_free;
 
     if (!(cosmofs_test_corrupt(mnt(), CORRUPT_INO_SLOT, fileIno, borrow mut what as *mut u64) == 0)) {
-        return failed2(reason, "check failed: cosmofs_test_corrupt(cfst_mount_of(ENG), COSMOFS_CORRUPT_INO_SLOT, ",
-            "file_ino, &what) == 0 at line 1373\0");
+        return failed2(
+            reason, "check failed: cosmofs_test_corrupt(cfst_mount_of(ENG), COSMOFS_CORRUPT_INO_SLOT, ",
+            "file_ino, &what) == 0 at line 1373\0",
+        );
     }
     if (!(what == fileIno)) {
         return failed(reason, "check failed: what == file_ino at line 1376\0");
@@ -1413,8 +1447,10 @@ unsafe fn selftestCheckSlotIdentity(reason: *mut *CChar) -> bool {
     // Repair refuses: the inode's blocks are unclaimed only because the pass would not trust the structure holding
     // them.
     if (!(check(CHECK_REPAIR) == 0)) {
-        return failed2(reason, "check failed: cosmofs_check(cfst_mount_of(ENG), &r, COSMOFS_CHECK_REPAIR) == 0 ",
-            "at line 1399\0");
+        return failed2(
+            reason, "check failed: cosmofs_check(cfst_mount_of(ENG), &r, COSMOFS_CHECK_REPAIR) == 0 ",
+            "at line 1399\0",
+        );
     }
     if (!(r.repair_refused)) {
         return failed(reason, "check failed: r.repair_refused at line 1402\0");
@@ -1509,8 +1545,10 @@ unsafe fn fsctlCheck(run: borrow mut FsctlRun, reason: *mut *CChar) -> bool {
     let orc = vfs_open(0 as *mut vnode, c("/dev/fsctl\0"), O_RDWR, 0, borrow mut f as *mut *mut file);
     run.f = f;
     if (!(orc == 0 && !f.isNull())) {
-        return failed2(reason, "check failed: vfs_open(NULL, \"/dev/fsctl\", COSMO_O_RDWR, 0, &f) == 0 && f != NULL ",
-            "at line 1495\0");
+        return failed2(
+            reason, "check failed: vfs_open(NULL, \"/dev/fsctl\", COSMO_O_RDWR, 0, &f) == 0 && f != NULL ",
+            "at line 1495\0",
+        );
     }
     let cap = FSCTL_RESULT + FSCTL_CHECK_REC;
     let buf = kmalloc(cap, KMEM_ZERO) as *mut u8;
@@ -1519,7 +1557,7 @@ unsafe fn fsctlCheck(run: borrow mut FsctlRun, reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: buf != NULL at line 1501\0");
     }
     let h = SliceMut.fromRaw(buf, cap);
-    let chk = FSCTL_RESULT; // the check record follows the header
+    let chk = FSCTL_RESULT;     // the check record follows the header
     let cls0 = chk + CHK_CLASS; // class[0], alloc_not_seen
 
     let cmd = borrow mut g_cmd as *mut [u64; 11] as *mut u8;
@@ -1567,8 +1605,10 @@ unsafe fn fsctlCheck(run: borrow mut FsctlRun, reason: *mut *CChar) -> bool {
     // A leak, found by number through the device.
     var leaked: u64 = 0;
     if (!(cosmofs_test_corrupt(mnt(), CORRUPT_LEAK, 0, borrow mut leaked as *mut u64) == 0)) {
-        return failed2(reason, "check failed: cosmofs_test_corrupt(cfst_mount_of(ENG), COSMOFS_CORRUPT_LEAK, 0, ",
-            "&leaked) == 0 at line 1553\0");
+        return failed2(
+            reason, "check failed: cosmofs_test_corrupt(cfst_mount_of(ENG), COSMOFS_CORRUPT_LEAK, 0, ",
+            "&leaked) == 0 at line 1553\0",
+        );
     }
     if (!(file_write(f, cmd as *void, FSCTL_CMD) == cmdLen)) {
         return failed(reason, "check failed: file_write(f, &cmd, sizeof(cmd)) == (int64_t)sizeof(cmd) at line 1556\0");
@@ -1625,8 +1665,10 @@ unsafe fn fsctlCheck(run: borrow mut FsctlRun, reason: *mut *CChar) -> bool {
 
 /// fsctl-check's scrub and its refusals.
 /// Safety: as fsctlCheck; `f` the open device, `buf` its result buffer, `cmd` a CHECK command for `id`.
-unsafe fn fsctlRefusals(run: borrow mut FsctlRun, f: *mut file, buf: *mut u8, cmd: *mut u8, id: u64,
-    reason: *mut *CChar) -> bool {
+unsafe fn fsctlRefusals(
+    run: borrow mut FsctlRun, f: *mut file, buf: *mut u8, cmd: *mut u8, id: u64,
+    reason: *mut *CChar,
+) -> bool {
     let cmdLen = truncate<i64>(FSCTL_CMD);
     let cap = FSCTL_RESULT + FSCTL_CHECK_REC;
     let h = SliceMut.fromRaw(buf, cap);
@@ -1635,8 +1677,10 @@ unsafe fn fsctlRefusals(run: borrow mut FsctlRun, f: *mut file, buf: *mut u8, cm
     cmdSet(scmd, FSCTL_SCRUB, 0, id);
     let scap = FSCTL_RESULT + FSCTL_SCRUB_REC;
     if (!(file_write(f, scmd as *void, FSCTL_CMD) == cmdLen)) {
-        return failed2(reason, "check failed: file_write(f, &scmd, sizeof(scmd)) == (int64_t)sizeof(scmd) ",
-            "at line 1621\0");
+        return failed2(
+            reason, "check failed: file_write(f, &scmd, sizeof(scmd)) == (int64_t)sizeof(scmd) ",
+            "at line 1621\0",
+        );
     }
     if (!(file_read(f, buf as *mut void, scap) == truncate<i64>(scap))) {
         return failed(reason, "check failed: file_read(f, buf, scap) == (int64_t)scap at line 1624\0");
@@ -1746,12 +1790,16 @@ unsafe fn selftestCheckPartial(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: vfs_mkdir(NULL, ENG \"/d\", 0755) == 0 at line 1728\0");
     }
     if (!(cfst_write_file(c("/mnt/eng/d/x\0"), held.ptr as *void, 39))) {
-        return failed2(reason, "check failed: cfst_write_file(ENG \"/d/x\", \"held by a name in the block about to ",
-            "go\", 39) at line 1732\0");
+        return failed2(
+            reason, "check failed: cfst_write_file(ENG \"/d/x\", \"held by a name in the block about to ",
+            "go\", 39) at line 1732\0",
+        );
     }
     if (!(cfst_write_file(c("/mnt/eng/keep\0"), kept.ptr as *void, 19))) {
-        return failed2(reason, "check failed: cfst_write_file(ENG \"/keep\", \"reached another way\", 19) ",
-            "at line 1736\0");
+        return failed2(
+            reason, "check failed: cfst_write_file(ENG \"/keep\", \"reached another way\", 19) ",
+            "at line 1736\0",
+        );
     }
     if (!(vfs_sync() == 0)) {
         return failed(reason, "check failed: vfs_sync() == 0 at line 1739\0");
@@ -1799,8 +1847,10 @@ unsafe fn selftestCheckPartial(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: rep.unreadable.count == 1 at line 1781\0");
     }
     if (!(rep.unreadable.named == 1 && rep.unreadable.name[0] == dirIno)) {
-        return failed2(reason, "check failed: rep.unreadable.named == 1 && rep.unreadable.name[0] == dir_ino ",
-            "at line 1785\0");
+        return failed2(
+            reason, "check failed: rep.unreadable.named == 1 && rep.unreadable.name[0] == dir_ino ",
+            "at line 1785\0",
+        );
     }
     // The comparison is the last phase, so a finding only it can produce is the proof that the pass reached the end
     // rather than stopping at the unreadable block. That finding is the **orphan**: /d/x's inode is in the map and no
@@ -1823,8 +1873,10 @@ unsafe fn selftestCheckPartial(reason: *mut *CChar) -> bool {
     // orphaned inode" would destroy it.
     let lostBlocks = rep.alloc_not_seen.count;
     if (!(check(CHECK_REPAIR) == 0)) {
-        return failed2(reason, "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, COSMOFS_CHECK_REPAIR) == 0 ",
-            "at line 1809\0");
+        return failed2(
+            reason, "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, COSMOFS_CHECK_REPAIR) == 0 ",
+            "at line 1809\0",
+        );
     }
     if (!(rep.repair_refused)) {
         return failed(reason, "check failed: rep.repair_refused at line 1812\0");
@@ -1850,8 +1902,10 @@ unsafe fn selftestCheckPartial(reason: *mut *CChar) -> bool {
     // The file the broken block named is still whole: the block it lives in was never freed, so the entry that
     // survives elsewhere still reaches it.
     if (!(cfst_read_matches(c("/mnt/eng/keep\0"), kept.ptr as *void, 19))) {
-        return failed2(reason, "check failed: cfst_read_matches(ENG \"/keep\", \"reached another way\", 19) ",
-            "at line 1836\0");
+        return failed2(
+            reason, "check failed: cfst_read_matches(ENG \"/keep\", \"reached another way\", 19) ",
+            "at line 1836\0",
+        );
     }
 
     if (!(vfs_umount2(eng(), 0) == 0)) {

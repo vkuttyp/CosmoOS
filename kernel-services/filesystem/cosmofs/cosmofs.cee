@@ -196,8 +196,10 @@ unsafe fn dirBlocks(dir: *vnode) -> u64 => (Ptr.toBorrow(dir).size + CFS_BLOCK -
 /// Find `name`; the block index and slot, or -ENOENT.
 /// Safety: as dirReadBlock; `name` `len` bytes; `block` CFS_BLOCK writable bytes; the outs writable.
 @export("cfs_dir_find")
-unsafe fn dirFind(fs: *mut cfs, dir: *mut vnode, name: *CChar, len: usize, block: *mut u8, lblkOut: *mut u64,
-    slotOut: *mut u32) -> i32 {
+unsafe fn dirFind(
+    fs: *mut cfs, dir: *mut vnode, name: *CChar, len: usize, block: *mut u8, lblkOut: *mut u64,
+    slotOut: *mut u32,
+) -> i32 {
     let version = Ptr.toBorrow(fs as *cfs).sb.version;
     if (len > CFS_NAME_MAX_LONG) {
         return -ENAMETOOLONG;
@@ -234,8 +236,7 @@ unsafe fn dirFind(fs: *mut cfs, dir: *mut vnode, name: *CChar, len: usize, block
 /// has had cfs_names_allow say yes to `len`.
 /// Safety: as dirFind.
 @export("cfs_dir_add")
-unsafe fn dirAdd(fs: *mut cfs, dir: *mut vnode, name: *CChar, len: usize, ino: u64, kind: u32, block: *mut u8)
-    -> i32 {
+unsafe fn dirAdd(fs: *mut cfs, dir: *mut vnode, name: *CChar, len: usize, ino: u64, kind: u32, block: *mut u8) -> i32 {
     let max = if (Ptr.toBorrow(fs as *cfs).sb.version >= 15) CFS_NAME_MAX_LONG else CFS_NAME_MAX;
     if (len == 0 || len > max) {
         return -ENAMETOOLONG;
@@ -255,8 +256,10 @@ unsafe fn dirAdd(fs: *mut cfs, dir: *mut vnode, name: *CChar, len: usize, ino: u
         let s = freeRun(block, need);
         if (s >= 0) {
             // An entry names an inode of its own tree, untagged.
-            direntPut(block, truncate<u32>(s), ino & ((1u64 << CFS_SNAP_INO_SHIFT) - 1), kind, name as *u8,
-                truncate<u32>(len));
+            direntPut(
+                block, truncate<u32>(s), ino & ((1u64 << CFS_SNAP_INO_SHIFT) - 1), kind, name as *u8,
+                truncate<u32>(len),
+            );
             return dirWriteBlock(fs, dir, lblk, block as *u8);
         }
         lblk += 1;

@@ -6,9 +6,11 @@
 // The faults cosmofs-extent-fail injects, which only a build with CONFIG_FAULTINJECT has, are armed and cleared in
 // `cfg` blocks (ADR 0080 §3.3), and the layout written here as constants is the headers', which the C compiler checks.
 
-@header("kernel/blk.h", "kernel/vfs.h", "kernel/kmalloc.h", "kernel/string.h", "kernel/pagecache.h", "kernel/random.h",
+@header(
+    "kernel/blk.h", "kernel/vfs.h", "kernel/kmalloc.h", "kernel/string.h", "kernel/pagecache.h", "kernel/random.h",
     "kernel/log.h", "kernel/cosmofs.h", "uapi/cosmo/syscall.h", "kernel/errno.h", "kernel/faultinject.h",
-    "kernel/thread.h", "cosmofs_format.h")
+    "kernel/thread.h", "cosmofs_format.h",
+)
 extern "C" {
     struct cosmofs_stats;
     struct blkdev;
@@ -94,10 +96,14 @@ extern "C" {
     const EEXIST: i32 = 17;
     const VFS_UMOUNT_FORCE: u32 = 1;
     /// cosmofstest_extent.cee's errno.h, syscall.h, vfs.h, cosmofs.h and cosmofs_format.h values
-    @cvalue("COSMO_O_RDONLY == 0 && COSMO_O_RDWR == 2 && COSMO_O_CREAT == 0x40 && COSMO_O_TRUNC == 0x200 && COSMOFS_SCRUB_REPAIR == 1 && CFS_RECORD_BLOCKS == 8")
+    @cvalue(
+        "COSMO_O_RDONLY == 0 && COSMO_O_RDWR == 2 && COSMO_O_CREAT == 0x40 && COSMO_O_TRUNC == 0x200 && COSMOFS_SCRUB_REPAIR == 1 && CFS_RECORD_BLOCKS == 8",
+    )
     const COSMOFSTEST_EXTENT_FACT_0: bool = true;
     /// cosmofstest_extent.cee's report, stats and page cache stats sizes and offsets
-    @cvalue("sizeof(struct cosmofs_check_report) <= 1536 && sizeof(struct cosmofs_stats) <= 128 && offsetof(struct cosmofs_stats, free_blocks) == 8 && offsetof(struct cosmofs_stats, csum_failures) == 64 && sizeof(struct cosmofs_scrub_stats) <= 128 && offsetof(struct cosmofs_scrub_stats, unrecoverable) == 24 && sizeof(struct pagecache_stats) <= 128 && offsetof(struct pagecache_stats, wb_errors) == 48 && offsetof(struct pagecache_stats, dropped_dirty) == 56")
+    @cvalue(
+        "sizeof(struct cosmofs_check_report) <= 1536 && sizeof(struct cosmofs_stats) <= 128 && offsetof(struct cosmofs_stats, free_blocks) == 8 && offsetof(struct cosmofs_stats, csum_failures) == 64 && sizeof(struct cosmofs_scrub_stats) <= 128 && offsetof(struct cosmofs_scrub_stats, unrecoverable) == 24 && sizeof(struct pagecache_stats) <= 128 && offsetof(struct pagecache_stats, wb_errors) == 48 && offsetof(struct pagecache_stats, dropped_dirty) == 56",
+    )
     const COSMOFSTEST_EXTENT_FACT_1: bool = true;
 }
 
@@ -301,8 +307,10 @@ unsafe fn extentBound(h: borrow mut Held, bd: *mut blkdev, reason: *mut *CChar) 
     pagecache_get_stats(pc0 as *mut pagecache_stats);
 
     if (!open(h, p("/mnt/eng/sparse\0"), O_RDWR | O_CREAT | O_TRUNC)) {
-        return failed(reason,
-            "check failed: vfs_open(NULL, ENG \"/sparse\", COSMO_O_RDWR | COSMO_O_CREAT | ..., &f) == 0 at line 243\0");
+        return failed(
+            reason,
+            "check failed: vfs_open(NULL, ENG \"/sparse\", COSMO_O_RDWR | COSMO_O_CREAT | ..., &f) == 0 at line 243\0",
+        );
     }
     let f = h.f;
     // Records written whole, then the bytes of the one the bound cut: a write that reaches it returns what it took,
@@ -354,8 +362,10 @@ unsafe fn extentBound(h: borrow mut Held, bd: *mut blkdev, reason: *mut *CChar) 
     close(h);
     pagecache_get_stats(pc1 as *mut pagecache_stats);
     if (!pagecacheClean(pc0, pc1)) {
-        return failed(reason,
-            "check failed: pc1.wb_errors == pc0.wb_errors && pc1.dropped_dirty == pc0.dropped_dirty at line 296\0");
+        return failed(
+            reason,
+            "check failed: pc1.wb_errors == pc0.wb_errors && pc1.dropped_dirty == pc0.dropped_dirty at line 296\0",
+        );
     }
 
     // And it is what the disk holds: after a remount the size ends at the last record accepted, and every record
@@ -376,13 +386,15 @@ unsafe fn extentBound(h: borrow mut Held, bd: *mut blkdev, reason: *mut *CChar) 
     vnode_put(vn);
     let rlen = RLEN as u64;
     let want = if (part != 0) accepted as u64 * 2 * rlen + part as u64
-    else ((accepted as u64).wrappingSub(1).wrappingMul(2) + 1).wrappingMul(rlen);
+        else ((accepted as u64).wrappingSub(1).wrappingMul(2) + 1).wrappingMul(rlen);
     if (!(accepted > 0 && size == want)) {
         return failed(reason, "check failed: accepted > 0 && size == want at line 319\0");
     }
     if (!open(h, p("/mnt/eng/sparse\0"), O_RDONLY)) {
-        return failed(reason,
-            "check failed: vfs_open(NULL, ENG \"/sparse\", COSMO_O_RDONLY, 0, &f) == 0 at line 323\0");
+        return failed(
+            reason,
+            "check failed: vfs_open(NULL, ENG \"/sparse\", COSMO_O_RDONLY, 0, &f) == 0 at line 323\0",
+        );
     }
     let g = h.f;
     var k: u32 = 0;
@@ -392,8 +404,10 @@ unsafe fn extentBound(h: borrow mut Held, bd: *mut blkdev, reason: *mut *CChar) 
             break;
         }
         if (file_pread(g, back as *mut void, len, k as u64 * 2 * rlen) != truncate<i64>(len)) {
-            return failed(reason,
-                "check failed: file_pread(f, back, len, (uint64_t)k * 2 * rlen) == (int64_t)len at line 334\0");
+            return failed(
+                reason,
+                "check failed: file_pread(f, back, len, (uint64_t)k * 2 * rlen) == (int64_t)len at line 334\0",
+            );
         }
         for (i in 0usize..len) {
             if (back.add(i).read() != truncate<u8>((i + k as usize) % 61)) {
@@ -515,14 +529,18 @@ unsafe fn extentRebuild(h: borrow mut Held, bd: *mut blkdev, reason: *mut *CChar
     }
 
     if (!open(h, p("/mnt/eng/c\0"), O_RDWR | O_CREAT | O_TRUNC)) {
-        return failed(reason,
-            "check failed: vfs_open(NULL, ENG \"/c\", COSMO_O_RDWR | COSMO_O_CREAT | ..., &f) == 0 at line 457\0");
+        return failed(
+            reason,
+            "check failed: vfs_open(NULL, ENG \"/c\", COSMO_O_RDWR | COSMO_O_CREAT | ..., &f) == 0 at line 457\0",
+        );
     }
     for (k in 0u32..RB_RECORDS) {
         rbRecord(rec, k);
         if (file_pwrite(h.f, rec as *void, RLEN, k as u64 * RLEN as u64) != RLEN_I64) {
-            return failed(reason,
-                "check failed: file_pwrite(f, rec, rlen, (uint64_t)k * rlen) == (int64_t)rlen at line 463\0");
+            return failed(
+                reason,
+                "check failed: file_pwrite(f, rec, rlen, (uint64_t)k * rlen) == (int64_t)rlen at line 463\0",
+            );
         }
     }
     if (file_sync(h.f) != 0) {
@@ -534,8 +552,10 @@ unsafe fn extentRebuild(h: borrow mut Held, bd: *mut blkdev, reason: *mut *CChar
     }
     // Each record compressed to seven blocks, not stored plain.
     if (!(field64(st0, ST_FREE).wrappingSub(field64(st1, ST_FREE)) < RB_RECORDS as u64 * RECORD_BLOCKS)) {
-        return failed(reason,
-            "check failed: st0.free_blocks - st1.free_blocks < (uint64_t)RB_RECORDS * CFS_RECORD_BLOCKS at line 476\0");
+        return failed(
+            reason,
+            "check failed: st0.free_blocks - st1.free_blocks < (uint64_t)RB_RECORDS * CFS_RECORD_BLOCKS at line 476\0",
+        );
     }
 
     // Free space in single blocks: files of one block each, every other one removed.
@@ -543,8 +563,10 @@ unsafe fn extentRebuild(h: borrow mut Held, bd: *mut blkdev, reason: *mut *CChar
     var path = [0u8; 48];
     for (i in 0u32..RB_HOLES) {
         if (!open(h, holePath(mut path, i), O_RDWR | O_CREAT | O_TRUNC)) {
-            return failed(reason,
-                "check failed: vfs_open(NULL, path, COSMO_O_RDWR | COSMO_O_CREAT | ..., &f) == 0 at line 485\0");
+            return failed(
+                reason,
+                "check failed: vfs_open(NULL, path, COSMO_O_RDWR | COSMO_O_CREAT | ..., &f) == 0 at line 485\0",
+            );
         }
         if (file_pwrite(h.f, back as *void, 4096, 0) != 4096) {
             return failed(reason, "check failed: file_pwrite(f, back, 4096, 0) == 4096 at line 488\0");
@@ -608,8 +630,10 @@ unsafe fn extentRebuild(h: borrow mut Held, bd: *mut blkdev, reason: *mut *CChar
     close(h);
     pagecache_get_stats(pc1 as *mut pagecache_stats);
     if (!pagecacheClean(pc0, pc1)) {
-        return failed(reason,
-            "check failed: pc1.wb_errors == pc0.wb_errors && pc1.dropped_dirty == pc0.dropped_dirty at line 550\0");
+        return failed(
+            reason,
+            "check failed: pc1.wb_errors == pc0.wb_errors && pc1.dropped_dirty == pc0.dropped_dirty at line 550\0",
+        );
     }
 
     // And it is on the disk.
@@ -630,8 +654,10 @@ unsafe fn extentRebuild(h: borrow mut Held, bd: *mut blkdev, reason: *mut *CChar
             rbNoise(rec.add(6 * 4096), 4096, 1000 + k);
         }
         if (file_pread(h.f, back as *mut void, RLEN, k as u64 * RLEN as u64) != RLEN_I64) {
-            return failed(reason,
-                "check failed: file_pread(f, back, rlen, (uint64_t)k * rlen) == (int64_t)rlen at line 572\0");
+            return failed(
+                reason,
+                "check failed: file_pread(f, back, rlen, (uint64_t)k * rlen) == (int64_t)rlen at line 572\0",
+            );
         }
         if (memcmp(back as *void, rec as *void, RLEN) != 0) {
             return failed(reason, "check failed: memcmp(back, rec, rlen) == 0 at line 575\0");
@@ -746,14 +772,18 @@ unsafe fn extentRaw(h: borrow mut Held, bd: *mut blkdev, reason: *mut *CChar) ->
     // the seam's bound the write's charge (CF33) writes back every few records, a record cut by it in part as plain
     // blocks, so the mark is reached sooner than by records alone; past it the plain records merge.
     if (!open(h, p("/mnt/eng/long\0"), O_RDWR | O_CREAT | O_TRUNC)) {
-        return failed(reason,
-            "check failed: vfs_open(NULL, ENG \"/long\", COSMO_O_RDWR | COSMO_O_CREAT | ..., &f) == 0 at line 688\0");
+        return failed(
+            reason,
+            "check failed: vfs_open(NULL, ENG \"/long\", COSMO_O_RDWR | COSMO_O_CREAT | ..., &f) == 0 at line 688\0",
+        );
     }
     for (k in 0u32..ER_RECORDS) {
         erFill(rec, k);
         if (file_pwrite(h.f, rec as *void, RLEN, k as u64 * rlen) != RLEN_I64) {
-            return failed(reason,
-                "check failed: file_pwrite(f, rec, rlen, (uint64_t)k * rlen) == (int64_t)rlen at line 694\0");
+            return failed(
+                reason,
+                "check failed: file_pwrite(f, rec, rlen, (uint64_t)k * rlen) == (int64_t)rlen at line 694\0",
+            );
         }
     }
     if (file_sync(h.f) != 0) {
@@ -823,8 +853,10 @@ unsafe fn extentRaw(h: borrow mut Held, bd: *mut blkdev, reason: *mut *CChar) ->
     // Truncated below the mark, a record written after it compresses again: it takes a block or two, not eight.
     let half = (mark / 2) as u64;
     if (vfs_truncate(0 as *mut vnode, p("/mnt/eng/long\0"), half * rlen) != 0) {
-        return failed(reason,
-            "check failed: vfs_truncate(NULL, ENG \"/long\", (uint64_t)(mark / 2) * rlen) == 0 at line 765\0");
+        return failed(
+            reason,
+            "check failed: vfs_truncate(NULL, ENG \"/long\", (uint64_t)(mark / 2) * rlen) == 0 at line 765\0",
+        );
     }
     if (!erSettle()) {
         return failed(reason, "check failed: er_settle() at line 768\0");
@@ -837,8 +869,10 @@ unsafe fn extentRaw(h: borrow mut Held, bd: *mut blkdev, reason: *mut *CChar) ->
     }
     erFill(rec, mark / 2);
     if (file_pwrite(h.f, rec as *void, RLEN, half * rlen) != RLEN_I64) {
-        return failed(reason,
-            "check failed: file_pwrite(f, rec, rlen, (uint64_t)(mark / 2) * rlen) == (int64_t)rlen at line 779\0");
+        return failed(
+            reason,
+            "check failed: file_pwrite(f, rec, rlen, (uint64_t)(mark / 2) * rlen) == (int64_t)rlen at line 779\0",
+        );
     }
     if (file_sync(h.f) != 0) {
         return failed(reason, "check failed: file_sync(f) == 0 at line 782\0");
@@ -855,8 +889,10 @@ unsafe fn extentRaw(h: borrow mut Held, bd: *mut blkdev, reason: *mut *CChar) ->
     close(h);
     pagecache_get_stats(pc1 as *mut pagecache_stats);
     if (!pagecacheClean(pc0, pc1)) {
-        return failed(reason,
-            "check failed: pc1.wb_errors == pc0.wb_errors && pc1.dropped_dirty == pc0.dropped_dirty at line 797\0");
+        return failed(
+            reason,
+            "check failed: pc1.wb_errors == pc0.wb_errors && pc1.dropped_dirty == pc0.dropped_dirty at line 797\0",
+        );
     }
 
     // Back to the long file, whole, and read after a remount.
@@ -866,8 +902,10 @@ unsafe fn extentRaw(h: borrow mut Held, bd: *mut blkdev, reason: *mut *CChar) ->
     for (k in (mark / 2)..ER_RECORDS) {
         erFill(rec, k);
         if (file_pwrite(h.f, rec as *void, RLEN, k as u64 * rlen) != RLEN_I64) {
-            return failed(reason,
-                "check failed: file_pwrite(f, rec, rlen, (uint64_t)k * rlen) == (int64_t)rlen at line 808\0");
+            return failed(
+                reason,
+                "check failed: file_pwrite(f, rec, rlen, (uint64_t)k * rlen) == (int64_t)rlen at line 808\0",
+            );
         }
     }
     if (file_sync(h.f) != 0) {
@@ -888,8 +926,10 @@ unsafe fn extentRaw(h: borrow mut Held, bd: *mut blkdev, reason: *mut *CChar) ->
     for (k in 0u32..ER_RECORDS) {
         erFill(rec, if (k == 5) 1000 else k);
         if (file_pread(h.f, back as *mut void, RLEN, k as u64 * rlen) != RLEN_I64) {
-            return failed(reason,
-                "check failed: file_pread(f, back, rlen, (uint64_t)k * rlen) == (int64_t)rlen at line 830\0");
+            return failed(
+                reason,
+                "check failed: file_pread(f, back, rlen, (uint64_t)k * rlen) == (int64_t)rlen at line 830\0",
+            );
         }
         if (memcmp(back as *void, rec as *void, RLEN) != 0) {
             return failed(reason, "check failed: memcmp(back, rec, rlen) == 0 at line 833\0");
@@ -911,11 +951,11 @@ unsafe fn extentRaw(h: borrow mut Held, bd: *mut blkdev, reason: *mut *CChar) ->
 // ---- cosmofs-extent-fail ----
 
 // The layouts of a case.
-const EF_PLAIN: u32 = 0; // plain blocks over plain blocks: data_write_block
-const EF_RECORD: u32 = 1; // a compressed record over a compressed record: record_write
+const EF_PLAIN: u32 = 0;   // plain blocks over plain blocks: data_write_block
+const EF_RECORD: u32 = 1;  // a compressed record over a compressed record: record_write
 const EF_DROPPED: u32 = 2; // one page that leaves a record incompressible: dropped, then plain
-const EF_CRYPT: u32 = 3; // EF_PLAIN on an encrypted pool: authenticated entries
-const EF_EVICT: u32 = 4; // EF_PLAIN, then closed with the retry failing too: the pages dropped
+const EF_CRYPT: u32 = 3;   // EF_PLAIN on an encrypted pool: authenticated entries
+const EF_EVICT: u32 = 4;   // EF_PLAIN, then closed with the retry failing too: the pages dropped
 
 const EF_PAGES: usize = 16; // two records
 const EF_LEN: usize = 16 * 4096;
@@ -1025,8 +1065,10 @@ unsafe fn efCase(s: borrow mut Ef, kind: u32, layout: u32, reason: *mut *CChar) 
             return failed(reason, "check failed: bd != NULL at line 963\0");
         }
         if (cosmofs_format_encrypted(bd, EF_KEY.ptr as *void, EF_KEY.length) != 0) {
-            return failed(reason,
-                "check failed: cosmofs_format_encrypted(bd, key, sizeof(key) - 1) == 0 at line 967\0");
+            return failed(
+                reason,
+                "check failed: cosmofs_format_encrypted(bd, key, sizeof(key) - 1) == 0 at line 967\0",
+            );
         }
         let mk = vfs_mkdir(0 as *mut vnode, eng(), 493);
         if (!(mk == 0 || mk == -EEXIST)) {
@@ -1037,8 +1079,10 @@ unsafe fn efCase(s: borrow mut Ef, kind: u32, layout: u32, reason: *mut *CChar) 
         }
         cosmofs_test_set_writeback(cfst_mount_of(eng()), false);
         if (cosmofs_test_unlock(cfst_mount_of(eng()), EF_KEY.ptr as *void, EF_KEY.length) != 0) {
-            return failed(reason,
-                "check failed: cosmofs_test_unlock(mount_of(ENG), key, sizeof(key) - 1) == 0 at line 979\0");
+            return failed(
+                reason,
+                "check failed: cosmofs_test_unlock(mount_of(ENG), key, sizeof(key) - 1) == 0 at line 979\0",
+            );
         }
     } else {
         var bd = 0 as *mut blkdev;
@@ -1111,8 +1155,10 @@ unsafe fn efCase(s: borrow mut Ef, kind: u32, layout: u32, reason: *mut *CChar) 
         return failed(reason, "check failed: fst.hits == 1 at line 1049\0");
     }
     if (src != (if (kind == FAIL_NOMEM) -ENOMEM else -EFBIG)) {
-        return failed(reason,
-            "check failed: src == (kind == FI_COSMOFS_EXTENT_NOMEM ? -ENOMEM : -EFBIG) at line 1053\0");
+        return failed(
+            reason,
+            "check failed: src == (kind == FI_COSMOFS_EXTENT_NOMEM ? -ENOMEM : -EFBIG) at line 1053\0",
+        );
     }
 
     if (layout == EF_DROPPED) {
@@ -1135,8 +1181,10 @@ unsafe fn efCase(s: borrow mut Ef, kind: u32, layout: u32, reason: *mut *CChar) 
         // Either the old contents or the new, whole: never the record's unwritten blocks read back as holes.
         if (!(cfst_read_matches(p("/mnt/eng/f\0"), a as *void, len) ||
             cfst_read_matches(p("/mnt/eng/f\0"), b as *void, len))) {
-            return failed(reason,
-                "check failed: read_matches(ENG \"/f\", a, len) || read_matches(ENG \"/f\", b, len) at line 1077\0");
+            return failed(
+                reason,
+                "check failed: read_matches(ENG \"/f\", a, len) || read_matches(ENG \"/f\", b, len) at line 1077\0",
+            );
         }
     } else if (layout == EF_EVICT) {
         // No retry: the last reference goes with every set_extent failing, so the release's own write-back fails as
@@ -1175,8 +1223,10 @@ unsafe fn efCase(s: borrow mut Ef, kind: u32, layout: u32, reason: *mut *CChar) 
             return failed(reason, "check failed: fst.hits >= 1 at line 1113\0");
         }
         if (!(rep.alloc_not_seen.count == 0 && rep.seen_not_alloc.count == 0)) {
-            return failed(reason,
-                "check failed: rep.alloc_not_seen.count == 0 && rep.seen_not_alloc.count == 0 at line 1117\0");
+            return failed(
+                reason,
+                "check failed: rep.alloc_not_seen.count == 0 && rep.seen_not_alloc.count == 0 at line 1117\0",
+            );
         }
         if (!rep.clean) {
             return failed(reason, "check failed: rep.clean at line 1120\0");
@@ -1252,8 +1302,10 @@ unsafe fn efCase(s: borrow mut Ef, kind: u32, layout: u32, reason: *mut *CChar) 
         }
         cosmofs_test_set_writeback(cfst_mount_of(eng()), false);
         if (layout == EF_CRYPT && cosmofs_test_unlock(cfst_mount_of(eng()), EF_KEY.ptr as *void, EF_KEY.length) != 0) {
-            return failed(reason,
-                "check failed: cosmofs_test_unlock(mount_of(ENG), key, sizeof(key) - 1) == 0 at line 1194\0");
+            return failed(
+                reason,
+                "check failed: cosmofs_test_unlock(mount_of(ENG), key, sizeof(key) - 1) == 0 at line 1194\0",
+            );
         }
         if (!cfst_read_matches(p("/mnt/eng/f\0"), b as *void, len)) {
             return failed(reason, "check failed: read_matches(ENG \"/f\", b, len) at line 1197\0");
@@ -1262,15 +1314,19 @@ unsafe fn efCase(s: borrow mut Ef, kind: u32, layout: u32, reason: *mut *CChar) 
     var sts = [0u64; 16];
     let st = borrow mut sts as *mut [u64; 16];
     if (!(engStats(st) && field64(st, ST_CSUM_FAILURES) == 0)) {
-        return failed(reason,
-            "check failed: cosmofs_stats(mount_of(ENG), &st) == 0 && st.csum_failures == 0 at line 1204\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_stats(mount_of(ENG), &st) == 0 && st.csum_failures == 0 at line 1204\0",
+        );
     }
     var scs = [0u64; 16];
     let sc = borrow mut scs as *mut [u64; 16];
     if (!(cosmofs_scrub(cfst_mount_of(eng()), sc as *mut cosmofs_scrub_stats, SCRUB_REPAIR) == 0 &&
         field64(sc, SC_UNRECOVERABLE) == 0)) {
-        return failed(reason,
-            "check failed: cosmofs_scrub(mount_of(ENG), &sc, ...) == 0 && sc.unrecoverable == 0 at line 1211\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_scrub(mount_of(ENG), &sc, ...) == 0 && sc.unrecoverable == 0 at line 1211\0",
+        );
     }
     return true;
 }

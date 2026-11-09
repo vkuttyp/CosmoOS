@@ -24,11 +24,11 @@ extern "C" {
         thread: *mut thread;
     }
     struct thread {
-        priority: i32; // (rq) the effective priority the scheduler keys on
-        base_prio: i32; // (pi) the created priority
-        pi_held: list_node; // (pi) the mutexes it holds that have waiters
+        priority: i32;             // (rq) the effective priority the scheduler keys on
+        base_prio: i32;            // (pi) the created priority
+        pi_held: list_node;        // (pi) the mutexes it holds that have waiters
         pi_blocked_on: *mut mutex; // (pi) the mutex it waits for
-        pi_walk_gen: u64; // (pi) the donation walk that last visited it
+        pi_walk_gen: u64;          // (pi) the donation walk that last visited it
     }
 
     @constant
@@ -43,14 +43,26 @@ extern "C" {
     fn waitqueue_init(wq: *mut waitqueue, name: *CChar);
     fn waitqueue_empty(wq: *mut waitqueue) -> bool;
     fn waitqueue_wake_one(wq: *mut waitqueue) -> u32;
-    fn wait_floor_loop(wq: *mut waitqueue, attempt: extern "C" fn(*mut void, bool) -> bool,
-        woken: extern "C" fn(*mut void), arg: *mut void);
+    fn wait_floor_loop(
+        wq: *mut waitqueue, attempt: extern "C" fn(*mut void, bool) -> bool,
+        woken: extern "C" fn(*mut void), arg: *mut void,
+    );
     fn thread_current() -> *mut thread;
     fn sched_wake(t: *mut thread) -> bool;
     fn sched_reprioritize(t: *mut thread, prio: i32);
-    fn lockdep_acquire_check(lock: *void, slot: *mut u16, name: *CChar, kind: u32, subclass: u32, irqsOn: bool, ip: usize);
-    fn lockdep_acquired(lock: *void, slot: *mut u16, name: *CChar, kind: u32, subclass: u32, trylock: bool, irqsOn: bool,
-        ip: usize);
+    fn lockdep_acquire_check(
+        lock: *void,
+        slot: *mut u16,
+        name: *CChar,
+        kind: u32,
+        subclass: u32,
+        irqsOn: bool,
+        ip: usize,
+    );
+    fn lockdep_acquired(
+        lock: *void, slot: *mut u16, name: *CChar, kind: u32, subclass: u32, trylock: bool, irqsOn: bool,
+        ip: usize,
+    );
     fn lockdep_release(lock: *void, kind: u32, ip: usize, irqRestore: bool);
 
     // mutex_floor.c
@@ -70,9 +82,9 @@ struct mutex {
     owner: *mut thread;
     wq: waitqueue;
     name: *CChar;
-    lock_class: u16; // lockdep class + 1 (kind mutex), cached at first acquisition
-    pi_active: u16; // a waiter has donated to the owner: unlock must run the PI restore (under PI_LOCK)
-    pi_link: list_node; // (PI_LOCK) in its owner's pi_held list while it has waiters
+    lock_class: u16;      // lockdep class + 1 (kind mutex), cached at first acquisition
+    pi_active: u16;       // a waiter has donated to the owner: unlock must run the PI restore (under PI_LOCK)
+    pi_link: list_node;   // (PI_LOCK) in its owner's pi_held list while it has waiters
     handoff: *mut thread; // (lock) a waiter overtaken once, which the next unlock hands the mutex to (S33)
 }
 
@@ -253,7 +265,12 @@ unsafe fn lockCommon(m: *mut mutex, subclass: u32, ip: usize) {
     lockdep_acquire_check(m as *void, borrow mut mx.lock_class as *mut u16, mx.name, KIND_MUTEX, subclass, false, ip);
     if (!tryTake(m, cur)) {
         var contender = Contender { m: m, cur: cur };
-        wait_floor_loop(borrow mut mx.wq as *mut waitqueue, attempt, woken, borrow mut contender as *mut Contender as *mut void);
+        wait_floor_loop(
+            borrow mut mx.wq as *mut waitqueue,
+            attempt,
+            woken,
+            borrow mut contender as *mut Contender as *mut void,
+        );
         // Acquired through the contended path. Only one waiter was woken and the release unlinked the mutex from the
         // old owner, so if others are still queued this new owner must inherit them.
         let s = piLock();
@@ -293,7 +310,16 @@ unsafe fn tryLock(m: *mut mutex) -> bool {
         return false;
     }
     let mx = Ptr.toBorrowMut(m);
-    lockdep_acquired(m as *void, borrow mut mx.lock_class as *mut u16, mx.name, KIND_MUTEX, 0, true, false, callerAddress());
+    lockdep_acquired(
+        m as *void,
+        borrow mut mx.lock_class as *mut u16,
+        mx.name,
+        KIND_MUTEX,
+        0,
+        true,
+        false,
+        callerAddress(),
+    );
     return true;
 }
 

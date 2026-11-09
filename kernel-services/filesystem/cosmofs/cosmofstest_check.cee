@@ -7,9 +7,11 @@
 // finds each manufactured fault by name, repairs what it can prove and refuses the rest. All of them run in a debug
 // build only; the layout this file writes as constants is the headers', which the C compiler checks (ADR 0080).
 
-@header("kernel/blk.h", "kernel/vfs.h", "kernel/kmalloc.h", "kernel/ramblk.h", "kernel/string.h", "kernel/storage.h",
+@header(
+    "kernel/blk.h", "kernel/vfs.h", "kernel/kmalloc.h", "kernel/ramblk.h", "kernel/string.h", "kernel/storage.h",
     "kernel/random.h", "kernel/timer.h", "kernel/cosmofs.h", "uapi/cosmo/syscall.h", "kernel/errno.h",
-    "cosmofs_format.h")
+    "cosmofs_format.h",
+)
 extern "C" {
     struct blkdev {
         sector_size: u32;
@@ -132,13 +134,19 @@ extern "C" {
     @cvalue("COSMO_O_RDONLY == 0 && COSMO_DT_DIR == 2")
     const COSMOFSTEST_CHECK_FACT_0: bool = true;
     /// cosmofstest_check.cee's cosmofs_format.h values and offsets
-    @cvalue("sizeof(CFS_MAGIC) == 9 && offsetof(struct cfs_mhdr, crc) == 24 && offsetof(struct cfs_super, generation) == 24 && offsetof(struct cfs_super, members) == 88 && offsetof(struct cfs_member_block, m) == 8 && sizeof(struct cfs_member) == 64 && offsetof(struct cfs_member, nblocks) == 16 && offsetof(struct cfs_member, first_usable) == 24")
+    @cvalue(
+        "sizeof(CFS_MAGIC) == 9 && offsetof(struct cfs_mhdr, crc) == 24 && offsetof(struct cfs_super, generation) == 24 && offsetof(struct cfs_super, members) == 88 && offsetof(struct cfs_member_block, m) == 8 && sizeof(struct cfs_member) == 64 && offsetof(struct cfs_member, nblocks) == 16 && offsetof(struct cfs_member, first_usable) == 24",
+    )
     const COSMOFSTEST_CHECK_FACT_1: bool = true;
     /// cosmofstest_check.cee's and cosmofstest_orphan.cee's cosmofs.h values
-    @cvalue("COSMOFS_SCRUB_REPAIR == 1 && COSMOFS_CHECK_REPAIR == 1 && CFS_CHECK_NAMES == 8 && COSMOFS_CORRUPT_LEAK == 0 && COSMOFS_CORRUPT_FREE_IN_USE == 1 && COSMOFS_CORRUPT_CROSSLINK == 2 && COSMOFS_CORRUPT_NLINK == 3 && COSMOFS_CORRUPT_ORPHAN == 4 && COSMOFS_CORRUPT_DANGLING == 5 && COSMOFS_CORRUPT_DIRENT == 6 && COSMOFS_CORRUPT_COUNTER == 7 && COSMOFS_CORRUPT_INO_SLOT == 8 && COSMOFS_CORRUPT_EXTENT_ORDER == 9 && COSMOFS_CORRUPT_BAD_PTR == 10 && COSMOFS_CORRUPT_TWO_PARENTS == 11 && COSMOFS_CORRUPT_SNAP_MEMBERS == 12 && COSMOFS_CORRUPT_DUP_NAME == 13 && COSMOFS_CORRUPT_CHAIN_CYCLE == 14 && COSMOFS_CORRUPT_NAMELEN == 15 && COSMOFS_CORRUPT_EXTENT_OVERLAP == 16")
+    @cvalue(
+        "COSMOFS_SCRUB_REPAIR == 1 && COSMOFS_CHECK_REPAIR == 1 && CFS_CHECK_NAMES == 8 && COSMOFS_CORRUPT_LEAK == 0 && COSMOFS_CORRUPT_FREE_IN_USE == 1 && COSMOFS_CORRUPT_CROSSLINK == 2 && COSMOFS_CORRUPT_NLINK == 3 && COSMOFS_CORRUPT_ORPHAN == 4 && COSMOFS_CORRUPT_DANGLING == 5 && COSMOFS_CORRUPT_DIRENT == 6 && COSMOFS_CORRUPT_COUNTER == 7 && COSMOFS_CORRUPT_INO_SLOT == 8 && COSMOFS_CORRUPT_EXTENT_ORDER == 9 && COSMOFS_CORRUPT_BAD_PTR == 10 && COSMOFS_CORRUPT_TWO_PARENTS == 11 && COSMOFS_CORRUPT_SNAP_MEMBERS == 12 && COSMOFS_CORRUPT_DUP_NAME == 13 && COSMOFS_CORRUPT_CHAIN_CYCLE == 14 && COSMOFS_CORRUPT_NAMELEN == 15 && COSMOFS_CORRUPT_EXTENT_OVERLAP == 16",
+    )
     const COSMOFSTEST_CHECK_FACT_2: bool = true;
     /// cosmofstest_check.cee's and cosmofstest_orphan.cee's slot sizes
-    @cvalue("sizeof(struct cosmofs_check_report) <= 256 * 8 && sizeof(struct cosmofs_stats) <= 24 * 8 && sizeof(struct cosmo_stat) <= 8 * 8 && sizeof(struct cosmofs_scrub_stats) <= 8 * 8")
+    @cvalue(
+        "sizeof(struct cosmofs_check_report) <= 256 * 8 && sizeof(struct cosmofs_stats) <= 24 * 8 && sizeof(struct cosmo_stat) <= 8 * 8 && sizeof(struct cosmofs_scrub_stats) <= 8 * 8",
+    )
     const COSMOFSTEST_CHECK_FACT_3: bool = true;
 }
 
@@ -284,48 +292,62 @@ unsafe fn selftestCrypt(reason: *mut *CChar) -> bool {
     cosmofs_test_set_writeback(mnt(), false);
     // No key has arrived: the metadata mounted, the contents are shut.
     if (!(cosmofs_test_unlock(mnt(), "wrong key".ptr as *void, 9) == -EKEYREJECTED)) {
-        return failed(reason,
-            "check failed: cosmofs_test_unlock(cfst_mount_of(ENG), \"wrong key\", 9) == -EKEYREJECTED at line 272\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_test_unlock(cfst_mount_of(ENG), \"wrong key\", 9) == -EKEYREJECTED at line 272\0",
+        );
     }
     if (!(cosmofs_test_unlock(mnt(), key.ptr as *void, key.length) == 0)) {
-        return failed2(reason, "check failed: cosmofs_test_unlock(cfst_mount_of(ENG), key, sizeof(key) - 1) == 0 ",
-            "at line 276\0");
+        return failed2(
+            reason, "check failed: cosmofs_test_unlock(cfst_mount_of(ENG), key, sizeof(key) - 1) == 0 ",
+            "at line 276\0",
+        );
     }
 
     let secret = "the quick brown fox jumps over the lazy dog, repeatedly and at length";
     let sp = secret.ptr as *void;
     let sl = secret.length;
     if (!(cfst_write_file(c("/mnt/eng/secret.txt\0"), sp, sl))) {
-        return failed2(reason, "check failed: cfst_write_file(ENG \"/secret.txt\", secret, sizeof(secret) - 1) ",
-            "at line 284\0");
+        return failed2(
+            reason, "check failed: cfst_write_file(ENG \"/secret.txt\", secret, sizeof(secret) - 1) ",
+            "at line 284\0",
+        );
     }
     if (!(vfs_mkdir(0 as *mut vnode, c("/mnt/eng/private\0"), 493) == 0)) {
         return failed(reason, "check failed: vfs_mkdir(NULL, ENG \"/private\", 0755) == 0 at line 287\0");
     }
     if (!(cfst_write_file(c("/mnt/eng/private/inner\0"), sp, sl))) {
-        return failed(reason,
-            "check failed: cfst_write_file(ENG \"/private/inner\", secret, sizeof(secret) - 1) at line 291\0");
+        return failed(
+            reason,
+            "check failed: cfst_write_file(ENG \"/private/inner\", secret, sizeof(secret) - 1) at line 291\0",
+        );
     }
     if (!(vfs_sync() == 0)) {
         return failed(reason, "check failed: vfs_sync() == 0 at line 294\0");
     }
     if (!(cfst_read_matches(c("/mnt/eng/secret.txt\0"), sp, sl))) {
-        return failed(reason,
-            "check failed: cfst_read_matches(ENG \"/secret.txt\", secret, sizeof(secret) - 1) at line 298\0");
+        return failed(
+            reason,
+            "check failed: cfst_read_matches(ENG \"/secret.txt\", secret, sizeof(secret) - 1) at line 298\0",
+        );
     }
 
     // The plaintext is not on the disk. Read the block the file's data actually occupies and look for it.
     var f = 0 as *mut file;
     if (!(vfs_open(0 as *mut vnode, c("/mnt/eng/secret.txt\0"), O_RDONLY, 0, borrow mut f as *mut *mut file) == 0)) {
-        return failed2(reason, "check failed: vfs_open(NULL, ENG \"/secret.txt\", COSMO_O_RDONLY, 0, &f) == 0 ",
-            "at line 305\0");
+        return failed2(
+            reason, "check failed: vfs_open(NULL, ENG \"/secret.txt\", COSMO_O_RDONLY, 0, &f) == 0 ",
+            "at line 305\0",
+        );
     }
     let ino = fileIno(f);
     filePut(f);
     var dva: u64 = 0;
     if (!(cosmofs_test_block_of(mnt(), ino, 0, borrow mut dva as *mut u64) == 0)) {
-        return failed2(reason, "check failed: cosmofs_test_block_of(cfst_mount_of(ENG), ino, 0, &dva) == 0 ",
-            "at line 312\0");
+        return failed2(
+            reason, "check failed: cosmofs_test_block_of(cfst_mount_of(ENG), ino, 0, &dva) == 0 ",
+            "at line 312\0",
+        );
     }
     var p = 0 as *mut spool;
     if (!(pool_open(bd, borrow mut p as *mut *mut spool) == 0)) {
@@ -358,8 +380,10 @@ unsafe fn selftestCrypt(reason: *mut *CChar) -> bool {
     kfree(raw as *mut void);
     pool_close(p);
     if (!(vfs_open(0 as *mut vnode, c("/mnt/eng/secret.txt\0"), O_RDONLY, 0, borrow mut f as *mut *mut file) == 0)) {
-        return failed2(reason, "check failed: vfs_open(NULL, ENG \"/secret.txt\", COSMO_O_RDONLY, 0, &f) == 0 ",
-            "at line 346\0");
+        return failed2(
+            reason, "check failed: vfs_open(NULL, ENG \"/secret.txt\", COSMO_O_RDONLY, 0, &f) == 0 ",
+            "at line 346\0",
+        );
     }
     let got = borrow mut g_got as *mut [u8; 128] as *mut void;
     if (!(file_read(f, got, 128) < 0)) {
@@ -369,8 +393,10 @@ unsafe fn selftestCrypt(reason: *mut *CChar) -> bool {
 
     // Put it back by rewriting the file, then check the scrub.
     if (!(cfst_write_file(c("/mnt/eng/secret.txt\0"), sp, sl))) {
-        return failed2(reason, "check failed: cfst_write_file(ENG \"/secret.txt\", secret, sizeof(secret) - 1) ",
-            "at line 357\0");
+        return failed2(
+            reason, "check failed: cfst_write_file(ENG \"/secret.txt\", secret, sizeof(secret) - 1) ",
+            "at line 357\0",
+        );
     }
     if (!(vfs_sync() == 0)) {
         return failed(reason, "check failed: vfs_sync() == 0 at line 360\0");
@@ -378,8 +404,10 @@ unsafe fn selftestCrypt(reason: *mut *CChar) -> bool {
     var scSlot = [0u64; 8];
     let sc = borrow mut scSlot as *mut [u64; 8] as *mut cosmofs_scrub_stats;
     if (!(cosmofs_scrub(mnt(), sc, SCRUB_REPAIR) == 0 && Ptr.toBorrow(sc as *cosmofs_scrub_stats).unrecoverable == 0)) {
-        return failed2(reason, "check failed: cosmofs_scrub(cfst_mount_of(ENG), &sc, COSMOFS_SCRUB_REPAIR) == 0 && ",
-            "sc.unrecoverable == 0 at line 366\0");
+        return failed2(
+            reason, "check failed: cosmofs_scrub(cfst_mount_of(ENG), &sc, COSMOFS_SCRUB_REPAIR) == 0 && ",
+            "sc.unrecoverable == 0 at line 366\0",
+        );
     }
     if (!cryptMoved(bd, reason)) {
         return false;
@@ -392,15 +420,19 @@ unsafe fn selftestCrypt(reason: *mut *CChar) -> bool {
     // without being rewritten.
     let key2 = "a different key entirely";
     if (!(cosmofs_rekey(mnt(), key2.ptr as *void, key2.length) == 0)) {
-        return failed2(reason, "check failed: cosmofs_rekey(cfst_mount_of(ENG), key2, sizeof(key2) - 1) == 0 ",
-            "at line 380\0");
+        return failed2(
+            reason, "check failed: cosmofs_rekey(cfst_mount_of(ENG), key2, sizeof(key2) - 1) == 0 ",
+            "at line 380\0",
+        );
     }
     if (!(vfs_sync() == 0)) {
         return failed(reason, "check failed: vfs_sync() == 0 at line 383\0");
     }
     if (!(cfst_read_matches(c("/mnt/eng/secret.txt\0"), sp, sl))) {
-        return failed(reason,
-            "check failed: cfst_read_matches(ENG \"/secret.txt\", secret, sizeof(secret) - 1) at line 387\0");
+        return failed(
+            reason,
+            "check failed: cfst_read_matches(ENG \"/secret.txt\", secret, sizeof(secret) - 1) at line 387\0",
+        );
     }
     if (!(vfs_umount2(eng(), 0) == 0)) {
         return failed(reason, "check failed: vfs_umount(ENG) == 0 at line 390\0");
@@ -424,25 +456,35 @@ unsafe fn selftestCrypt(reason: *mut *CChar) -> bool {
     // And a scrub still runs, because what it checks needs no key.
     if (!(cosmofs_scrub(mnt(), sc, SCRUB_REPAIR) == 0 && Ptr.toBorrow(sc as *cosmofs_scrub_stats).unrecoverable == 0 &&
         Ptr.toBorrow(sc as *cosmofs_scrub_stats).blocks_read > 0)) {
-        return failed2(reason, "check failed: cosmofs_scrub(cfst_mount_of(ENG), &sc, COSMOFS_SCRUB_REPAIR) == 0 && ",
-            "sc.unrecoverable == 0 && sc.blocks_read > 0 at line 412\0");
+        return failed2(
+            reason, "check failed: cosmofs_scrub(cfst_mount_of(ENG), &sc, COSMOFS_SCRUB_REPAIR) == 0 && ",
+            "sc.unrecoverable == 0 && sc.blocks_read > 0 at line 412\0",
+        );
     }
     // The old key is refused; the new one opens it.
     if (!(cosmofs_test_unlock(mnt(), key.ptr as *void, key.length) == -EKEYREJECTED)) {
-        return failed2(reason, "check failed: cosmofs_test_unlock(cfst_mount_of(ENG), key, sizeof(key) - 1) == ",
-            "-EKEYREJECTED at line 417\0");
+        return failed2(
+            reason, "check failed: cosmofs_test_unlock(cfst_mount_of(ENG), key, sizeof(key) - 1) == ",
+            "-EKEYREJECTED at line 417\0",
+        );
     }
     if (!(cosmofs_test_unlock(mnt(), key2.ptr as *void, key2.length) == 0)) {
-        return failed(reason,
-            "check failed: cosmofs_test_unlock(cfst_mount_of(ENG), key2, sizeof(key2) - 1) == 0 at line 421\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_test_unlock(cfst_mount_of(ENG), key2, sizeof(key2) - 1) == 0 at line 421\0",
+        );
     }
     if (!(cfst_read_matches(c("/mnt/eng/secret.txt\0"), sp, sl))) {
-        return failed(reason,
-            "check failed: cfst_read_matches(ENG \"/secret.txt\", secret, sizeof(secret) - 1) at line 425\0");
+        return failed(
+            reason,
+            "check failed: cfst_read_matches(ENG \"/secret.txt\", secret, sizeof(secret) - 1) at line 425\0",
+        );
     }
     if (!(cfst_read_matches(c("/mnt/eng/private/inner\0"), sp, sl))) {
-        return failed(reason,
-            "check failed: cfst_read_matches(ENG \"/private/inner\", secret, sizeof(secret) - 1) at line 429\0");
+        return failed(
+            reason,
+            "check failed: cfst_read_matches(ENG \"/private/inner\", secret, sizeof(secret) - 1) at line 429\0",
+        );
     }
 
     if (!(vfs_umount2(eng(), 0) == 0)) {
@@ -467,8 +509,10 @@ unsafe fn selftestCrypt(reason: *mut *CChar) -> bool {
 unsafe fn cryptUnseeded(bd: *mut blkdev, key: StringView, reason: *mut *CChar) -> bool {
     let t0 = clock_now_ns();
     if (!(cosmofs_format_encrypted(bd, key.ptr as *void, key.length) == -EAGAIN)) {
-        return failed2(reason, "check failed: cosmofs_format_encrypted(bd, key, sizeof(key) - 1) == -EAGAIN ",
-            "at line 455\0");
+        return failed2(
+            reason, "check failed: cosmofs_format_encrypted(bd, key, sizeof(key) - 1) == -EAGAIN ",
+            "at line 455\0",
+        );
     }
     let waited = clock_now_ns() - t0;
     if (!(waited >= RANDOM_KEYGEN_WAIT_NS)) {
@@ -517,20 +561,26 @@ unsafe fn cryptMoved(bd: *mut blkdev, reason: *mut *CChar) -> bool {
     }
     var mf = 0 as *mut file;
     if (!(vfs_open(0 as *mut vnode, c("/mnt/eng/moved.bin\0"), O_RDONLY, 0, borrow mut mf as *mut *mut file) == 0)) {
-        return failed2(reason, "check failed: vfs_open(NULL, ENG \"/moved.bin\", COSMO_O_RDONLY, 0, &mf) == 0 ",
-            "at line 505\0");
+        return failed2(
+            reason, "check failed: vfs_open(NULL, ENG \"/moved.bin\", COSMO_O_RDONLY, 0, &mf) == 0 ",
+            "at line 505\0",
+        );
     }
     let mino = fileIno(mf);
     filePut(mf);
     var dva0: u64 = 0;
     var dva1: u64 = 0;
     if (!(cosmofs_test_block_of(mnt(), mino, 0, borrow mut dva0 as *mut u64) == 0)) {
-        return failed(reason,
-            "check failed: cosmofs_test_block_of(cfst_mount_of(ENG), mino, 0, &dva0) == 0 at line 513\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_test_block_of(cfst_mount_of(ENG), mino, 0, &dva0) == 0 at line 513\0",
+        );
     }
     if (!(cosmofs_test_block_of(mnt(), mino, 1, borrow mut dva1 as *mut u64) == 0)) {
-        return failed(reason,
-            "check failed: cosmofs_test_block_of(cfst_mount_of(ENG), mino, 1, &dva1) == 0 at line 517\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_test_block_of(cfst_mount_of(ENG), mino, 1, &dva1) == 0 at line 517\0",
+        );
     }
     var mp = 0 as *mut spool;
     if (!(pool_open(bd, borrow mut mp as *mut *mut spool) == 0)) {
@@ -552,8 +602,10 @@ unsafe fn cryptMoved(bd: *mut blkdev, reason: *mut *CChar) -> bool {
     // Its own tag travels with it in the checksum tree? No: the entry stays with the position, so this also stands in
     // for an attacker who moves both. Either way the position is wrong.
     if (!(vfs_open(0 as *mut vnode, c("/mnt/eng/moved.bin\0"), O_RDONLY, 0, borrow mut mf as *mut *mut file) == 0)) {
-        return failed2(reason, "check failed: vfs_open(NULL, ENG \"/moved.bin\", COSMO_O_RDONLY, 0, &mf) == 0 ",
-            "at line 540\0");
+        return failed2(
+            reason, "check failed: vfs_open(NULL, ENG \"/moved.bin\", COSMO_O_RDONLY, 0, &mf) == 0 ",
+            "at line 540\0",
+        );
     }
     let got = borrow mut g_got as *mut [u8; 128] as *mut void;
     if (!(file_pread(mf, got, 16, CFS_BLOCK as u64) < 0)) {
@@ -584,8 +636,10 @@ unsafe fn cryptNonces(bd: *mut blkdev, sp: *void, sl: usize, reason: *mut *CChar
         return false;
     }
     if (!(cfst_read_matches(c("/mnt/eng/nonce.bin\0"), sp, sl))) {
-        return failed(reason,
-            "check failed: cfst_read_matches(ENG \"/nonce.bin\", secret, sizeof(secret) - 1) at line 572\0");
+        return failed(
+            reason,
+            "check failed: cfst_read_matches(ENG \"/nonce.bin\", secret, sizeof(secret) - 1) at line 572\0",
+        );
     }
     if (!(vfs_unlink(0 as *mut vnode, c("/mnt/eng/nonce.bin\0")) == 0)) {
         return failed(reason, "check failed: vfs_unlink(NULL, ENG \"/nonce.bin\") == 0 at line 575\0");
@@ -599,8 +653,10 @@ unsafe fn cryptNoncesSeen(bd: *mut blkdev, sp: *void, sl: usize, seen: *mut u8, 
     var kept: usize = 0;
     for (round in 0u32..8) {
         if (!(cfst_write_file(c("/mnt/eng/nonce.bin\0"), sp, sl))) {
-            return failed(reason,
-                "check failed: cfst_write_file(ENG \"/nonce.bin\", secret, sizeof(secret) - 1) at line 587\0");
+            return failed(
+                reason,
+                "check failed: cfst_write_file(ENG \"/nonce.bin\", secret, sizeof(secret) - 1) at line 587\0",
+            );
         }
         if (!(vfs_sync() == 0)) {
             return failed(reason, "check failed: vfs_sync() == 0 at line 590\0");
@@ -608,15 +664,19 @@ unsafe fn cryptNoncesSeen(bd: *mut blkdev, sp: *void, sl: usize, seen: *mut u8, 
         var nf = 0 as *mut file;
         let orc = vfs_open(0 as *mut vnode, c("/mnt/eng/nonce.bin\0"), O_RDONLY, 0, borrow mut nf as *mut *mut file);
         if (!(orc == 0)) {
-            return failed(reason,
-                "check failed: vfs_open(NULL, ENG \"/nonce.bin\", COSMO_O_RDONLY, 0, &nf) == 0 at line 596\0");
+            return failed(
+                reason,
+                "check failed: vfs_open(NULL, ENG \"/nonce.bin\", COSMO_O_RDONLY, 0, &nf) == 0 at line 596\0",
+            );
         }
         let nino = fileIno(nf);
         filePut(nf);
         var ndva: u64 = 0;
         if (!(cosmofs_test_block_of(mnt(), nino, 0, borrow mut ndva as *mut u64) == 0)) {
-            return failed(reason,
-                "check failed: cosmofs_test_block_of(cfst_mount_of(ENG), nino, 0, &ndva) == 0 at line 603\0");
+            return failed(
+                reason,
+                "check failed: cosmofs_test_block_of(cfst_mount_of(ENG), nino, 0, &ndva) == 0 at line 603\0",
+            );
         }
         var np = 0 as *mut spool;
         if (!(pool_open(bd, borrow mut np as *mut *mut spool) == 0)) {
@@ -629,8 +689,10 @@ unsafe fn cryptNoncesSeen(bd: *mut blkdev, sp: *void, sl: usize, seen: *mut u8, 
         }
         for (prev in 0usize..kept) {
             if (!(memcmp(seen.add(prev * CFS_BLOCK) as *void, seen.add(kept * CFS_BLOCK) as *void, CFS_BLOCK) != 0)) {
-                return failed2(reason, "check failed: memcmp(seen + (size_t)prev * CFS_BLOCK, seen + (size_t)kept * ",
-                    "CFS_BLOCK, CFS_BLOCK) != 0 at line 617\0");
+                return failed2(
+                    reason, "check failed: memcmp(seen + (size_t)prev * CFS_BLOCK, seen + (size_t)kept * ",
+                    "CFS_BLOCK, CFS_BLOCK) != 0 at line 617\0",
+                );
             }
         }
         kept += 1;
@@ -686,8 +748,10 @@ unsafe fn selftestBadmembers(reason: *mut *CChar) -> bool {
     }
     let b = SliceMut.fromRaw(blk, CFS_BLOCK);
     if (!(memcmp(blk as *void, "COSMOFS1".ptr as *void, 8) == 0 && ByteOrder.readU64LE(b, SUPER_GENERATION) == 1)) {
-        return failed2(reason, "check failed: memcmp(sb->magic, CFS_MAGIC, 8) == 0 && sb->generation == 1 ",
-            "at line 674\0");
+        return failed2(
+            reason, "check failed: memcmp(sb->magic, CFS_MAGIC, 8) == 0 && sb->generation == 1 ",
+            "at line 674\0",
+        );
     }
     let members = ByteOrder.readU64LE(b, SUPER_MEMBERS);
     if (!(members != 0)) {
@@ -914,8 +978,10 @@ unsafe fn selftestCheckLeak(reason: *mut *CChar) -> bool {
     // that would have used it leaves one.
     var leaked: u64 = 0;
     if (!(corrupt(CORRUPT_LEAK, 0, borrow mut leaked as *mut u64) == 0)) {
-        return failed2(reason, "check failed: cosmofs_test_corrupt(cfst_mount_of(ENG), COSMOFS_CORRUPT_LEAK, 0, ",
-            "&leaked) == 0 at line 902\0");
+        return failed2(
+            reason, "check failed: cosmofs_test_corrupt(cfst_mount_of(ENG), COSMOFS_CORRUPT_LEAK, 0, ",
+            "&leaked) == 0 at line 902\0",
+        );
     }
     if (!(cfst_check_is_clean(reason, rp))) {
         return failed(reason, "check failed: cfst_check_is_clean(reason, &rep) at line 905\0");
@@ -927,8 +993,10 @@ unsafe fn selftestCheckLeak(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: rep.alloc_not_seen.count == 1 at line 911\0");
     }
     if (!(rep.alloc_not_seen.named == 1 && rep.alloc_not_seen.name[0] == leaked)) {
-        return failed(reason,
-            "check failed: rep.alloc_not_seen.named == 1 && rep.alloc_not_seen.name[0] == leaked at line 915\0");
+        return failed(
+            reason,
+            "check failed: rep.alloc_not_seen.named == 1 && rep.alloc_not_seen.name[0] == leaked at line 915\0",
+        );
     }
     if (!(rep.counted_free == freeBefore - 1)) {
         return failed(reason, "check failed: rep.counted_free == free_before - 1 at line 918\0");
@@ -939,8 +1007,10 @@ unsafe fn selftestCheckLeak(reason: *mut *CChar) -> bool {
 
     // Repair gives it back, and the second pass is clean.
     if (!(check(CHECK_REPAIR) == 0)) {
-        return failed2(reason, "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, COSMOFS_CHECK_REPAIR) == 0 ",
-            "at line 927\0");
+        return failed2(
+            reason, "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, COSMOFS_CHECK_REPAIR) == 0 ",
+            "at line 927\0",
+        );
     }
     if (!(rep.alloc_not_seen.repaired == 1)) {
         return failed(reason, "check failed: rep.alloc_not_seen.repaired == 1 at line 930\0");
@@ -998,22 +1068,28 @@ unsafe fn selftestCheckFaults(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: (file_ino = cfst_check_file_ino()) != 0 at line 982\0");
     }
     if (!(corrupt(CORRUPT_FREE_IN_USE, fileIno, wp) == 0)) {
-        return failed2(reason, "check failed: cosmofs_test_corrupt(cfst_mount_of(ENG), COSMOFS_CORRUPT_FREE_IN_USE, ",
-            "file_ino, &what) == 0 at line 986\0");
+        return failed2(
+            reason, "check failed: cosmofs_test_corrupt(cfst_mount_of(ENG), COSMOFS_CORRUPT_FREE_IN_USE, ",
+            "file_ino, &what) == 0 at line 986\0",
+        );
     }
     if (!(check(0) == 0)) {
         return failed(reason, "check failed: cosmofs_check(cfst_mount_of(ENG), &r, 0) == 0 at line 989\0");
     }
     if (!(r.seen_not_alloc.count == 1 && r.seen_not_alloc.name[0] == what)) {
-        return failed2(reason, "check failed: r.seen_not_alloc.count == 1 && r.seen_not_alloc.name[0] == what ",
-            "at line 993\0");
+        return failed2(
+            reason, "check failed: r.seen_not_alloc.count == 1 && r.seen_not_alloc.name[0] == what ",
+            "at line 993\0",
+        );
     }
     if (!(r.alloc_not_seen.count == 0)) {
         return failed(reason, "check failed: r.alloc_not_seen.count == 0 at line 996\0");
     }
     if (!(check(CHECK_REPAIR) == 0)) {
-        return failed2(reason, "check failed: cosmofs_check(cfst_mount_of(ENG), &r, COSMOFS_CHECK_REPAIR) == 0 ",
-            "at line 1000\0");
+        return failed2(
+            reason, "check failed: cosmofs_check(cfst_mount_of(ENG), &r, COSMOFS_CHECK_REPAIR) == 0 ",
+            "at line 1000\0",
+        );
     }
     if (!(r.seen_not_alloc.repaired == 0)) { // refused, and says so by not counting one
         return failed(reason, "check failed: r.seen_not_alloc.repaired == 0 at line 1003\0");
@@ -1029,8 +1105,10 @@ unsafe fn selftestCheckFaults(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: (file_ino = cfst_check_file_ino()) != 0 at line 1013\0");
     }
     if (!(corrupt(CORRUPT_CROSSLINK, fileIno, wp) == 0)) {
-        return failed2(reason, "check failed: cosmofs_test_corrupt(cfst_mount_of(ENG), COSMOFS_CORRUPT_CROSSLINK, ",
-            "file_ino, &what) == 0 at line 1017\0");
+        return failed2(
+            reason, "check failed: cosmofs_test_corrupt(cfst_mount_of(ENG), COSMOFS_CORRUPT_CROSSLINK, ",
+            "file_ino, &what) == 0 at line 1017\0",
+        );
     }
     if (!(check(0) == 0)) {
         return failed(reason, "check failed: cosmofs_check(cfst_mount_of(ENG), &r, 0) == 0 at line 1020\0");
@@ -1039,8 +1117,10 @@ unsafe fn selftestCheckFaults(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: r.dup.count == 1 && r.dup.name[0] == what at line 1023\0");
     }
     if (!(check(CHECK_REPAIR) == 0)) {
-        return failed2(reason, "check failed: cosmofs_check(cfst_mount_of(ENG), &r, COSMOFS_CHECK_REPAIR) == 0 ",
-            "at line 1027\0");
+        return failed2(
+            reason, "check failed: cosmofs_check(cfst_mount_of(ENG), &r, COSMOFS_CHECK_REPAIR) == 0 ",
+            "at line 1027\0",
+        );
     }
     if (!(r.dup.repaired == 0)) { // never repaired: choosing a winner is data loss
         return failed(reason, "check failed: r.dup.repaired == 0 at line 1030\0");
@@ -1056,8 +1136,10 @@ unsafe fn selftestCheckFaults(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: (file_ino = cfst_check_file_ino()) != 0 at line 1040\0");
     }
     if (!(corrupt(CORRUPT_NLINK, fileIno, wp) == 0)) {
-        return failed2(reason, "check failed: cosmofs_test_corrupt(cfst_mount_of(ENG), COSMOFS_CORRUPT_NLINK, ",
-            "file_ino, &what) == 0 at line 1044\0");
+        return failed2(
+            reason, "check failed: cosmofs_test_corrupt(cfst_mount_of(ENG), COSMOFS_CORRUPT_NLINK, ",
+            "file_ino, &what) == 0 at line 1044\0",
+        );
     }
     if (!(check(0) == 0)) {
         return failed(reason, "check failed: cosmofs_check(cfst_mount_of(ENG), &r, 0) == 0 at line 1047\0");
@@ -1066,8 +1148,10 @@ unsafe fn selftestCheckFaults(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: r.nlink_wrong.count == 1 && r.nlink_wrong.name[0] == what at line 1050\0");
     }
     if (!(check(CHECK_REPAIR) == 0)) {
-        return failed2(reason, "check failed: cosmofs_check(cfst_mount_of(ENG), &r, COSMOFS_CHECK_REPAIR) == 0 ",
-            "at line 1054\0");
+        return failed2(
+            reason, "check failed: cosmofs_check(cfst_mount_of(ENG), &r, COSMOFS_CHECK_REPAIR) == 0 ",
+            "at line 1054\0",
+        );
     }
     if (!(r.nlink_wrong.repaired == 1)) {
         return failed(reason, "check failed: r.nlink_wrong.repaired == 1 at line 1057\0");
@@ -1086,8 +1170,10 @@ unsafe fn selftestCheckFaults(reason: *mut *CChar) -> bool {
     }
     let freeBefore = r.counted_free;
     if (!(corrupt(CORRUPT_ORPHAN, 0, wp) == 0)) {
-        return failed2(reason, "check failed: cosmofs_test_corrupt(cfst_mount_of(ENG), COSMOFS_CORRUPT_ORPHAN, 0, ",
-            "&what) == 0 at line 1074\0");
+        return failed2(
+            reason, "check failed: cosmofs_test_corrupt(cfst_mount_of(ENG), COSMOFS_CORRUPT_ORPHAN, 0, ",
+            "&what) == 0 at line 1074\0",
+        );
     }
     if (!(check(0) == 0)) {
         return failed(reason, "check failed: cosmofs_check(cfst_mount_of(ENG), &r, 0) == 0 at line 1077\0");
@@ -1096,8 +1182,10 @@ unsafe fn selftestCheckFaults(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: r.orphan.count == 1 && r.orphan.name[0] == what at line 1080\0");
     }
     if (!(check(CHECK_REPAIR) == 0)) {
-        return failed2(reason, "check failed: cosmofs_check(cfst_mount_of(ENG), &r, COSMOFS_CHECK_REPAIR) == 0 ",
-            "at line 1084\0");
+        return failed2(
+            reason, "check failed: cosmofs_check(cfst_mount_of(ENG), &r, COSMOFS_CHECK_REPAIR) == 0 ",
+            "at line 1084\0",
+        );
     }
     if (!(r.orphan.repaired == 1)) {
         return failed(reason, "check failed: r.orphan.repaired == 1 at line 1087\0");
@@ -1136,23 +1224,29 @@ unsafe fn checkFaultsDangling(rp: *mut cosmofs_check_report, reason: *mut *CChar
         return failed(reason, "check failed: cfst_check_fixture(&bd, reason) at line 1120\0");
     }
     if (!(corrupt(CORRUPT_DANGLING, 0, wp) == 0)) {
-        return failed2(reason, "check failed: cosmofs_test_corrupt(cfst_mount_of(ENG), COSMOFS_CORRUPT_DANGLING, 0, ",
-            "&what) == 0 at line 1124\0");
+        return failed2(
+            reason, "check failed: cosmofs_test_corrupt(cfst_mount_of(ENG), COSMOFS_CORRUPT_DANGLING, 0, ",
+            "&what) == 0 at line 1124\0",
+        );
     }
     if (!(check(0) == 0)) {
         return failed(reason, "check failed: cosmofs_check(cfst_mount_of(ENG), &r, 0) == 0 at line 1127\0");
     }
     if (!(r.dangling_entry.count == 1 && r.dangling_entry.name[0] == what)) {
-        return failed2(reason, "check failed: r.dangling_entry.count == 1 && r.dangling_entry.name[0] == what ",
-            "at line 1131\0");
+        return failed2(
+            reason, "check failed: r.dangling_entry.count == 1 && r.dangling_entry.name[0] == what ",
+            "at line 1131\0",
+        );
     }
     let orphansAtDangle = r.orphan.count;
     if (!(orphansAtDangle >= 1)) { // the inode that lost its name
         return failed(reason, "check failed: orphans_at_dangle >= 1 at line 1135\0");
     }
     if (!(check(CHECK_REPAIR) == 0)) {
-        return failed2(reason, "check failed: cosmofs_check(cfst_mount_of(ENG), &r, COSMOFS_CHECK_REPAIR) == 0 ",
-            "at line 1139\0");
+        return failed2(
+            reason, "check failed: cosmofs_check(cfst_mount_of(ENG), &r, COSMOFS_CHECK_REPAIR) == 0 ",
+            "at line 1139\0",
+        );
     }
     if (!(r.repair_refused)) {
         return failed(reason, "check failed: r.repair_refused at line 1142\0");
@@ -1181,8 +1275,10 @@ unsafe fn checkFaultsDangling(rp: *mut cosmofs_check_report, reason: *mut *CChar
         return failed(reason, "check failed: cfst_check_fixture(&bd, reason) at line 1165\0");
     }
     if (!(corrupt(CORRUPT_DIRENT, 0, wp) == 0)) {
-        return failed2(reason, "check failed: cosmofs_test_corrupt(cfst_mount_of(ENG), COSMOFS_CORRUPT_DIRENT, 0, ",
-            "&what) == 0 at line 1169\0");
+        return failed2(
+            reason, "check failed: cosmofs_test_corrupt(cfst_mount_of(ENG), COSMOFS_CORRUPT_DIRENT, 0, ",
+            "&what) == 0 at line 1169\0",
+        );
     }
     if (!(check(0) == 0)) {
         return failed(reason, "check failed: cosmofs_check(cfst_mount_of(ENG), &r, 0) == 0 at line 1172\0");
@@ -1198,8 +1294,10 @@ unsafe fn checkFaultsDangling(rp: *mut cosmofs_check_report, reason: *mut *CChar
         return failed(reason, "check failed: orphans_at_dirent >= 1 at line 1182\0");
     }
     if (!(check(CHECK_REPAIR) == 0)) {
-        return failed2(reason, "check failed: cosmofs_check(cfst_mount_of(ENG), &r, COSMOFS_CHECK_REPAIR) == 0 ",
-            "at line 1186\0");
+        return failed2(
+            reason, "check failed: cosmofs_check(cfst_mount_of(ENG), &r, COSMOFS_CHECK_REPAIR) == 0 ",
+            "at line 1186\0",
+        );
     }
     if (!(r.repair_refused)) { // and repair still refuses
         return failed(reason, "check failed: r.repair_refused at line 1189\0");
@@ -1233,8 +1331,10 @@ unsafe fn checkFaultsDangling(rp: *mut cosmofs_check_report, reason: *mut *CChar
         return failed(reason, "check failed: inodes_was >= 2 at line 1217\0");
     }
     if (!(corrupt(CORRUPT_COUNTER, 0, wp) == 0)) {
-        return failed2(reason, "check failed: cosmofs_test_corrupt(cfst_mount_of(ENG), COSMOFS_CORRUPT_COUNTER, 0, ",
-            "&what) == 0 at line 1221\0");
+        return failed2(
+            reason, "check failed: cosmofs_test_corrupt(cfst_mount_of(ENG), COSMOFS_CORRUPT_COUNTER, 0, ",
+            "&what) == 0 at line 1221\0",
+        );
     }
     if (!(check(0) == 0)) {
         return failed(reason, "check failed: cosmofs_check(cfst_mount_of(ENG), &r, 0) == 0 at line 1224\0");
@@ -1243,15 +1343,19 @@ unsafe fn checkFaultsDangling(rp: *mut cosmofs_check_report, reason: *mut *CChar
         return failed(reason, "check failed: r.counter_wrong.count == 2 at line 1227\0");
     }
     if (!(r.counted_free == freeWas && r.counted_inodes == inodesWas)) { // the walk is unmoved
-        return failed2(reason, "check failed: r.counted_free == free_was && r.counted_inodes == inodes_was ",
-            "at line 1231\0");
+        return failed2(
+            reason, "check failed: r.counted_free == free_was && r.counted_inodes == inodes_was ",
+            "at line 1231\0",
+        );
     }
     if (!(r.orphan.count == 0)) { // a wrong total is not a missing inode
         return failed(reason, "check failed: r.orphan.count == 0 at line 1234\0");
     }
     if (!(check(CHECK_REPAIR) == 0)) {
-        return failed2(reason, "check failed: cosmofs_check(cfst_mount_of(ENG), &r, COSMOFS_CHECK_REPAIR) == 0 ",
-            "at line 1238\0");
+        return failed2(
+            reason, "check failed: cosmofs_check(cfst_mount_of(ENG), &r, COSMOFS_CHECK_REPAIR) == 0 ",
+            "at line 1238\0",
+        );
     }
     if (!(r.counter_wrong.repaired == 2)) {
         return failed(reason, "check failed: r.counter_wrong.repaired == 2 at line 1241\0");
@@ -1261,8 +1365,10 @@ unsafe fn checkFaultsDangling(rp: *mut cosmofs_check_report, reason: *mut *CChar
     }
     cfst_check_teardown(bd);
 
-    say2("selftest: cosmofs-check-faults: seven manufactured faults, each found by name, four repaired and three ",
-        "refused");
+    say2(
+        "selftest: cosmofs-check-faults: seven manufactured faults, each found by name, four repaired and three ",
+        "refused",
+    );
     return true;
 }
 
@@ -1278,8 +1384,10 @@ unsafe fn fileFault(bdp: *mut *mut blkdev, kind: u32, what: *mut u64, reason: *m
         return failed(reason, "check failed: (file_ino = cfst_check_file_ino()) != 0 at line 1262\0");
     }
     if (!(corrupt(kind, fileIno, what) == 0)) {
-        return failed2(reason, "check failed: cosmofs_test_corrupt(cfst_mount_of(ENG), COSMOFS_CORRUPT_<kind>, ",
-            "file_ino, &what) == 0 at line 1266\0");
+        return failed2(
+            reason, "check failed: cosmofs_test_corrupt(cfst_mount_of(ENG), COSMOFS_CORRUPT_<kind>, ",
+            "file_ino, &what) == 0 at line 1266\0",
+        );
     }
     if (!(check(0) == 0)) {
         return failed(reason, "check failed: cosmofs_check(cfst_mount_of(ENG), &r, 0) == 0 at line 1269\0");
@@ -1305,8 +1413,10 @@ unsafe fn selftestCheckExtentOrder(reason: *mut *CChar) -> bool {
         return false;
     }
     if (!(r.extent_order.count == 1 && r.extent_order.name[0] == what)) {
-        return failed2(reason, "check failed: r.extent_order.count == 1 && r.extent_order.name[0] == what ",
-            "at line 1293\0");
+        return failed2(
+            reason, "check failed: r.extent_order.count == 1 && r.extent_order.name[0] == what ",
+            "at line 1293\0",
+        );
     }
     // And NOT as an overlap: the whole reason there are two classes.
     if (!(r.extent_overlap.count == 0)) {
@@ -1315,13 +1425,17 @@ unsafe fn selftestCheckExtentOrder(reason: *mut *CChar) -> bool {
     // Nothing else fires: the runs the hook added point at allocated blocks of their own, so this is one finding and
     // not a pile.
     if (!(r.dup.count == 0 && r.seen_not_alloc.count == 0 && r.alloc_not_seen.count == 0)) {
-        return failed2(reason, "check failed: r.dup.count == 0 && r.seen_not_alloc.count == 0 && ",
-            "r.alloc_not_seen.count == 0 at line 1303\0");
+        return failed2(
+            reason, "check failed: r.dup.count == 0 && r.seen_not_alloc.count == 0 && ",
+            "r.alloc_not_seen.count == 0 at line 1303\0",
+        );
     }
     cfst_check_teardown(bd);
 
-    say2("selftest: cosmofs-check-extent-order: runs that descend by lblk are reported as extent_order and not as an ",
-        "overlap");
+    say2(
+        "selftest: cosmofs-check-extent-order: runs that descend by lblk are reported as extent_order and not as an ",
+        "overlap",
+    );
     return true;
 }
 
@@ -1336,8 +1450,10 @@ unsafe fn selftestCheckExtentOverlap(reason: *mut *CChar) -> bool {
         return false;
     }
     if (!(r.extent_overlap.count == 1 && r.extent_overlap.name[0] == what)) {
-        return failed2(reason, "check failed: r.extent_overlap.count == 1 && r.extent_overlap.name[0] == what ",
-            "at line 1324\0");
+        return failed2(
+            reason, "check failed: r.extent_overlap.count == 1 && r.extent_overlap.name[0] == what ",
+            "at line 1324\0",
+        );
     }
     if (!(r.extent_order.count == 0)) { // the runs ascend; only the ranges overlap
         return failed(reason, "check failed: r.extent_order.count == 0 at line 1327\0");
@@ -1350,13 +1466,17 @@ unsafe fn selftestCheckExtentOverlap(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: r.dup.count == 0 at line 1334\0");
     }
     if (!(r.seen_not_alloc.count == 0 && r.alloc_not_seen.count == 0)) {
-        return failed2(reason, "check failed: r.seen_not_alloc.count == 0 && r.alloc_not_seen.count == 0 ",
-            "at line 1338\0");
+        return failed2(
+            reason, "check failed: r.seen_not_alloc.count == 0 && r.alloc_not_seen.count == 0 ",
+            "at line 1338\0",
+        );
     }
     cfst_check_teardown(bd);
 
-    say2("selftest: cosmofs-check-extent-overlap: two runs of one inode covering one lblk at DIFFERENT pool blocks ",
-        "are reported, which the cross-link map cannot see");
+    say2(
+        "selftest: cosmofs-check-extent-overlap: two runs of one inode covering one lblk at DIFFERENT pool blocks ",
+        "are reported, which the cross-link map cannot see",
+    );
     return true;
 }
 
@@ -1384,8 +1504,10 @@ unsafe fn selftestCheckBadPtr(reason: *mut *CChar) -> bool {
     }
     cfst_check_teardown(bd);
 
-    say2("selftest: cosmofs-check-bad-ptr: a block pointer past the pool is reported and not used to index the seen ",
-        "map");
+    say2(
+        "selftest: cosmofs-check-bad-ptr: a block pointer past the pool is reported and not used to index the seen ",
+        "map",
+    );
     return true;
 }
 
@@ -1395,8 +1517,10 @@ unsafe fn dirBad(bdp: *mut *mut blkdev, kind: u32, ino: u64, reason: *mut *CChar
     let r = Ptr.toBorrow(report() as *cosmofs_check_report);
     var what: u64 = 0;
     if (!(cosmofs_test_corrupt(mnt(), kind, ino, borrow mut what as *mut u64) == 0)) {
-        return failed2(reason, "check failed: cosmofs_test_corrupt(cfst_mount_of(ENG), COSMOFS_CORRUPT_<kind>, ino, ",
-            "&what) == 0 at line 1383\0");
+        return failed2(
+            reason, "check failed: cosmofs_test_corrupt(cfst_mount_of(ENG), COSMOFS_CORRUPT_<kind>, ino, ",
+            "&what) == 0 at line 1383\0",
+        );
     }
     if (!(check(0) == 0)) {
         return failed(reason, "check failed: cosmofs_check(cfst_mount_of(ENG), &r, 0) == 0 at line 1386\0");
@@ -1420,8 +1544,10 @@ unsafe fn selftestCheckNamelen(reason: *mut *CChar) -> bool {
     if (!dirBad(borrow mut bd as *mut *mut blkdev, CORRUPT_NAMELEN, CFS_ROOT_INO, reason)) {
         return false;
     }
-    say2("selftest: cosmofs-check-namelen: an entry claiming a name longer than its slot is refused by length before ",
-        "its bytes are read");
+    say2(
+        "selftest: cosmofs-check-namelen: an entry claiming a name longer than its slot is refused by length before ",
+        "its bytes are read",
+    );
     return true;
 }
 
@@ -1440,8 +1566,10 @@ unsafe fn selftestCheckTwoParents(reason: *mut *CChar) -> bool {
     if (!dirBad(borrow mut bd as *mut *mut blkdev, CORRUPT_TWO_PARENTS, subIno, reason)) {
         return false;
     }
-    say2("selftest: cosmofs-check-two-parents: a directory named from two directories is reported, so the directory ",
-        "graph is checked for being a tree");
+    say2(
+        "selftest: cosmofs-check-two-parents: a directory named from two directories is reported, so the directory ",
+        "graph is checked for being a tree",
+    );
     return true;
 }
 
@@ -1472,8 +1600,10 @@ unsafe fn selftestCheckChainCycle(reason: *mut *CChar) -> bool {
     }
     cfst_check_teardown(bd);
 
-    say2("selftest: cosmofs-check-chain-cycle: an extent chain that returns to itself is reported and the walk ",
-        "terminates on its own guard");
+    say2(
+        "selftest: cosmofs-check-chain-cycle: an extent chain that returns to itself is reported and the walk ",
+        "terminates on its own guard",
+    );
     return true;
 }
 
@@ -1519,8 +1649,10 @@ unsafe fn selftestCheckSnapMembers(reason: *mut *CChar) -> bool {
     }
     cfst_check_teardown(bd);
 
-    say2("selftest: cosmofs-check-snap-members: a member count past its block is reported as the table being wrong, ",
-        "and the walk still reads what the block holds");
+    say2(
+        "selftest: cosmofs-check-snap-members: a member count past its block is reported as the table being wrong, ",
+        "and the walk still reads what the block holds",
+    );
     return true;
 }
 
@@ -1540,15 +1672,19 @@ unsafe fn selftestCheckDupName(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: cfst_check_fixture(&bd, reason) at line 1524\0");
     }
     if (!(corrupt(CORRUPT_DUP_NAME, CFS_ROOT_INO, borrow mut what as *mut u64) == 0)) {
-        return failed2(reason, "check failed: cosmofs_test_corrupt(cfst_mount_of(ENG), COSMOFS_CORRUPT_DUP_NAME, ",
-            "CFS_ROOT_INO, &what) == 0 at line 1528\0");
+        return failed2(
+            reason, "check failed: cosmofs_test_corrupt(cfst_mount_of(ENG), COSMOFS_CORRUPT_DUP_NAME, ",
+            "CFS_ROOT_INO, &what) == 0 at line 1528\0",
+        );
     }
     if (!(check(0) == 0)) {
         return failed(reason, "check failed: cosmofs_check(cfst_mount_of(ENG), &r, 0) == 0 at line 1531\0");
     }
     if (!(r.dir_dup_name.count == 1 && r.dir_dup_name.name[0] == what)) {
-        return failed2(reason, "check failed: r.dir_dup_name.count == 1 && r.dir_dup_name.name[0] == what ",
-            "at line 1535\0");
+        return failed2(
+            reason, "check failed: r.dir_dup_name.count == 1 && r.dir_dup_name.name[0] == what ",
+            "at line 1535\0",
+        );
     }
     cfst_check_teardown(bd);
 
@@ -1564,8 +1700,10 @@ unsafe fn selftestCheckDupName(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: cfst_check_fixture(&bd, reason) at line 1548\0");
     }
     if (!(cosmofs_test_name_hash(c("asl\0"), 3) == cosmofs_test_name_hash(c("bea\0"), 3))) {
-        return failed(reason,
-            "check failed: cosmofs_test_name_hash(\"asl\", 3) == cosmofs_test_name_hash(\"bea\", 3) at line 1552\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_test_name_hash(\"asl\", 3) == cosmofs_test_name_hash(\"bea\", 3) at line 1552\0",
+        );
     }
     if (!(cfst_write_file(c("/mnt/eng/asl\0"), "x".ptr as *void, 1))) {
         return failed(reason, "check failed: cfst_write_file(ENG \"/asl\", \"x\", 1) at line 1555\0");
@@ -1587,8 +1725,10 @@ unsafe fn selftestCheckDupName(reason: *mut *CChar) -> bool {
     }
     cfst_check_teardown(bd);
 
-    say2("selftest: cosmofs-check-dup-name: one name twice at two inodes is reported, and sixty-four distinct names ",
-        "in one directory are not");
+    say2(
+        "selftest: cosmofs-check-dup-name: one name twice at two inodes is reported, and sixty-four distinct names ",
+        "in one directory are not",
+    );
     return true;
 }
 
@@ -1606,8 +1746,10 @@ unsafe fn selftestCheckSnapshot(reason: *mut *CChar) -> bool {
     }
 
     if (!(cfst_write_file(c("/mnt/eng/held\0"), "the snapshot's copy".ptr as *void, 19))) {
-        return failed2(reason, "check failed: cfst_write_file(ENG \"/held\", \"the snapshot's copy\", 19) ",
-            "at line 1594\0");
+        return failed2(
+            reason, "check failed: cfst_write_file(ENG \"/held\", \"the snapshot's copy\", 19) ",
+            "at line 1594\0",
+        );
     }
     if (!(vfs_sync() == 0)) {
         return failed(reason, "check failed: vfs_sync() == 0 at line 1597\0");
@@ -1617,8 +1759,10 @@ unsafe fn selftestCheckSnapshot(reason: *mut *CChar) -> bool {
     }
     // Rewrite it: the old blocks are now the snapshot's alone.
     if (!(cfst_write_file(c("/mnt/eng/held\0"), "the live copy, different length".ptr as *void, 31))) {
-        return failed(reason,
-            "check failed: cfst_write_file(ENG \"/held\", \"the live copy, different length\", 31) at line 1605\0");
+        return failed(
+            reason,
+            "check failed: cfst_write_file(ENG \"/held\", \"the live copy, different length\", 31) at line 1605\0",
+        );
     }
     if (!(vfs_sync() == 0)) {
         return failed(reason, "check failed: vfs_sync() == 0 at line 1608\0");
@@ -1637,8 +1781,10 @@ unsafe fn selftestCheckSnapshot(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: r.dup.count == 0 at line 1621\0");
     }
     if (!(cfst_read_matches(c("/mnt/eng/.snapshots/keep/held\0"), "the snapshot's copy".ptr as *void, 19))) {
-        return failed2(reason, "check failed: cfst_read_matches(ENG \"/.snapshots/keep/held\", \"the snapshot's ",
-            "copy\", 19) at line 1625\0");
+        return failed2(
+            reason, "check failed: cfst_read_matches(ENG \"/.snapshots/keep/held\", \"the snapshot's ",
+            "copy\", 19) at line 1625\0",
+        );
     }
 
     // And after the snapshot goes, still clean: the blocks it held are free or the live tree's, and nothing is left

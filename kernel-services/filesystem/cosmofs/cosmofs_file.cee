@@ -10,8 +10,10 @@
 // which the test checks. What a build configuration decides -- the debug build's stuck-page check and the self-test
 // hook that counts runs -- is in `cfg` blocks (ADR 0080 §3.3); the run bound is cosmofs_internal.h's cfs_max_extents.
 
-@header("kernel/vfs.h", "kernel/kmalloc.h", "kernel/mutex.h", "kernel/pagecache.h", "kernel/string.h",
-    "kernel/cosmofs.h", "cosmofs_internal.h")
+@header(
+    "kernel/vfs.h", "kernel/kmalloc.h", "kernel/mutex.h", "kernel/pagecache.h", "kernel/string.h",
+    "kernel/cosmofs.h", "cosmofs_internal.h",
+)
 extern "C" {
     struct mount {
         fs_priv: *mut void;
@@ -172,8 +174,10 @@ unsafe fn readLogicalBlock(fs: *mut cfs, inp: *mut cfs_inode, lblk: u64, buf: *m
     }
     rc = cfs_record_read(fs, inp, e as *cfs_extent, rec);
     if (rc == 0) {
-        memcpy(buf as *mut void, rec.add((lblk - r.lblk as u64) as usize * CFS_BLOCK as usize) as *void,
-            CFS_BLOCK as usize);
+        memcpy(
+            buf as *mut void, rec.add((lblk - r.lblk as u64) as usize * CFS_BLOCK as usize) as *void,
+            CFS_BLOCK as usize,
+        );
     }
     kfree(rec as *mut void);
     return rc;
@@ -247,8 +251,10 @@ unsafe fn writeOnePage(fs: *mut cfs, inp: *mut cfs_inode, index: u64, buf: *void
         }
         rc = cfs_record_read(fs, inp, e as *cfs_extent, rec);
         if (rc == 0) {
-            memcpy(rec.add((index - r.lblk as u64) as usize * CFS_BLOCK as usize) as *mut void, buf,
-                CFS_BLOCK as usize);
+            memcpy(
+                rec.add((index - r.lblk as u64) as usize * CFS_BLOCK as usize) as *mut void, buf,
+                CFS_BLOCK as usize,
+            );
             rc = cfs_record_write(fs, inp, r.lblk as u64, rec as *u8, count, true); // a record replaced by a record
         }
         kfree(rec as *mut void);
@@ -489,8 +495,10 @@ unsafe fn writepages(vn: *mut vnode, index: u64, pages: **mut void, n: u32, done
             return -ENOMEM;
         }
         for (i in 0u32..CFS_RECORD_BLOCKS) {
-            memcpy(rec.add(i as usize * CFS_BLOCK as usize) as *mut void, pages.add(i as usize).read() as *void,
-                CFS_BLOCK as usize);
+            memcpy(
+                rec.add(i as usize * CFS_BLOCK as usize) as *mut void, pages.add(i as usize).read() as *void,
+                CFS_BLOCK as usize,
+            );
         }
         rc = cfs_record_write(fs, inp, index, rec as *u8, CFS_RECORD_BLOCKS, compress);
         kfree(rec as *mut void);

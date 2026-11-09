@@ -12,8 +12,10 @@
 // head points into itself, and the VFS's mount table, its lock and the root mount (vfs_internal.h) are imported
 // statics (ADR 0080 §3.2).
 
-@header("kernel/errno.h", "kernel/kmalloc.h", "kernel/log.h", "kernel/mountns.h", "kernel/panic.h", "kernel/string.h",
-    "kernel/process.h", "kernel/vfs.h", "vfs_internal.h")
+@header(
+    "kernel/errno.h", "kernel/kmalloc.h", "kernel/log.h", "kernel/mountns.h", "kernel/panic.h", "kernel/string.h",
+    "kernel/process.h", "kernel/vfs.h", "vfs_internal.h",
+)
 extern "C" {
     struct vnode {
         lock: mutex;
@@ -63,7 +65,10 @@ extern "C" {
 static mut INIT_NS: mount_ns = mount_ns {
     id: 0,
     refs: 1,
-    mounts: list_node { next: borrow mut INIT_NS.mounts as *mut list_node, prev: borrow mut INIT_NS.mounts as *mut list_node },
+    mounts: list_node {
+        next: borrow mut INIT_NS.mounts as *mut list_node,
+        prev: borrow mut INIT_NS.mounts as *mut list_node,
+    },
 };
 
 // errno.h, kmalloc.h and vfs.h's.
@@ -245,7 +250,7 @@ unsafe fn create(parent: *mut mount_ns, out: *mut *mut mount_ns) -> i32 {
         return rc;
     }
     let slot = Ptr.toBorrowMut(out);
-    * slot = ns;
+    *slot = ns;
     return 0;
 }
 

@@ -554,8 +554,10 @@ unsafe fn bufGet(fs: *mut cfs, blkno: u64, kind: u32, out: *mut *mut cfs_buf) ->
     var want = MhdrWant { mac: borrow fsOf(fs).mac as *cfs_mac, dva: blkno, kind: kind };
     var readOk = false;
     let data = bufOf(b).data;
-    let rc = cfs_read_repair(fs, blkno, data as *mut void, mhdrVerify, borrow mut want as *mut MhdrWant as *mut void,
-        0 as *mut bool, borrow mut readOk as *mut bool);
+    let rc = cfs_read_repair(
+        fs, blkno, data as *mut void, mhdrVerify, borrow mut want as *mut MhdrWant as *mut void,
+        0 as *mut bool, borrow mut readOk as *mut bool,
+    );
     if (rc != 0) {
         if (rc == -EIO && readOk) {
             logFault(fs, data as *u8, blkno, kind);
@@ -705,8 +707,10 @@ unsafe fn bufCow(fs: *mut cfs, bp: *mut *mut cfs_buf, parentSlot: *mut u64, exem
         // quietly allocating.
         nblk = resTake(res);
         if (nblk == 0) {
-            KernelLog.write(LogLevel.Error,
-                "cosmofs: the commit's reservation is short; refusing to allocate after the bitmap");
+            KernelLog.write(
+                LogLevel.Error,
+                "cosmofs: the commit's reservation is short; refusing to allocate after the bitmap",
+            );
             return -ENOSPC;
         }
     } else {
@@ -792,8 +796,10 @@ unsafe fn prepMeta(fs: *mut cfs, p: *mut cfs_prep, n: u32) -> i32 {
     }
     for (i in 0u32..n) {
         var got: u64 = 0;
-        var rc = cfs_alloc_run(fs, CFS_ALLOC_META, 0, 1, borrow mut s.blk[i as usize] as *mut u64,
-            borrow mut got as *mut u64);
+        var rc = cfs_alloc_run(
+            fs, CFS_ALLOC_META, 0, 1, borrow mut s.blk[i as usize] as *mut u64,
+            borrow mut got as *mut u64,
+        );
         let blk = s.blk[i as usize];
         if (rc == 0) {
             let b = bufMake(fs, blk);

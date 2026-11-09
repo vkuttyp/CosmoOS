@@ -9,8 +9,10 @@
 // checked against their C sizes (tests/host/test_cfscorrupt.c): a CeeSafe local cannot hold C state. The two entry
 // helpers cosmofs_format.h has as inline functions, the free run and the put, are written out here.
 
-@header("kernel/vfs.h", "kernel/kmalloc.h", "kernel/mutex.h", "kernel/string.h", "kernel/cosmofs.h",
-    "cosmofs_internal.h")
+@header(
+    "kernel/vfs.h", "kernel/kmalloc.h", "kernel/mutex.h", "kernel/string.h", "kernel/cosmofs.h",
+    "cosmofs_internal.h",
+)
 extern "C" {
     struct mount {
         fs_priv: *mut void;
@@ -331,8 +333,10 @@ unsafe fn rootEntry(fs: *mut cfs, kind: u32, token: *mut u64) -> i32 {
                 } else {
                     token.write(direntIno(block, i));
                     let ty = direntByte(block, i, DIRENT_TYPE);
-                    setDirentByte(block, i, DIRENT_TYPE,
-                        if (ty as u32 == CFS_TYPE_DIR) truncate<u8>(CFS_TYPE_REG) else truncate<u8>(CFS_TYPE_DIR));
+                    setDirentByte(
+                        block, i, DIRENT_TYPE,
+                        if (ty as u32 == CFS_TYPE_DIR) truncate<u8>(CFS_TYPE_REG) else truncate<u8>(CFS_TYPE_DIR),
+                    );
                 }
                 done = true;
             }
@@ -583,9 +587,12 @@ unsafe fn dupName(fs: *mut cfs, inp: *mut cfs_inode, ino: u64, token: *mut u64) 
                 var nm = [0u8; 255];
                 let d = blk as *cfs_dirent;
                 let version = Ptr.toBorrow(fs as *cfs).sb.version;
-                let nlen = if (cfs_dirent_check(d, src, version) != 0)
-                    cfs_dirent_name(d, src, borrow mut nm as *mut [u8; 255] as *mut CChar)
-                else 0;
+                let nlen = if (cfs_dirent_check(d, src, version) != 0) cfs_dirent_name(
+                    d,
+                    src,
+                    borrow mut nm as *mut [u8; 255] as *mut CChar,
+                )
+                    else 0;
                 let run = if (nlen != 0) freeRun(blk, 1 + cfs_dirent_extra(nlen)) else -1;
                 if (run < 0) {
                     rc = -ENOSPC;
@@ -713,8 +720,8 @@ unsafe fn longname(fs: *mut cfs, inp: *mut cfs_inode, ino: u64, kind: u32, token
 /// Whether `kind` is one of the whole-filesystem faults, valid without a target inode.
 fn wholeFs(kind: u32) -> bool =>
     kind == CORRUPT_LEAK || kind == CORRUPT_ORPHAN || kind == CORRUPT_DANGLING || kind == CORRUPT_DIRENT ||
-    kind == CORRUPT_COUNTER || kind == CORRUPT_SNAP_MEMBERS || kind == CORRUPT_SNAP_UUID ||
-    kind == CORRUPT_ROLLBACK_CRC;
+        kind == CORRUPT_COUNTER || kind == CORRUPT_SNAP_MEMBERS || kind == CORRUPT_SNAP_UUID ||
+        kind == CORRUPT_ROLLBACK_CRC;
 
 /// The case `kind` names, with the lock held.
 /// Safety: `fs` is a mounted filesystem, locked; `inp` the named inode (zeroed when `ino` is 0); `tp` writable.

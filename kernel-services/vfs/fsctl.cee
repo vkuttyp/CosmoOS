@@ -18,9 +18,11 @@
 // the operation table is C data this file defines, and the spinlock /proc/mounts is rendered under the VFS's
 // (vfs_internal.h), an imported static (ADR 0080 §3.2).
 
-@header("kernel/blk.h", "kernel/cosmofs.h", "kernel/cred.h", "kernel/errno.h", "kernel/kmalloc.h", "kernel/log.h",
+@header(
+    "kernel/blk.h", "kernel/cosmofs.h", "kernel/cred.h", "kernel/errno.h", "kernel/kmalloc.h", "kernel/log.h",
     "kernel/mountns.h", "kernel/mutex.h", "kernel/spinlock.h", "kernel/string.h", "kernel/vfs.h", "uapi/cosmo/fsctl.h",
-    "vfs_internal.h")
+    "vfs_internal.h",
+)
 extern "C" {
     struct credentials {
         euid: u32;
@@ -370,16 +372,24 @@ extern "C" {
     @cvalue("CFS_CHECK_NAMES == COSMO_FSCTL_NAMES && COSMOFS_SNAP_NAME_MAX + 1 == 32")
     const FSCTL_FACT_0: bool = true;
     /// fsctl.cee's fsctl.h values
-    @cvalue("COSMO_FSCTL_VERSION == 3 && COSMO_FSCTL_LIST == 1 && COSMO_FSCTL_CHECK == 2 && COSMO_FSCTL_SCRUB == 3 && COSMO_FSCTL_SNAP_CREATE == 4 && COSMO_FSCTL_SNAP_LIST == 5 && COSMO_FSCTL_SNAP_ROLLBACK == 7 && COSMO_FSCTL_SNAP_CLONE == 9 && COSMO_FSCTL_BOOT_OK == 10 && COSMO_FSCTL_CHECK_DEV == 11 && COSMO_FSCTL_SCRUB_EX == 12 && COSMO_FSCTL_POOL_STATUS == 13 && COSMO_FSCTL_POOL_SPARE_REMOVE == 20 && COSMO_FSCTL_KEY_INFO == 21 && COSMO_FSCTL_KEY_SLOT == 24 && COSMO_FSCTL_F_REPAIR == 1 && COSMO_FSCTL_F_SAFETY_NAME == 2 && COSMO_FSCTL_F_NO_SIZES == 4 && COSMO_FSCTL_F_BOOT == 8 && COSMO_FSCTL_CAP_CHECK == 1 && COSMO_FSCTL_CAP_SCRUB == 2 && COSMO_FSCTL_CAP_SNAP == 4 && COSMO_FSCTL_CAP_POOL == 8 && COSMO_FSCTL_R_PARTIAL == 1 && COSMO_FSCTL_R_CLEAN == 2 && COSMO_FSCTL_R_REPAIR_REFUSED == 4 && COSMO_FSCTL_DEV_F_CHECKED == 1 && COSMO_FSCTL_POOL_F_PENDING == 1 && COSMO_FSCTL_POOL_F_HELD == 2 && COSMO_FSCTL_SNAP_F_CLONE == 1 && COSMO_FSCTL_SNAP_F_TARGET == 2 && COSMO_FSCTL_SNAP_F_SAFETY == 4 && COSMO_FSCTL_SNAP_F_HELD == 8 && COSMO_FSCTL_SNAP_F_LIVE == 16 && COSMO_FSCTL_POOL_DEGRADED == 1 && COSMO_FSCTL_POOL_RESILVER == 2 && COSMO_FSCTL_COPY_F_WHOLE == 1 && COSMO_FSCTL_COPY_F_DETACH == 2 && COSMO_FSCTL_CLASSES == 16 && COSMO_FSCTL_NAMES == 8 && COSMO_FSCTL_SNAP_PAGE == 1024 && COSMO_FSCTL_NAME_MAX + 1 == 32")
+    @cvalue(
+        "COSMO_FSCTL_VERSION == 3 && COSMO_FSCTL_LIST == 1 && COSMO_FSCTL_CHECK == 2 && COSMO_FSCTL_SCRUB == 3 && COSMO_FSCTL_SNAP_CREATE == 4 && COSMO_FSCTL_SNAP_LIST == 5 && COSMO_FSCTL_SNAP_ROLLBACK == 7 && COSMO_FSCTL_SNAP_CLONE == 9 && COSMO_FSCTL_BOOT_OK == 10 && COSMO_FSCTL_CHECK_DEV == 11 && COSMO_FSCTL_SCRUB_EX == 12 && COSMO_FSCTL_POOL_STATUS == 13 && COSMO_FSCTL_POOL_SPARE_REMOVE == 20 && COSMO_FSCTL_KEY_INFO == 21 && COSMO_FSCTL_KEY_SLOT == 24 && COSMO_FSCTL_F_REPAIR == 1 && COSMO_FSCTL_F_SAFETY_NAME == 2 && COSMO_FSCTL_F_NO_SIZES == 4 && COSMO_FSCTL_F_BOOT == 8 && COSMO_FSCTL_CAP_CHECK == 1 && COSMO_FSCTL_CAP_SCRUB == 2 && COSMO_FSCTL_CAP_SNAP == 4 && COSMO_FSCTL_CAP_POOL == 8 && COSMO_FSCTL_R_PARTIAL == 1 && COSMO_FSCTL_R_CLEAN == 2 && COSMO_FSCTL_R_REPAIR_REFUSED == 4 && COSMO_FSCTL_DEV_F_CHECKED == 1 && COSMO_FSCTL_POOL_F_PENDING == 1 && COSMO_FSCTL_POOL_F_HELD == 2 && COSMO_FSCTL_SNAP_F_CLONE == 1 && COSMO_FSCTL_SNAP_F_TARGET == 2 && COSMO_FSCTL_SNAP_F_SAFETY == 4 && COSMO_FSCTL_SNAP_F_HELD == 8 && COSMO_FSCTL_SNAP_F_LIVE == 16 && COSMO_FSCTL_POOL_DEGRADED == 1 && COSMO_FSCTL_POOL_RESILVER == 2 && COSMO_FSCTL_COPY_F_WHOLE == 1 && COSMO_FSCTL_COPY_F_DETACH == 2 && COSMO_FSCTL_CLASSES == 16 && COSMO_FSCTL_NAMES == 8 && COSMO_FSCTL_SNAP_PAGE == 1024 && COSMO_FSCTL_NAME_MAX + 1 == 32",
+    )
     const FSCTL_FACT_1: bool = true;
     /// fsctl.cee's snapshot ops
-    @cvalue("COSMOFS_SNAP_CREATE == COSMO_FSCTL_SNAP_CREATE - 3 && COSMOFS_SNAP_LIST == COSMO_FSCTL_SNAP_LIST - 3 && COSMOFS_SNAP_DELETE == COSMO_FSCTL_SNAP_DELETE - 3 && COSMOFS_SNAP_ROLLBACK == COSMO_FSCTL_SNAP_ROLLBACK - 3 && COSMOFS_SNAP_CANCEL == COSMO_FSCTL_SNAP_CANCEL - 3 && COSMOFS_SNAP_CLONE == COSMO_FSCTL_SNAP_CLONE - 3 && COSMOFS_SNAP_BOOT_OK == COSMO_FSCTL_BOOT_OK - 3")
+    @cvalue(
+        "COSMOFS_SNAP_CREATE == COSMO_FSCTL_SNAP_CREATE - 3 && COSMOFS_SNAP_LIST == COSMO_FSCTL_SNAP_LIST - 3 && COSMOFS_SNAP_DELETE == COSMO_FSCTL_SNAP_DELETE - 3 && COSMOFS_SNAP_ROLLBACK == COSMO_FSCTL_SNAP_ROLLBACK - 3 && COSMOFS_SNAP_CANCEL == COSMO_FSCTL_SNAP_CANCEL - 3 && COSMOFS_SNAP_CLONE == COSMO_FSCTL_SNAP_CLONE - 3 && COSMOFS_SNAP_BOOT_OK == COSMO_FSCTL_BOOT_OK - 3",
+    )
     const FSCTL_FACT_2: bool = true;
     /// fsctl.cee's pool and key ops
-    @cvalue("(int)COSMOFS_POOL_STATUS == COSMO_FSCTL_POOL_STATUS - 13 && (int)COSMOFS_POOL_OFFLINE == COSMO_FSCTL_POOL_OFFLINE - 13 && (int)COSMOFS_POOL_ONLINE == COSMO_FSCTL_POOL_ONLINE - 13 && (int)COSMOFS_POOL_REPLACE == COSMO_FSCTL_POOL_REPLACE - 13 && (int)COSMOFS_POOL_ATTACH == COSMO_FSCTL_POOL_ATTACH - 13 && (int)COSMOFS_POOL_DETACH == COSMO_FSCTL_POOL_DETACH - 13 && (int)COSMOFS_POOL_SPARE_ADD == COSMO_FSCTL_POOL_SPARE_ADD - 13 && (int)COSMOFS_POOL_SPARE_REMOVE == COSMO_FSCTL_POOL_SPARE_REMOVE - 13 && (int)COSMOFS_KEY_INFO == COSMO_FSCTL_KEY_INFO - 21 && (int)COSMOFS_KEY_LOAD == COSMO_FSCTL_KEY_LOAD - 21 && (int)COSMOFS_KEY_UNLOAD == COSMO_FSCTL_KEY_UNLOAD - 21 && (int)COSMOFS_KEY_SLOT == COSMO_FSCTL_KEY_SLOT - 21")
+    @cvalue(
+        "(int)COSMOFS_POOL_STATUS == COSMO_FSCTL_POOL_STATUS - 13 && (int)COSMOFS_POOL_OFFLINE == COSMO_FSCTL_POOL_OFFLINE - 13 && (int)COSMOFS_POOL_ONLINE == COSMO_FSCTL_POOL_ONLINE - 13 && (int)COSMOFS_POOL_REPLACE == COSMO_FSCTL_POOL_REPLACE - 13 && (int)COSMOFS_POOL_ATTACH == COSMO_FSCTL_POOL_ATTACH - 13 && (int)COSMOFS_POOL_DETACH == COSMO_FSCTL_POOL_DETACH - 13 && (int)COSMOFS_POOL_SPARE_ADD == COSMO_FSCTL_POOL_SPARE_ADD - 13 && (int)COSMOFS_POOL_SPARE_REMOVE == COSMO_FSCTL_POOL_SPARE_REMOVE - 13 && (int)COSMOFS_KEY_INFO == COSMO_FSCTL_KEY_INFO - 21 && (int)COSMOFS_KEY_LOAD == COSMO_FSCTL_KEY_LOAD - 21 && (int)COSMOFS_KEY_UNLOAD == COSMO_FSCTL_KEY_UNLOAD - 21 && (int)COSMOFS_KEY_SLOT == COSMO_FSCTL_KEY_SLOT - 21",
+    )
     const FSCTL_FACT_3: bool = true;
     /// fsctl.cee's stack slots
-    @cvalue("sizeof(struct cosmofs_check_report) == 186 * 8 && sizeof(struct cosmofs_scrub_stats) == 8 * 8 && sizeof(struct cosmofs_snap_req) == 11 * 8 && sizeof(struct cosmofs_pool_req) == 11 * 8 && sizeof(struct cosmofs_key_req) == 4 * 8 && sizeof(struct cosmo_fsctl) == 11 * 8")
+    @cvalue(
+        "sizeof(struct cosmofs_check_report) == 186 * 8 && sizeof(struct cosmofs_scrub_stats) == 8 * 8 && sizeof(struct cosmofs_snap_req) == 11 * 8 && sizeof(struct cosmofs_pool_req) == 11 * 8 && sizeof(struct cosmofs_key_req) == 4 * 8 && sizeof(struct cosmo_fsctl) == 11 * 8",
+    )
     const FSCTL_FACT_4: bool = true;
 }
 
@@ -550,8 +560,10 @@ unsafe fn fillMount(m: *mut cosmo_fsctl_mount, mnt: *mount, nsId: u64, path: *CC
     rec.ns_id = nsId;
     rec.flags = src.flags;
     rec.caps = caps(mnt);
-    let _ = strlcpy((m as *mut u8).add(offsetOf<cosmo_fsctl_mount>(fstype)) as *mut CChar,
-        Ptr.toBorrow(src.fs as *fs_type).name, 16);
+    let _ = strlcpy(
+        (m as *mut u8).add(offsetOf<cosmo_fsctl_mount>(fstype)) as *mut CChar,
+        Ptr.toBorrow(src.fs as *fs_type).name, 16,
+    );
     let _ = strlcpy((m as *mut u8).add(offsetOf<cosmo_fsctl_mount>(path)) as *mut CChar, path, 1024);
 }
 
@@ -900,8 +912,10 @@ unsafe fn checkDev(o: *mut u8, cmd: borrow cosmo_fsctl) -> i64 {
         r.dev.slot_generation[0] = d.slot_generation[0];
         r.dev.slot_generation[1] = d.slot_generation[1];
         r.dev.replayed_frees = d.replayed_frees;
-        let _ = strlcpy(borrow mut r.dev.rollback_target as *mut [u8; 32] as *mut CChar,
-            borrow d.rollback_target as *[u8; 32] as *CChar, NAME_FIELD);
+        let _ = strlcpy(
+            borrow mut r.dev.rollback_target as *mut [u8; 32] as *mut CChar,
+            borrow d.rollback_target as *[u8; 32] as *CChar, NAME_FIELD,
+        );
         if ((d.flags & DEV_F_CHECKED) != 0) {
             checkRecord(borrow mut r.check as *mut cosmo_fsctl_check, rep as *cosmofs_check_report);
         }
@@ -1043,8 +1057,10 @@ unsafe fn snap(o: *mut u8, cmd: borrow cosmo_fsctl) -> i64 {
             (if ((f & COSMOFS_SNAP_I_HELD) != 0) SNAP_F_HELD else 0) |
             (if ((f & COSMOFS_SNAP_I_LIVE) != 0) SNAP_F_LIVE else 0);
         r.format = from.format;
-        let _ = strlcpy(borrow mut r.name as *mut [u8; 32] as *mut CChar, borrow from.name as *[u8; 32] as *CChar,
-            NAME_FIELD);
+        let _ = strlcpy(
+            borrow mut r.name as *mut [u8; 32] as *mut CChar, borrow from.name as *[u8; 32] as *CChar,
+            NAME_FIELD,
+        );
     }
     kfree(info as *mut void);
     // BOOT_OK's total is 1 when it released a hold, 0 when there was none.
@@ -1319,8 +1335,10 @@ static mut NODE: *mut vnode = 0 as *mut vnode;
 /// Safety: at boot, once /dev exists.
 @export("fsctl_dev_init")
 unsafe fn devInit() {
-    let rc = ramfs_mkchr("/dev/fsctl\0".ptr as *CChar, MODE, borrow mut FSCTL_OPS as *mut chrdev_ops as *chrdev_ops, 0 as *mut void,
-        borrow mut NODE as *mut *mut vnode);
+    let rc = ramfs_mkchr(
+        "/dev/fsctl\0".ptr as *CChar, MODE, borrow mut FSCTL_OPS as *mut chrdev_ops as *chrdev_ops, 0 as *mut void,
+        borrow mut NODE as *mut *mut vnode,
+    );
     if (rc != 0) {
         var buffer: [u8; 64] = [0; 64];
         var line = TextWriter.create(mut buffer[..]);
@@ -1332,6 +1350,8 @@ unsafe fn devInit() {
     // Said out loud on every boot, release included. No self-test runs in a release build, so this line is the only
     // evidence that the channel an operator needs is actually there -- and a release kernel that shipped the passes
     // with no way to reach them is the thing this unit exists to stop.
-    KernelLog.write(LogLevel.Info,
-        "fsctl: /dev/fsctl ready (0600): mount listing, check (mounted or not), scrub, snapshots, pools and keys");
+    KernelLog.write(
+        LogLevel.Info,
+        "fsctl: /dev/fsctl ready (0600): mount listing, check (mounted or not), scrub, snapshots, pools and keys",
+    );
 }

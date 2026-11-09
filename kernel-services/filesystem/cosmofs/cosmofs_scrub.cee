@@ -17,8 +17,10 @@
 // against their C sizes (tests/host/test_cfsscrub.c): a CeeSafe local cannot hold C state. The sysctl's variable,
 // g_cosmofs_scrub_rate, is this file's, C data the sysctl reads and writes atomically (ADR 0080 §3.2).
 
-@header("kernel/vfs.h", "kernel/storage.h", "kernel/timer.h", "kernel/sched.h", "kernel/wait.h", "kernel/cosmofs.h",
-    "cosmofs_internal.h")
+@header(
+    "kernel/vfs.h", "kernel/storage.h", "kernel/timer.h", "kernel/sched.h", "kernel/wait.h", "kernel/cosmofs.h",
+    "cosmofs_internal.h",
+)
 extern "C" {
     struct mount {
         fs_priv: *mut void;
@@ -300,7 +302,7 @@ struct Scrub {
     fs: *mut cfs;
     page: *mut u8;
     inodes: *mut u8; // one inode block's slots, copied out of the cache
-    slots: *mut u8; // an allocation index's chunk pointers, copied out
+    slots: *mut u8;  // an allocation index's chunk pointers, copied out
     blocksRead: u64;
     inodeCount: u64;
     repaired: u64;
@@ -309,10 +311,10 @@ struct Scrub {
     skipped: u64;
     repair: bool;
     pace: *mut cfs_pace; // fs.scrub_rate
-    commits: u64; // fs->commits when the walk last looked
+    commits: u64;        // fs->commits when the walk last looked
     done: *mut cfs_bits; // blocks verified (linear numbers)
-    stop: bool; // stop walking: `err` says why
-    err: i32; // -EIO: the transaction was abandoned during a pause; -ENOMEM
+    stop: bool;          // stop walking: `err` says why
+    err: i32;            // -EIO: the transaction was abandoned during a pause; -ENOMEM
 }
 
 /// The one place the lock is let go. Called only where the walk holds no buffer, so nothing it holds can go stale;

@@ -7,9 +7,11 @@
 // The vnodes, mounts and device tables stay C (vfs.h). The operation tables and ramfs_fs_type, C data the VFS and boot
 // composition name, are this file's (ADR 0080 §3.2), and readdir's callback type takes the imported enum vnode_type.
 
-@header("kernel/bootarchive.h", "kernel/cred.h", "kernel/errno.h", "kernel/fifo.h", "kernel/kmalloc.h", "kernel/list.h",
+@header(
+    "kernel/bootarchive.h", "kernel/cred.h", "kernel/errno.h", "kernel/fifo.h", "kernel/kmalloc.h", "kernel/list.h",
     "kernel/lockdep.h", "kernel/log.h", "kernel/mutex.h", "kernel/pagecache.h", "kernel/string.h", "kernel/vfs.h",
-    "kernel/page.h")
+    "kernel/page.h",
+)
 extern "C" {
     enum vnode_type: u32;
     /// vfs.h's operations, the members ramfs's tables set.
@@ -466,7 +468,14 @@ unsafe fn mkdir(dir: *mut vnode, name: *CChar, len: usize, mode: u32, out: *mut 
 /// node.
 /// Safety: as createCommon.
 @export("ramfs_mknod")
-unsafe fn mknod(dir: *mut vnode, name: *CChar, len: usize, mode: u32, nodeType: vnode_type, out: *mut *mut vnode) -> i32 {
+unsafe fn mknod(
+    dir: *mut vnode,
+    name: *CChar,
+    len: usize,
+    mode: u32,
+    nodeType: vnode_type,
+    out: *mut *mut vnode,
+) -> i32 {
     let kind = nodeType as u32;
     if (kind == VNODE_SOCK) {
         return createCommon(dir, name, len, mode, VNODE_SOCK, out);
@@ -658,8 +667,10 @@ unsafe fn rename(
 /// more; `*pos` is where the next call starts.
 /// Safety: `dir` is a live ramfs directory, locked; `pos` is writable; `arg` is `cb`'s argument.
 @export("ramfs_readdir")
-unsafe fn readdir(dir: *mut vnode, pos: *mut u64, cb: extern "C" fn(*mut void, *CChar, usize, u64, vnode_type) -> i32,
-    arg: *mut void) -> i32 {
+unsafe fn readdir(
+    dir: *mut vnode, pos: *mut u64, cb: extern "C" fn(*mut void, *CChar, usize, u64, vnode_type) -> i32,
+    arg: *mut void,
+) -> i32 {
     let n = nodeOf(dir);
     let at = Ptr.toBorrowMut(pos);
     var i: u64 = 0;
@@ -1091,8 +1102,10 @@ unsafe fn unmount(mnt: *mut mount) -> i32 {
 /// Safety: `path` and `data` as vfs_open and file_write take them.
 unsafe fn writeFile(path: *CChar, data: *void, len: usize, mode: u32) -> i32 {
     var f = 0 as *mut file;
-    let rc = vfs_open(0 as *mut vnode, path, COSMO_O_WRONLY | COSMO_O_CREAT | COSMO_O_TRUNC, mode,
-        borrow mut f as *mut *mut file);
+    let rc = vfs_open(
+        0 as *mut vnode, path, COSMO_O_WRONLY | COSMO_O_CREAT | COSMO_O_TRUNC, mode,
+        borrow mut f as *mut *mut file,
+    );
     if (rc != 0) {
         return rc;
     }

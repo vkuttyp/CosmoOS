@@ -8,7 +8,19 @@
 // was: the field is written by somebody, the accessor delivers it once, an ICMP error reaches the socket it is about
 // and only that socket, and a caller can ask.
 
-@header("nettest.h", "kernel/net/inet.h", "kernel/net/ip.h", "kernel/net/ether.h", "kernel/net/cksum.h", "kernel/netif.h", "kernel/mbuf.h", "kernel/socket.h", "kernel/selftest.h", "kernel/wait.h", "arch/cpu.h")
+@header(
+    "nettest.h",
+    "kernel/net/inet.h",
+    "kernel/net/ip.h",
+    "kernel/net/ether.h",
+    "kernel/net/cksum.h",
+    "kernel/netif.h",
+    "kernel/mbuf.h",
+    "kernel/socket.h",
+    "kernel/selftest.h",
+    "kernel/wait.h",
+    "arch/cpu.h",
+)
 extern "C" {
     struct netaddr {
         family: u16;

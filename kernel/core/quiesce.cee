@@ -8,7 +8,17 @@
 //
 // First drafted by Nova's c2nova (docs/tooling.md §9.4) from quiesce.c, then finished by hand.
 
-@header("arch/cpu.h", "arch/irq.h", "kernel/ipi.h", "kernel/percpu.h", "kernel/quiesce_core.h", "kernel/spinlock.h", "kernel/thread.h", "kernel/timer.h", "kernel/wait_types.h")
+@header(
+    "arch/cpu.h",
+    "arch/irq.h",
+    "kernel/ipi.h",
+    "kernel/percpu.h",
+    "kernel/quiesce_core.h",
+    "kernel/spinlock.h",
+    "kernel/thread.h",
+    "kernel/timer.h",
+    "kernel/wait_types.h",
+)
 extern "C" {
     @ctype("spinlock_t")
     struct spinlock_t;
@@ -55,7 +65,12 @@ extern "C" {
 extern "C" {
     fn wait_floor_check_sleep(ip: usize, what: *CChar);
     fn wait_floor_until(wq: *mut waitqueue, cond: extern "C" fn(*mut void) -> bool, arg: *mut void);
-    fn wait_floor_until_timeout(wq: *mut waitqueue, cond: extern "C" fn(*mut void) -> bool, arg: *mut void, ns: u64) -> bool;
+    fn wait_floor_until_timeout(
+        wq: *mut waitqueue,
+        cond: extern "C" fn(*mut void) -> bool,
+        arg: *mut void,
+        ns: u64,
+    ) -> bool;
     fn quiesce_floor_panic_3();
     fn quiesce_floor_kwarn_4(a0: u64, a1: u64, a2: u64);
     fn quiesce_floor_stall_check(waited: u64, pending: u64);
@@ -89,8 +104,8 @@ struct quiesce_head {
 struct quiesce_stats {
     epoch: u64;
     synchronizes: u64; // synchronize_quiesce calls completed
-    callbacks: u64; // call_quiesce callbacks run
-    max_wait_ns: u64; // longest grace period observed
+    callbacks: u64;    // call_quiesce callbacks run
+    max_wait_ns: u64;  // longest grace period observed
     // Straggler kick IPIs SENT -- one per pending CPU per round, not one per round: a round can kick several CPUs, so
     // this is the only one of the two that can be a denominator. The per-waiter `quiesce_test_sync_kicks` counts
     // rounds, which is what the eight-round bound is about.
@@ -107,11 +122,22 @@ struct quiesce_stats {
     // the observable: how *long* a grace period takes depends on where the other CPUs' ticks fall, but whether the
     // mechanism fires does not (Q18).
     gp_wakes: u64;
-    irq_syncs: u64; // synchronize_irq calls
+    irq_syncs: u64;        // synchronize_irq calls
     timer_sync_waits: u64; // timer_cancel_sync calls that waited for a running callback
 }
 
-static mut g_stats: quiesce_stats = quiesce_stats { epoch: 0, synchronizes: 0, callbacks: 0, max_wait_ns: 0, straggler_ipis: 0, kick_publishes: 0, gp_timeouts: 0, gp_wakes: 0, irq_syncs: 0, timer_sync_waits: 0 };
+static mut g_stats: quiesce_stats = quiesce_stats {
+    epoch: 0,
+    synchronizes: 0,
+    callbacks: 0,
+    max_wait_ns: 0,
+    straggler_ipis: 0,
+    kick_publishes: 0,
+    gp_timeouts: 0,
+    gp_wakes: 0,
+    irq_syncs: 0,
+    timer_sync_waits: 0,
+};
 static mut g_ready: bool = false;
 static mut g_kick_publishes: [u64; 64] = [0; 64];
 static mut g_cb_lock: spinlock_t = SPINLOCK_INIT("quiesce-cb\0".ptr as *CChar);
@@ -134,7 +160,11 @@ unsafe fn sync_quiesce_counting_until_6(arg: *mut void) -> bool {
     let c = Ptr.toBorrow(arg as *QuiesceWait6);
     let online = c.online;
     let target = c.target;
-    return (quiesce_core_pending((quiesce_floor_g_state() as *mut quiesce_state) as *quiesce_state, target, online) == 0);
+    return (quiesce_core_pending(
+        (quiesce_floor_g_state() as *mut quiesce_state) as *quiesce_state,
+        target,
+        online,
+    ) == 0);
 }
 
 /// An atomic view of a word only ever accessed atomically.
@@ -189,7 +219,10 @@ unsafe fn quiesce_note_quiescent_preemptible() -> bool {
     unsafe {
         var advanced: bool = quiesce_core_publish(quiesce_floor_g_state() as *mut quiesce_state, arch_cpu_id());
         if (g_ready && !(waitqueue_empty(quiesce_floor_g_gp_wq() as *mut waitqueue))) {
-            atomic_u64(borrow mut g_stats.gp_wakes as *mut u64).fetchAddWith((waitqueue_wake_all(quiesce_floor_g_gp_wq() as *mut waitqueue)) as u64, Ordering.Relaxed);
+            atomic_u64(borrow mut g_stats.gp_wakes as *mut u64).fetchAddWith(
+                (waitqueue_wake_all(quiesce_floor_g_gp_wq() as *mut waitqueue)) as u64,
+                Ordering.Relaxed,
+            );
         }
         return advanced;
     }
@@ -218,7 +251,11 @@ unsafe fn sync_quiesce_counting(timeouts: *mut u32, ip: usize) -> u32 {
         var warned: bool = false;
         {
             while (true) {
-                var pending: u64 = quiesce_core_pending((quiesce_floor_g_state() as *mut quiesce_state) as *quiesce_state, target, online);
+                var pending: u64 = quiesce_core_pending(
+                    (quiesce_floor_g_state() as *mut quiesce_state) as *quiesce_state,
+                    target,
+                    online,
+                );
                 pending &= cpu_online_mask();
                 if (pending == 0) {
                     break;
@@ -229,7 +266,9 @@ unsafe fn sync_quiesce_counting(timeouts: *mut u32, ip: usize) -> u32 {
                     {
                         var c: u32 = 0;
                         while (c < cpu_count()) {
-                            if ((pending & ((1 as u64) << (c))) != 0 && c != Ptr.toBorrow(pc as *percpu).cpu_id && cpu_online(c)) {
+                            if ((pending & ((1 as u64) << (c))) != 0 && c != Ptr.toBorrow(
+                                pc as *percpu,
+                            ).cpu_id && cpu_online(c)) {
                                 ipi_send(c, IPI_QUIESCE_KICK);
                                 sent += 1;
                             }
@@ -238,7 +277,9 @@ unsafe fn sync_quiesce_counting(timeouts: *mut u32, ip: usize) -> u32 {
                     }
                     if (sent != 0) {
                         kicks += 1;
-                        atomic_u64(borrow mut g_stats.straggler_ipis as *mut u64).fetchAddWith((sent) as u64, Ordering.Relaxed);
+                        atomic_u64(
+                            borrow mut g_stats.straggler_ipis as *mut u64,
+                        ).fetchAddWith((sent) as u64, Ordering.Relaxed);
                     }
                 }
                 if (waited > NS_PER_SEC && !(warned)) {
@@ -247,7 +288,12 @@ unsafe fn sync_quiesce_counting(timeouts: *mut u32, ip: usize) -> u32 {
                 }
                 quiesce_floor_stall_check(waited, pending); // a panic after 10 s, in a debug build only
                 var wait_ctx_6 = QuiesceWait6 { online: online, target: target };
-                if (!(wait_floor_until_timeout((quiesce_floor_g_gp_wq() as *mut waitqueue), sync_quiesce_counting_until_6, borrow mut wait_ctx_6 as *mut QuiesceWait6 as *mut void, (TICK_NS / 2)))) {
+                if (!(wait_floor_until_timeout(
+                    (quiesce_floor_g_gp_wq() as *mut waitqueue),
+                    sync_quiesce_counting_until_6,
+                    borrow mut wait_ctx_6 as *mut QuiesceWait6 as *mut void,
+                    (TICK_NS / 2),
+                ))) {
                     atomic_u64(borrow mut g_stats.gp_timeouts as *mut u64).fetchAddWith(1, Ordering.Relaxed);
                     if (!(timeouts).isNull()) {
                         (timeouts).write((timeouts).read() + 1);
@@ -310,7 +356,11 @@ unsafe fn worker_main(arg: *mut void) {
         {
             while (true) {
                 var wait_ctx_12 = QuiesceWait12 { unused: 0 };
-                wait_floor_until((quiesce_floor_g_worker_wq() as *mut waitqueue), worker_main_until_12, borrow mut wait_ctx_12 as *mut QuiesceWait12 as *mut void);
+                wait_floor_until(
+                    (quiesce_floor_g_worker_wq() as *mut waitqueue),
+                    worker_main_until_12,
+                    borrow mut wait_ctx_12 as *mut QuiesceWait12 as *mut void,
+                );
                 var s: usize = spin_lock_irqsave(borrow mut g_cb_lock as *mut spinlock_t);
                 var batch: *mut quiesce_head = g_cb_head;
                 g_cb_head = 0 as *mut quiesce_head;
@@ -364,7 +414,9 @@ unsafe fn quiesce_get_stats(out: *mut quiesce_stats) {
     unsafe {
         (out).write(g_stats);
         let r20 = Ptr.toBorrowMut(out);
-        r20.epoch = atomic_u64(borrow mut Ptr.toBorrowMut(quiesce_floor_g_state()).epoch as *mut u64).loadWith(LoadOrdering.Acquire);
+        r20.epoch = atomic_u64(
+            borrow mut Ptr.toBorrowMut(quiesce_floor_g_state()).epoch as *mut u64,
+        ).loadWith(LoadOrdering.Acquire);
     }
 }
 
@@ -399,4 +451,3 @@ unsafe fn quiesce_count_irq_sync() {
         g_stats.irq_syncs += 1;
     }
 }
-

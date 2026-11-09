@@ -10,7 +10,15 @@
 // order net-lo-tcp runs, and refuses a forced one as the C did without the hold. The racing client's state, the
 // census's result and its completion are static (the C's static structs), so no thread outlives what it reads.
 
-@header("nettest.h", "kernel/net/inet.h", "kernel/net/tcp.h", "kernel/completion.h", "kernel/socket.h", "kernel/selftest.h", "kernel/thread.h")
+@header(
+    "nettest.h",
+    "kernel/net/inet.h",
+    "kernel/net/tcp.h",
+    "kernel/completion.h",
+    "kernel/socket.h",
+    "kernel/selftest.h",
+    "kernel/thread.h",
+)
 extern "C" {
     struct thread;
     struct completion;

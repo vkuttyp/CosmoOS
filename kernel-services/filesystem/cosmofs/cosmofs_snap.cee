@@ -305,8 +305,10 @@ unsafe fn snaplistMaxId(fs: *mut cfs) -> u64 {
 /// Walk the list, calling `visit` for every live entry until it returns false. `visit` may modify the entry; the block
 /// is marked dirty then.
 /// Safety: as get; `arg` is what `visit` expects.
-unsafe fn snapWalk(fs: *mut cfs, visit: extern "C" fn(*mut cfs_snapshot, *mut void) -> bool, arg: *mut void,
-    write: bool) -> i32 {
+unsafe fn snapWalk(
+    fs: *mut cfs, visit: extern "C" fn(*mut cfs_snapshot, *mut void) -> bool, arg: *mut void,
+    write: bool,
+) -> i32 {
     var blkno = fsOf(fs).sb.snap_root;
     let slots = snaplistSlots(fs as *cfs);
     var guard: u32 = 0;
@@ -512,8 +514,13 @@ unsafe fn hasSnapshots(fs: *mut cfs) -> bool {
 /// its generation, so each member's bitmap is found through the table the snapshot pinned; before it there was one
 /// member and one index.
 /// Safety: as get; `s` an entry.
-unsafe fn snapAllocRoot(fs: *mut cfs, s: *cfs_snapshot, vdev: u32, out: borrow mut u64, unknown: borrow mut bool)
-    -> bool {
+unsafe fn snapAllocRoot(
+    fs: *mut cfs,
+    s: *cfs_snapshot,
+    vdev: u32,
+    out: borrow mut u64,
+    unknown: borrow mut bool,
+) -> bool {
     unknown = false;
     let e = snapOf(s);
     if (fsOf(fs).sb.version < 4) {
@@ -701,8 +708,10 @@ unsafe fn deadlistAppend(fs: *mut cfs, head: *mut u64, blk: u64, res: *mut cfs_r
 /// held blocks nothing referenced until that snapshot was deleted too; the bitmap each snapshot already records
 /// answers the question directly.
 /// Safety: as get; `remaining` `nrRemaining` entries.
-unsafe fn deadlistSettle(fs: *mut cfs, head0: u64, remaining: *cfs_snapshot, nrRemaining: u32,
-    keeperDeadlist: *mut u64, freed: borrow mut u64, kept: borrow mut u64) -> i32 {
+unsafe fn deadlistSettle(
+    fs: *mut cfs, head0: u64, remaining: *cfs_snapshot, nrRemaining: u32,
+    keeperDeadlist: *mut u64, freed: borrow mut u64, kept: borrow mut u64,
+) -> i32 {
     let size = layoutOf<cfs_snapshot>().size;
     var head = head0;
     var guard: u32 = 0;
@@ -1328,8 +1337,10 @@ unsafe fn snapRaise(fs: *mut cfs, reserved: *u8) -> i32 {
             setWord(b, LIST2_MAX_ID, maxId);
             var k: u32 = 0;
             while (k < CFS_SNAPS_PER_BLOCK2 && i + k < n) {
-                memcpy(payloadOf(b).add(LIST2_SNAP + k as usize * SNAP_SIZE) as *mut void,
-                    all.add((i + k) as usize * size) as *void, SNAP_SIZE);
+                memcpy(
+                    payloadOf(b).add(LIST2_SNAP + k as usize * SNAP_SIZE) as *mut void,
+                    all.add((i + k) as usize * size) as *void, SNAP_SIZE,
+                );
                 k += 1;
             }
             let g = fsOf(fs);
@@ -1444,8 +1455,7 @@ unsafe fn create(fs: *mut cfs, name: *CChar, identity: bool, out: *mut cfs_snaps
 /// is still committed first, so the snapshot names a durable tree.
 /// Safety: as create; `uuid` null or 16 bytes.
 @export("cfs_snapshot_create_ex")
-unsafe fn createEx(fs: *mut cfs, name: *CChar, identity: bool, commit: bool, uuid: *u8, out: *mut cfs_snapshot)
-    -> i32 {
+unsafe fn createEx(fs: *mut cfs, name: *CChar, identity: bool, commit: bool, uuid: *u8, out: *mut cfs_snapshot) -> i32 {
     if (name.isNull() || (name as *u8).read() == 0 || strlen(name) > CFS_SNAP_NAME_MAX) {
         return -EINVAL;
     }
@@ -1698,15 +1708,19 @@ unsafe fn delete(fs: *mut cfs, name: *CChar) -> i32 {
     var keeperHead: u64 = 0;
     if (nrRemaining == 0) {
         // Nothing remains: everything the snapshot held goes back.
-        rc = deadlistSettle(fs, d.deadlist, 0 as *cfs_snapshot, 0, borrow mut keeperHead as *mut u64, mut freed,
-            mut kept);
+        rc = deadlistSettle(
+            fs, d.deadlist, 0 as *cfs_snapshot, 0, borrow mut keeperHead as *mut u64, mut freed,
+            mut kept,
+        );
     } else {
         // The oldest remaining snapshot keeps what any of them still occupies; it is asked the same question when it
         // goes.
         let keeper = snapOf(remaining.add(oldest as usize * size) as *cfs_snapshot);
         keeperHead = keeper.deadlist;
-        rc = deadlistSettle(fs, d.deadlist, remaining as *cfs_snapshot, nrRemaining,
-            borrow mut keeperHead as *mut u64, mut freed, mut kept);
+        rc = deadlistSettle(
+            fs, d.deadlist, remaining as *cfs_snapshot, nrRemaining,
+            borrow mut keeperHead as *mut u64, mut freed, mut kept,
+        );
         if (rc == 0 && keeperHead != keeper.deadlist) {
             // Write the keeper's new deadlist head back into its entry, found by id: unique, where two entries can
             // share a generation (a snapshot taken twice with nothing committed between).
@@ -1866,8 +1880,10 @@ unsafe fn fixIdentity(fs: *mut cfs, fixed: *mut u32) -> i32 {
 // still uses.
 
 /// Safety: as get; `arg` is what `mark` expects.
-unsafe fn allocIndexWalk(fs: *mut cfs, idx: u64, mark: extern "C" fn(*mut void, u64), arg: *mut void,
-    rc: borrow mut i32) {
+unsafe fn allocIndexWalk(
+    fs: *mut cfs, idx: u64, mark: extern "C" fn(*mut void, u64), arg: *mut void,
+    rc: borrow mut i32,
+) {
     let lin = cfs_dva_lin(fs as *cfs, idx);
     if (idx == 0 || lin == CFS_DVA_NONE) {
         return;
@@ -1970,8 +1986,10 @@ unsafe fn walkHeld(fs: *mut cfs, s: *cfs_snapshot, mark: extern "C" fn(*mut void
 /// Allocates: only before a commit's fixpoint, which is where the mount's switch calls it.
 /// Safety: as get; `arg` is what `live` expects; `dropped` writable.
 @export("cfs_snapshot_deadlists_filter")
-unsafe fn deadlistsFilter(fs: *mut cfs, live: extern "C" fn(*mut void, u64) -> bool, arg: *mut void,
-    dropped: *mut u64) -> i32 {
+unsafe fn deadlistsFilter(
+    fs: *mut cfs, live: extern "C" fn(*mut void, u64) -> bool, arg: *mut void,
+    dropped: *mut u64,
+) -> i32 {
     dropped.write(0);
     if (fsOf(fs).sb.snap_root == 0) {
         return 0;

@@ -205,7 +205,14 @@ unsafe fn output(m: *mut mbuf, src: *in6_addr, dst: *in6_addr, proto: u8, hoplim
 
 /// The header in front of `packet`, then out through the loopback or through neighbour discovery and Ethernet.
 /// Safety: `nif` is referenced by the caller; the rest as ipv6_output.
-unsafe fn outputOn(nif: *mut netif, packet: *mut mbuf, srcAt: *in6_addr, dst: *in6_addr, proto: u8, hoplimit: u8) -> i32 {
+unsafe fn outputOn(
+    nif: *mut netif,
+    packet: *mut mbuf,
+    srcAt: *in6_addr,
+    dst: *in6_addr,
+    proto: u8,
+    hoplimit: u8,
+) -> i32 {
     var chosen: [u8; 16] = [0; 16];
     var source = srcAt;
     if (srcAt.isNull() || isUnspecified(Slice.fromRaw(srcAt as *u8, 16))) {
@@ -308,7 +315,9 @@ unsafe fn icmpInput(nif: *mut netif, received: *mut mbuf, ip6: *ipv6_hdr) {
             p.flags = p.flags & ((M_BCAST | M_MCAST) ^ 0xffffffff);
         }
         count(borrow ECHO_REPLIED);
-        let from = if (isMulticast(Slice.fromRaw(dstAt as *u8, 16))) borrow Ptr.toBorrow(nif).ip6_ll as *in6_addr else dstAt;
+        let from = if (isMulticast(
+            Slice.fromRaw(dstAt as *u8, 16),
+        )) borrow Ptr.toBorrow(nif).ip6_ll as *in6_addr else dstAt;
         icmpSend(m, from, srcAt);
     } else if (kind == ICMPV6_NS) {
         if (h.hoplimit == 255) {

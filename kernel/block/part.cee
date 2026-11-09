@@ -50,7 +50,7 @@ extern "C" {
         index: u32;
         first_lba: u64;
         last_lba: u64;
-        @cname ("type") kind: [u8; 16];
+        @cname("type") kind: [u8; 16];
         uuid: [u8; 16];
     }
     struct gpt_table {
@@ -62,7 +62,7 @@ extern "C" {
         index: u32;
         start: u64;
         uuid: [u8; 16];
-        @cname ("type") kind: [u8; 16];
+        @cname("type") kind: [u8; 16];
     }
 
     fn blk_register_named(bd: *mut blkdev, name: *CChar) -> i32;

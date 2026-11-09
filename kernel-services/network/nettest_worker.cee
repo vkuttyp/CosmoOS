@@ -6,7 +6,16 @@
 // the test's start as the C's memset did; the hooks read the interface they wait for from a static (the C's struct
 // netif_remove_worker_state, whose address was the hooks' argument).
 
-@header("nettest.h", "kernel/net/inet.h", "kernel/net/ether.h", "kernel/netif.h", "kernel/mbuf.h", "kernel/completion.h", "kernel/selftest.h", "kernel/thread.h")
+@header(
+    "nettest.h",
+    "kernel/net/inet.h",
+    "kernel/net/ether.h",
+    "kernel/netif.h",
+    "kernel/mbuf.h",
+    "kernel/completion.h",
+    "kernel/selftest.h",
+    "kernel/thread.h",
+)
 extern "C" {
     struct thread;
     struct completion;

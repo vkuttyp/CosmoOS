@@ -10,9 +10,11 @@
 // up after it, whatever it returned; what the cleanup releases is a `Rig` the two share. The pool, its copies, the
 // statistics and the requests stay C (kernel/storage.h, kernel/cosmofs.h, cosmofs_internal.h).
 
-@header("kernel/blk.h", "kernel/vfs.h", "kernel/kmalloc.h", "kernel/ramblk.h", "kernel/string.h", "kernel/storage.h",
+@header(
+    "kernel/blk.h", "kernel/vfs.h", "kernel/kmalloc.h", "kernel/ramblk.h", "kernel/string.h", "kernel/storage.h",
     "kernel/cosmofs.h", "uapi/cosmo/syscall.h", "cosmofs_internal.h", "kernel/errno.h", "kernel/selftest.h",
-    "cosmofs_format.h")
+    "cosmofs_format.h",
+)
 extern "C" {
     struct blkdev {
         name: [u8; 16];
@@ -149,13 +151,19 @@ extern "C" {
     const ENODEV: i32 = 19;
     const VFS_UMOUNT_FORCE: u32 = 1;
     /// cosmofstest_copies.cee's errno.h, vfs.h and cosmofs_format.h values
-    @cvalue("COSMO_O_RDONLY == 0 && CFS_BLOCK == 4096 && CFS_FORMAT_VERSION == 11 && CFS_DVA_VDEV_SHIFT == 56 && CFS_DVA(0, 12345) == 12345")
+    @cvalue(
+        "COSMO_O_RDONLY == 0 && CFS_BLOCK == 4096 && CFS_FORMAT_VERSION == 11 && CFS_DVA_VDEV_SHIFT == 56 && CFS_DVA(0, 12345) == 12345",
+    )
     const COSMOFSTEST_COPIES_FACT_0: bool = true;
     /// cosmofstest_copies.cee's storage.h and cosmofs.h values
-    @cvalue("POOL_COPY_ONLINE == 0 && POOL_COPY_MISSING == 1 && POOL_COPY_OFFLINE == 2 && POOL_COPY_FAULTED == 3 && POOL_COPY_RESILVERING == 4 && COSMOFS_POOL_OFFLINE == 1 && COSMOFS_POOL_ONLINE == 2 && COSMOFS_POOL_REPLACE == 3 && COSMOFS_POOL_ATTACH == 4 && COSMOFS_POOL_DETACH == 5 && COSMOFS_POOL_SPARE_ADD == 6 && COSMOFS_SCRUB_REPAIR == 1")
+    @cvalue(
+        "POOL_COPY_ONLINE == 0 && POOL_COPY_MISSING == 1 && POOL_COPY_OFFLINE == 2 && POOL_COPY_FAULTED == 3 && POOL_COPY_RESILVERING == 4 && COSMOFS_POOL_OFFLINE == 1 && COSMOFS_POOL_ONLINE == 2 && COSMOFS_POOL_REPLACE == 3 && COSMOFS_POOL_ATTACH == 4 && COSMOFS_POOL_DETACH == 5 && COSMOFS_POOL_SPARE_ADD == 6 && COSMOFS_SCRUB_REPAIR == 1",
+    )
     const COSMOFSTEST_COPIES_FACT_1: bool = true;
     /// cosmofstest_copies.cee's record sizes
-    @cvalue("sizeof(struct ramblk_write) == 24 && offsetof(struct ramblk_write, sector) == 0 && offsetof(struct ramblk_write, nsectors) == 8 && sizeof(struct cosmofs_stats) <= 128 && sizeof(struct cosmofs_scrub_stats) <= 64 && sizeof(struct cosmofs_pool_req) <= 96 && sizeof(struct cfs_super) <= 21 * 8")
+    @cvalue(
+        "sizeof(struct ramblk_write) == 24 && offsetof(struct ramblk_write, sector) == 0 && offsetof(struct ramblk_write, nsectors) == 8 && sizeof(struct cosmofs_stats) <= 128 && sizeof(struct cosmofs_scrub_stats) <= 64 && sizeof(struct cosmofs_pool_req) <= 96 && sizeof(struct cfs_super) <= 21 * 8",
+    )
     const COSMOFSTEST_COPIES_FACT_2: bool = true;
 }
 
@@ -312,25 +320,33 @@ unsafe fn copyStates(s: borrow mut Rig, reason: *mut *CChar) -> bool {
     let rv = r as *mut void;
 
     if (!(pool_open(b0, borrow mut s.p as *mut *mut spool) == 0 && pool_add_copy(s.p, 0, b1) == 0)) {
-        return failed(reason,
-            "check failed: pool_open(bd[0], &p) == 0 && pool_add_copy(p, 0, bd[1]) == 0 at line 305\0");
+        return failed(
+            reason,
+            "check failed: pool_open(bd[0], &p) == 0 && pool_add_copy(p, 0, bd[1]) == 0 at line 305\0",
+        );
     }
     var p = s.p;
     if (!(m0(p).ncopies == 2 && m0(p).region_blocks == 1 && !pool_degraded(p))) {
-        return failed(reason,
-            "check failed: p->m[0].ncopies == 2 && p->m[0].region_blocks == 1 && !pool_degraded(p) at line 310\0");
+        return failed(
+            reason,
+            "check failed: p->m[0].ncopies == 2 && p->m[0].region_blocks == 1 && !pool_degraded(p) at line 310\0",
+        );
     }
     if (!(pool_write(p, 5, wv) == 0 && pool_flush(p) == 0)) {
         return failed(reason, "check failed: pool_write(p, 5, w) == 0 && pool_flush(p) == 0 at line 313\0");
     }
     pool_commit_done(p, 7);
     if (!(pool_read_copy(p, 5, 0, rv) == 0 && memcmp(rv, wv, BLOCK) == 0)) {
-        return failed(reason,
-            "check failed: pool_read_copy(p, 5, 0, r) == 0 && memcmp(r, w, CFS_BLOCK) == 0 at line 318\0");
+        return failed(
+            reason,
+            "check failed: pool_read_copy(p, 5, 0, r) == 0 && memcmp(r, w, CFS_BLOCK) == 0 at line 318\0",
+        );
     }
     if (!(pool_read_copy(p, 5, 1, rv) == 0 && memcmp(rv, wv, BLOCK) == 0)) {
-        return failed(reason,
-            "check failed: pool_read_copy(p, 5, 1, r) == 0 && memcmp(r, w, CFS_BLOCK) == 0 at line 322\0");
+        return failed(
+            reason,
+            "check failed: pool_read_copy(p, 5, 1, r) == 0 && memcmp(r, w, CFS_BLOCK) == 0 at line 322\0",
+        );
     }
 
     // A failing copy: written around, counted, FAULTED past the limit.
@@ -343,13 +359,17 @@ unsafe fn copyStates(s: borrow mut Rig, reason: *mut *CChar) -> bool {
         }
     }
     if (!(cp(p, 1).state == COPY_ONLINE && cp(p, 1).write_errors == 3)) {
-        return failed(reason,
-            "check failed: p->m[0].copy[1].state == POOL_COPY_ONLINE && p->...copy[1].write_errors == 3 at line 336\0");
+        return failed(
+            reason,
+            "check failed: p->m[0].copy[1].state == POOL_COPY_ONLINE && p->...copy[1].write_errors == 3 at line 336\0",
+        );
     }
     // Still ONLINE, and what it failed is a hole: not read from it, the member not whole (Codex on #439).
     if (!(!pool_copy_readable(p, 10, 1) && !pool_copy_readable(p, 12, 1) && pool_copy_readable(p, 5, 1))) {
-        return failed(reason,
-            "check failed: !pool_copy_readable(p, 10, 1) && !pool_copy_read...ol_copy_readable(p, 5, 1) at line 341\0");
+        return failed(
+            reason,
+            "check failed: !pool_copy_readable(p, 10, 1) && !pool_copy_read...ol_copy_readable(p, 5, 1) at line 341\0",
+        );
     }
     if (!(pool_copy_online(p, 0, 1) && pool_degraded(p))) {
         return failed(reason, "check failed: pool_copy_online(p, 0, 1) && pool_degraded(p) at line 344\0");
@@ -358,8 +378,10 @@ unsafe fn copyStates(s: borrow mut Rig, reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: pool_write(p, 13, w) == 0 at line 347\0");
     }
     if (!(cp(p, 1).state == COPY_FAULTED && pv(p).state_seq != seq && pool_degraded(p))) {
-        return failed(reason,
-            "check failed: p->m[0].copy[1].state == POOL_COPY_FAULTED && p-...= seq && pool_degraded(p) at line 351\0");
+        return failed(
+            reason,
+            "check failed: p->m[0].copy[1].state == POOL_COPY_FAULTED && p-...= seq && pool_degraded(p) at line 351\0",
+        );
     }
     if (!(cp(p, 1).since == 7 && !cp(p, 1).whole)) {
         return failed(reason, "check failed: p->m[0].copy[1].since == 7 && !p->m[0].copy[1].whole at line 354\0");
@@ -372,12 +394,16 @@ unsafe fn copyStates(s: borrow mut Rig, reason: *mut *CChar) -> bool {
     }
     // Not written from now on, not read, and what it misses is recorded.
     if (!(pool_write(p, 20, wv) == 0 && pool_copy_missed(p, 20, 1) && cp(p, 1).write_errors == 4)) {
-        return failed(reason,
-            "check failed: pool_write(p, 20, w) == 0 && pool_copy_missed(p,...copy[1].write_errors == 4 at line 365\0");
+        return failed(
+            reason,
+            "check failed: pool_write(p, 20, w) == 0 && pool_copy_missed(p,...copy[1].write_errors == 4 at line 365\0",
+        );
     }
     if (!(!pool_copy_readable(p, 20, 1) && pool_read_copy(p, 20, 1, rv) == -ENODEV)) {
-        return failed(reason,
-            "check failed: !pool_copy_readable(p, 20, 1) && pool_read_copy(p, 20, 1, r) == -ENODEV at line 369\0");
+        return failed(
+            reason,
+            "check failed: !pool_copy_readable(p, 20, 1) && pool_read_copy(p, 20, 1, r) == -ENODEV at line 369\0",
+        );
     }
     if (!(pool_read(p, 20, rv) == 0 && memcmp(rv, wv, BLOCK) == 0)) {
         return failed(reason, "check failed: pool_read(p, 20, r) == 0 && memcmp(r, w, CFS_BLOCK) == 0 at line 372\0");
@@ -385,8 +411,10 @@ unsafe fn copyStates(s: borrow mut Rig, reason: *mut *CChar) -> bool {
 
     // The last ONLINE copy: not offline, and not faulted by a count.
     if (!(pool_copy_set_state(p, 0, 0, COPY_OFFLINE, 0) == -EBUSY)) {
-        return failed(reason,
-            "check failed: pool_copy_set_state(p, 0, 0, POOL_COPY_OFFLINE, 0) == -EBUSY at line 378\0");
+        return failed(
+            reason,
+            "check failed: pool_copy_set_state(p, 0, 0, POOL_COPY_OFFLINE, 0) == -EBUSY at line 378\0",
+        );
     }
     ramblk_set_fail(b0, -EIO);
     for (i in 0u32..5) {
@@ -399,8 +427,10 @@ unsafe fn copyStates(s: borrow mut Rig, reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: pool_read(p, 30, r) == -EIO at line 388\0");
     }
     if (!(cp(p, 0).state == COPY_ONLINE && cp(p, 0).write_errors == 5)) {
-        return failed(reason,
-            "check failed: p->m[0].copy[0].state == POOL_COPY_ONLINE && p->...copy[0].write_errors == 5 at line 392\0");
+        return failed(
+            reason,
+            "check failed: p->m[0].copy[0].state == POOL_COPY_ONLINE && p->...copy[0].write_errors == 5 at line 392\0",
+        );
     }
     // no other copy took block 30: no hole
     if (!(pool_copy_readable(p, 30, 0))) {
@@ -417,8 +447,10 @@ unsafe fn copyStates(s: borrow mut Rig, reason: *mut *CChar) -> bool {
     ramblk_set_fail(b1, 0);
     // A copy that missed writes comes back only through a resilver.
     if (!(pool_copy_set_state(p, 0, 1, COPY_ONLINE, 0) == -EAGAIN)) {
-        return failed(reason,
-            "check failed: pool_copy_set_state(p, 0, 1, POOL_COPY_ONLINE, 0) == -EAGAIN at line 410\0");
+        return failed(
+            reason,
+            "check failed: pool_copy_set_state(p, 0, 1, POOL_COPY_ONLINE, 0) == -EAGAIN at line 410\0",
+        );
     }
     pool_close(p);
     s.p = 0 as *mut spool;
@@ -426,8 +458,10 @@ unsafe fn copyStates(s: borrow mut Rig, reason: *mut *CChar) -> bool {
     // A device that is gone is MISSING at once, whatever the limit, and what it may have held only in its cache is
     // missed too.
     if (!(pool_open(b0, borrow mut s.p as *mut *mut spool) == 0 && pool_add_copy(s.p, 0, b1) == 0)) {
-        return failed(reason,
-            "check failed: pool_open(bd[0], &p) == 0 && pool_add_copy(p, 0, bd[1]) == 0 at line 419\0");
+        return failed(
+            reason,
+            "check failed: pool_open(bd[0], &p) == 0 && pool_add_copy(p, 0, bd[1]) == 0 at line 419\0",
+        );
     }
     p = s.p;
     pool_commit_done(p, 9);
@@ -439,12 +473,16 @@ unsafe fn copyStates(s: borrow mut Rig, reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: pool_write(p, 4, w) == 0 at line 428\0");
     }
     if (!(cp(p, 1).state == COPY_MISSING && cp(p, 1).write_errors == 1)) {
-        return failed(reason,
-            "check failed: p->m[0].copy[1].state == POOL_COPY_MISSING && p-...copy[1].write_errors == 1 at line 432\0");
+        return failed(
+            reason,
+            "check failed: p->m[0].copy[1].state == POOL_COPY_MISSING && p-...copy[1].write_errors == 1 at line 432\0",
+        );
     }
     if (!(cp(p, 1).since == 9 && pool_copy_missed(p, 3, 1) && pool_copy_missed(p, 4, 1))) {
-        return failed(reason,
-            "check failed: p->m[0].copy[1].since == 9 && pool_copy_missed(p...pool_copy_missed(p, 4, 1) at line 436\0");
+        return failed(
+            reason,
+            "check failed: p->m[0].copy[1].since == 9 && pool_copy_missed(p...pool_copy_missed(p, 4, 1) at line 436\0",
+        );
     }
     if (!(!pool_copy_missed(p, 2, 1) && !pool_copy_missed(p, 5, 1))) {
         return failed(reason, "check failed: !pool_copy_missed(p, 2, 1) && !pool_copy_missed(p, 5, 1) at line 439\0");
@@ -460,18 +498,24 @@ unsafe fn copyStates(s: borrow mut Rig, reason: *mut *CChar) -> bool {
     // OFFLINE and back: with nothing written meanwhile it is ONLINE again; then the other copy goes, reads come from
     // this one, and the one that missed a write stays out.
     if (!(pool_open(b0, borrow mut s.p as *mut *mut spool) == 0 && pool_add_copy(s.p, 0, b1) == 0)) {
-        return failed(reason,
-            "check failed: pool_open(bd[0], &p) == 0 && pool_add_copy(p, 0, bd[1]) == 0 at line 453\0");
+        return failed(
+            reason,
+            "check failed: pool_open(bd[0], &p) == 0 && pool_add_copy(p, 0, bd[1]) == 0 at line 453\0",
+        );
     }
     p = s.p;
     pool_commit_done(p, 11);
     if (!(pool_copy_set_state(p, 0, 1, COPY_OFFLINE, 0) == 0 && !pool_copy_readable(p, 0, 1))) {
-        return failed(reason,
-            "check failed: pool_copy_set_state(p, 0, 1, POOL_COPY_OFFLINE, ...ol_copy_readable(p, 0, 1) at line 459\0");
+        return failed(
+            reason,
+            "check failed: pool_copy_set_state(p, 0, 1, POOL_COPY_OFFLINE, ...ol_copy_readable(p, 0, 1) at line 459\0",
+        );
     }
     if (!(pool_copy_set_state(p, 0, 1, COPY_ONLINE, 0) == 0 && !pool_degraded(p))) {
-        return failed(reason,
-            "check failed: pool_copy_set_state(p, 0, 1, POOL_COPY_ONLINE, 0) == 0 && !pool_degraded(p) at line 463\0");
+        return failed(
+            reason,
+            "check failed: pool_copy_set_state(p, 0, 1, POOL_COPY_ONLINE, 0) == 0 && !pool_degraded(p) at line 463\0",
+        );
     }
     if (!(pool_copy_set_state(p, 0, 0, COPY_OFFLINE, 0) == 0)) {
         return failed(reason, "check failed: pool_copy_set_state(p, 0, 0, POOL_COPY_OFFLINE, 0) == 0 at line 466\0");
@@ -480,12 +524,16 @@ unsafe fn copyStates(s: borrow mut Rig, reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: pool_read(p, 5, r) == 0 && memcmp(r, w, CFS_BLOCK) == 0 at line 469\0");
     }
     if (!(pool_write(p, 6, wv) == 0 && pool_copy_missed(p, 6, 0) && !pool_copy_missed(p, 7, 0))) {
-        return failed(reason,
-            "check failed: pool_write(p, 6, w) == 0 && pool_copy_missed(p, ...pool_copy_missed(p, 7, 0) at line 473\0");
+        return failed(
+            reason,
+            "check failed: pool_write(p, 6, w) == 0 && pool_copy_missed(p, ...pool_copy_missed(p, 7, 0) at line 473\0",
+        );
     }
     if (!(pool_copy_set_state(p, 0, 0, COPY_ONLINE, 0) == -EAGAIN)) {
-        return failed(reason,
-            "check failed: pool_copy_set_state(p, 0, 0, POOL_COPY_ONLINE, 0) == -EAGAIN at line 477\0");
+        return failed(
+            reason,
+            "check failed: pool_copy_set_state(p, 0, 0, POOL_COPY_ONLINE, 0) == -EAGAIN at line 477\0",
+        );
     }
     var buffer = [0u8; 120];
     var line = TextWriter.create(mut buffer[..]);
@@ -588,12 +636,16 @@ unsafe fn degraded(s: borrow mut Rig, reason: *mut *CChar) -> bool {
     var stSlot = [0u64; 16];
     let st = borrow mut stSlot as *mut [u64; 16] as *mut cosmofs_stats;
     if (!(cfst_write_file(c("/mnt/eng/a\0"), d, len) && vfs_sync() == 0)) {
-        return failed(reason,
-            "check failed: write_file(ENG \"/a\", data, sizeof(data)) && vfs_sync() == 0 at line 579\0");
+        return failed(
+            reason,
+            "check failed: write_file(ENG \"/a\", data, sizeof(data)) && vfs_sync() == 0 at line 579\0",
+        );
     }
     if (!(stats(st) == 0 && sv(st).devices == 2 && sv(st).degraded == 0)) {
-        return failed(reason,
-            "check failed: cosmofs_stats(mount_of(ENG), &st) == 0 && st.dev... == 2 && st.degraded == 0 at line 583\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_stats(mount_of(ENG), &st) == 0 && st.dev... == 2 && st.degraded == 0 at line 583\0",
+        );
     }
     let v0 = sv(st).version;
     // a healthy mirror's commits do not raise it
@@ -601,8 +653,10 @@ unsafe fn degraded(s: borrow mut Rig, reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: v0 == CFS_FORMAT_VERSION at line 588\0");
     }
     if (!(mountsLineHas("/mnt/eng", c(" rw 0 0\0")) && !mountsLineHas("/mnt/eng", c("degraded\0")))) {
-        return failed(reason,
-            "check failed: mounts_line_has(ENG, \" rw 0 0\") && !mounts_line_has(ENG, \"degraded\") at line 592\0");
+        return failed(
+            reason,
+            "check failed: mounts_line_has(ENG, \" rw 0 0\") && !mounts_line_has(ENG, \"degraded\") at line 592\0",
+        );
     }
 
     // Pull copy 1: the writes go on, the pool says it is degraded.
@@ -614,8 +668,10 @@ unsafe fn degraded(s: borrow mut Rig, reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: vfs_sync() == 0 at line 601\0");
     }
     if (!(stats(st) == 0 && sv(st).devices == 1 && sv(st).degraded == 1)) {
-        return failed(reason,
-            "check failed: cosmofs_stats(mount_of(ENG), &st) == 0 && st.dev... == 1 && st.degraded == 1 at line 605\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_stats(mount_of(ENG), &st) == 0 && st.dev... == 1 && st.degraded == 1 at line 605\0",
+        );
     }
     // recorded, so raised
     if (!(sv(st).version == 13)) {
@@ -625,8 +681,10 @@ unsafe fn degraded(s: borrow mut Rig, reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: mounts_line_has(ENG, \" rw,degraded 0 0\") at line 612\0");
     }
     if (!(cfst_read_matches(c("/mnt/eng/a\0"), d, len) && cfst_read_matches(c("/mnt/eng/b\0"), d, len))) {
-        return failed(reason,
-            "check failed: read_matches(ENG \"/a\", data, sizeof(data)) && .../b\", data, sizeof(data)) at line 616\0");
+        return failed(
+            reason,
+            "check failed: read_matches(ENG \"/a\", data, sizeof(data)) && .../b\", data, sizeof(data)) at line 616\0",
+        );
     }
 
     // Both copies gone: the read of a block no copy holds is -EIO, a commit that reaches no copy is -EIO, and the
@@ -653,8 +711,10 @@ unsafe fn degraded(s: borrow mut Rig, reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: vfs_sync() == -EIO at line 640\0");
     }
     if (!(stats(st) == 0 && sv(st).devices == 0 && sv(st).degraded == 2)) {
-        return failed(reason,
-            "check failed: cosmofs_stats(mount_of(ENG), &st) == 0 && st.dev... == 0 && st.degraded == 2 at line 644\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_stats(mount_of(ENG), &st) == 0 && st.dev... == 0 && st.degraded == 2 at line 644\0",
+        );
     }
     mirrorDown(s);
 
@@ -676,8 +736,10 @@ unsafe fn degraded(s: borrow mut Rig, reason: *mut *CChar) -> bool {
         name.text("/mnt/eng/f");
         name.decimal(i as u64);
         if (!(cfst_write_file(name.cText(), d, len) && vfs_sync() == 0)) {
-            return failed(reason,
-                "check failed: write_file(name, data, sizeof(data)) && vfs_sync() == 0 at line 667\0");
+            return failed(
+                reason,
+                "check failed: write_file(name, data, sizeof(data)) && vfs_sync() == 0 at line 667\0",
+            );
         }
         i += 1;
     }
@@ -690,12 +752,16 @@ unsafe fn degraded(s: borrow mut Rig, reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: vfs_sync() == 0 at line 677\0");
     }
     if (!(stats(st) == 0 && sv(st).degraded == 1 && sv(st).version == 13)) {
-        return failed(reason,
-            "check failed: cosmofs_stats(mount_of(ENG), &st) == 0 && st.deg... == 1 && st.version == 13 at line 681\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_stats(mount_of(ENG), &st) == 0 && st.deg... == 1 && st.version == 13 at line 681\0",
+        );
     }
     if (!(cfst_write_file(c("/mnt/eng/after\0"), d, len) && vfs_sync() == 0)) {
-        return failed(reason,
-            "check failed: write_file(ENG \"/after\", data, sizeof(data)) && vfs_sync() == 0 at line 685\0");
+        return failed(
+            reason,
+            "check failed: write_file(ENG \"/after\", data, sizeof(data)) && vfs_sync() == 0 at line 685\0",
+        );
     }
     ramblk_set_fail(s.bd[1], 0);
     if (!(umount(eng()) == 0)) {
@@ -707,12 +773,16 @@ unsafe fn degraded(s: borrow mut Rig, reason: *mut *CChar) -> bool {
     cosmofs_test_set_writeback(cfst_mount_of(eng()), false);
     pool = engPool();
     if (!(!pool.isNull() && cp(pool, 1).state == COPY_FAULTED && cp(pool, 1).dev.isNull())) {
-        return failed(reason,
-            "check failed: pool != NULL && pool->m[0].copy[1].state == POOL...>m[0].copy[1].dev == NULL at line 698\0");
+        return failed(
+            reason,
+            "check failed: pool != NULL && pool->m[0].copy[1].state == POOL...>m[0].copy[1].dev == NULL at line 698\0",
+        );
     }
     if (!(stats(st) == 0 && sv(st).devices == 1 && sv(st).degraded == 1)) {
-        return failed(reason,
-            "check failed: cosmofs_stats(mount_of(ENG), &st) == 0 && st.dev... == 1 && st.degraded == 1 at line 702\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_stats(mount_of(ENG), &st) == 0 && st.dev... == 1 && st.degraded == 1 at line 702\0",
+        );
     }
     if (!(cfst_read_matches(c("/mnt/eng/after\0"), d, len))) {
         return failed(reason, "check failed: read_matches(ENG \"/after\", data, sizeof(data)) at line 705\0");
@@ -720,8 +790,10 @@ unsafe fn degraded(s: borrow mut Rig, reason: *mut *CChar) -> bool {
     if (!(mountsLineHas("/mnt/eng", c("rw,degraded\0")))) {
         return failed(reason, "check failed: mounts_line_has(ENG, \"rw,degraded\") at line 708\0");
     }
-    KernelLog.write(LogLevel.Info,
-        "selftest: cosmofs-degraded: writes go on with a copy pulled; FAULTED is kept across a remount");
+    KernelLog.write(
+        LogLevel.Info,
+        "selftest: cosmofs-degraded: writes go on with a copy pulled; FAULTED is kept across a remount",
+    );
     return true;
 }
 
@@ -783,8 +855,10 @@ unsafe fn copyBitmap(s: borrow mut Rig, reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: mirror_up(bd, 512) at line 768\0");
     }
     if (!(cfst_write_file(c("/mnt/eng/before\0"), d, len) && vfs_sync() == 0)) {
-        return failed(reason,
-            "check failed: write_file(ENG \"/before\", data, sizeof(data)) && vfs_sync() == 0 at line 772\0");
+        return failed(
+            reason,
+            "check failed: write_file(ENG \"/before\", data, sizeof(data)) && vfs_sync() == 0 at line 772\0",
+        );
     }
     var stSlot = [0u64; 16];
     let st = borrow mut stSlot as *mut [u64; 16] as *mut cosmofs_stats;
@@ -807,10 +881,12 @@ unsafe fn copyBitmap(s: borrow mut Rig, reason: *mut *CChar) -> bool {
     if (!(cfst_write_file(c("/mnt/eng/after\0"), d, len))) {
         return failed(reason, "check failed: write_file(ENG \"/after\", data, sizeof(data)) at line 793\0");
     }
-    if (!(vfs_mkdir(0 as *mut vnode, c("/mnt/eng/dir\0"), 493) == 0
-            && cfst_write_file(c("/mnt/eng/dir/inner\0"), d, 4096))) {
-        return failed(reason,
-            "check failed: vfs_mkdir(NULL, ENG \"/dir\", 0755) == 0 && writ.../dir/inner\", data, 4096) at line 798\0");
+    if (!(vfs_mkdir(0 as *mut vnode, c("/mnt/eng/dir\0"), 493) == 0 &&
+        cfst_write_file(c("/mnt/eng/dir/inner\0"), d, 4096))) {
+        return failed(
+            reason,
+            "check failed: vfs_mkdir(NULL, ENG \"/dir\", 0755) == 0 && writ.../dir/inner\", data, 4096) at line 798\0",
+        );
     }
     if (!(cfst_write_file(c("/mnt/eng/later\0"), d, 3 * 4096))) {
         return failed(reason, "check failed: write_file(ENG \"/later\", data, 3 * 4096) at line 801\0");
@@ -819,15 +895,17 @@ unsafe fn copyBitmap(s: borrow mut Rig, reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: vfs_sync() == 0 at line 804\0");
     }
     if (!(cp(pool, 1).state == COPY_MISSING && cp(pool, 1).since == wholeAt)) {
-        return failed(reason,
-            "check failed: pool->m[0].copy[1].state == POOL_COPY_MISSING &&...copy[1].since == whole_at at line 808\0");
+        return failed(
+            reason,
+            "check failed: pool->m[0].copy[1].state == POOL_COPY_MISSING &&...copy[1].since == whole_at at line 808\0",
+        );
     }
     if (!(umount(eng()) == 0)) {
         return failed(reason, "check failed: vfs_umount(ENG) == 0 at line 811\0");
     }
     s.log = ramblk_record_stop(s.bd[0]);
-    if (!(!s.log.isNull() && Ptr.toBorrow(s.log as *ramblk_log).dropped == 0
-            && Ptr.toBorrow(s.log as *ramblk_log).n > 0)) {
+    if (!(!s.log.isNull() && Ptr.toBorrow(s.log as *ramblk_log).dropped == 0 &&
+        Ptr.toBorrow(s.log as *ramblk_log).n > 0)) {
         return failed(reason, "check failed: log != NULL && log->dropped == 0 && log->n > 0 at line 816\0");
     }
     logBlocks(s.log, s.written, 512);
@@ -865,8 +943,10 @@ unsafe fn copyBitmap(s: borrow mut Rig, reason: *mut *CChar) -> bool {
     let cp1 = cp(pool, 1);
     // Back, and recognised by the record: resilvering what it missed.
     if (!(cp1.state == COPY_RESILVERING && cp1.dev == s.bd[1] && !cp1.whole && cp1.since == wholeAt)) {
-        return failed(reason,
-            "check failed: cp->state == POOL_COPY_RESILVERING && cp->dev ==... && cp->since == whole_at at line 854\0");
+        return failed(
+            reason,
+            "check failed: cp->state == POOL_COPY_RESILVERING && cp->dev ==... && cp->since == whole_at at line 854\0",
+        );
     }
     // Every block written after the pull is in the record; nothing else is, but the superblock slots the record marks
     // for the root.
@@ -892,10 +972,12 @@ unsafe fn copyBitmap(s: borrow mut Rig, reason: *mut *CChar) -> bool {
     if (!(nwritten > 8)) {
         return failed(reason, "check failed: nwritten > 8 at line 878\0");
     }
-    if (!(cfst_read_matches(c("/mnt/eng/later\0"), d, 3 * 4096)
-            && cfst_read_matches(c("/mnt/eng/dir/inner\0"), d, 4096))) {
-        return failed(reason,
-            "check failed: read_matches(ENG \"/later\", data, 3 * 4096) && .../dir/inner\", data, 4096) at line 883\0");
+    if (!(cfst_read_matches(c("/mnt/eng/later\0"), d, 3 * 4096) &&
+        cfst_read_matches(c("/mnt/eng/dir/inner\0"), d, 4096))) {
+        return failed(
+            reason,
+            "check failed: read_matches(ENG \"/later\", data, 3 * 4096) && .../dir/inner\", data, 4096) at line 883\0",
+        );
     }
     var buffer = [0u8; 128];
     var line = TextWriter.create(mut buffer[..]);
@@ -936,13 +1018,17 @@ unsafe fn copyImport(s: borrow mut Rig, reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: mirror_up(bd, 512) at line 919\0");
     }
     if (!(cfst_write_file(c("/mnt/eng/first\0"), "first".ptr as *void, 5) && vfs_sync() == 0)) {
-        return failed(reason,
-            "check failed: write_file(ENG \"/first\", \"first\", 5) && vfs_sync() == 0 at line 923\0");
+        return failed(
+            reason,
+            "check failed: write_file(ENG \"/first\", \"first\", 5) && vfs_sync() == 0 at line 923\0",
+        );
     }
     ramblk_set_fail(s.bd[1], -ENODEV);
     if (!(cfst_write_file(c("/mnt/eng/second\0"), "second".ptr as *void, 6) && vfs_sync() == 0)) {
-        return failed(reason,
-            "check failed: write_file(ENG \"/second\", \"second\", 6) && vfs_sync() == 0 at line 928\0");
+        return failed(
+            reason,
+            "check failed: write_file(ENG \"/second\", \"second\", 6) && vfs_sync() == 0 at line 928\0",
+        );
     }
     if (!(umount(eng()) == 0)) {
         return failed(reason, "check failed: vfs_umount(ENG) == 0 at line 931\0");
@@ -960,19 +1046,25 @@ unsafe fn copyImport(s: borrow mut Rig, reason: *mut *CChar) -> bool {
     }
     // The lagging device is not read; it is the copy being resilvered.
     if (!(cp(pool, 1).dev == s.bd[1] && cp(pool, 1).state == COPY_RESILVERING)) {
-        return failed(reason,
-            "check failed: pool->m[0].copy[1].dev == bd[1] && pool->m[0].co... == POOL_COPY_RESILVERING at line 947\0");
+        return failed(
+            reason,
+            "check failed: pool->m[0].copy[1].dev == bd[1] && pool->m[0].co... == POOL_COPY_RESILVERING at line 947\0",
+        );
     }
-    if (!(cfst_read_matches(c("/mnt/eng/second\0"), "second".ptr as *void, 6)
-            && cfst_read_matches(c("/mnt/eng/first\0"), "first".ptr as *void, 5))) {
-        return failed(reason,
-            "check failed: read_matches(ENG \"/second\", \"second\", 6) &&... \"/first\", \"first\", 5) at line 952\0");
+    if (!(cfst_read_matches(c("/mnt/eng/second\0"), "second".ptr as *void, 6) &&
+        cfst_read_matches(c("/mnt/eng/first\0"), "first".ptr as *void, 5))) {
+        return failed(
+            reason,
+            "check failed: read_matches(ENG \"/second\", \"second\", 6) &&... \"/first\", \"first\", 5) at line 952\0",
+        );
     }
     var stSlot = [0u64; 16];
     let st = borrow mut stSlot as *mut [u64; 16] as *mut cosmofs_stats;
     if (!(stats(st) == 0 && sv(st).devices == 1 && sv(st).degraded == 1)) {
-        return failed(reason,
-            "check failed: cosmofs_stats(mount_of(ENG), &st) == 0 && st.dev... == 1 && st.degraded == 1 at line 958\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_stats(mount_of(ENG), &st) == 0 && st.dev... == 1 && st.degraded == 1 at line 958\0",
+        );
     }
     // The device the mount moved to is held by it (Codex on #439).
     if (!(vfs_bdev_mounted(s.bd[0]))) {
@@ -996,8 +1088,10 @@ unsafe fn copyImport(s: borrow mut Rig, reason: *mut *CChar) -> bool {
     if (!(vfs_mount(eng2(), c("cosmofs\0"), s.bd[1], 0) == -EBUSY)) {
         return failed(reason, "check failed: vfs_mount(ENG2, \"cosmofs\", bd[1], 0) == -EBUSY at line 980\0");
     }
-    KernelLog.write(LogLevel.Info,
-        "selftest: cosmofs-copy-import: the lagging device mounts the newest root, and not twice");
+    KernelLog.write(
+        LogLevel.Info,
+        "selftest: cosmofs-copy-import: the lagging device mounts the newest root, and not twice",
+    );
     return true;
 }
 
@@ -1027,10 +1121,12 @@ unsafe fn copyGeometry(s: borrow mut Rig, reason: *mut *CChar) -> bool {
     let _ = vfs_umount2(eng(), VFS_UMOUNT_FORCE);
     s.bd[0] = ramblk_create(512);
     s.bd[1] = ramblk_create(8192); // 8192 blocks would be two a region; 512 are one
-    if (!(!s.bd[0].isNull() && !s.bd[1].isNull()
-            && cosmofs_format_mirror(borrow mut s.bd as *mut [*mut blkdev; 3] as *mut *mut blkdev, 1, 2) == 0)) {
-        return failed(reason,
-            "check failed: bd[0] != NULL && bd[1] != NULL && cosmofs_format_mirror(bd, 1, 2) == 0 at line 1014\0");
+    if (!(!s.bd[0].isNull() && !s.bd[1].isNull() &&
+        cosmofs_format_mirror(borrow mut s.bd as *mut [*mut blkdev; 3] as *mut *mut blkdev, 1, 2) == 0)) {
+        return failed(
+            reason,
+            "check failed: bd[0] != NULL && bd[1] != NULL && cosmofs_format_mirror(bd, 1, 2) == 0 at line 1014\0",
+        );
     }
     let mk = vfs_mkdir(0 as *mut vnode, eng(), 493);
     if (!(mk == 0 || mk == -EEXIST)) {
@@ -1042,12 +1138,16 @@ unsafe fn copyGeometry(s: borrow mut Rig, reason: *mut *CChar) -> bool {
     cosmofs_test_set_writeback(cfst_mount_of(eng()), false);
     var pool = engPool();
     if (!(m0(pool).nblocks == 512 && m0(pool).region_blocks == 1)) {
-        return failed(reason,
-            "check failed: pool->m[0].nblocks == 512 && pool->m[0].region_blocks == 1 at line 1027\0");
+        return failed(
+            reason,
+            "check failed: pool->m[0].nblocks == 512 && pool->m[0].region_blocks == 1 at line 1027\0",
+        );
     }
     if (!(cfst_write_file(c("/mnt/eng/g\0"), "geometry".ptr as *void, 8) && vfs_sync() == 0)) {
-        return failed(reason,
-            "check failed: write_file(ENG \"/g\", \"geometry\", 8) && vfs_sync() == 0 at line 1031\0");
+        return failed(
+            reason,
+            "check failed: write_file(ENG \"/g\", \"geometry\", 8) && vfs_sync() == 0 at line 1031\0",
+        );
     }
     ramblk_set_fail(s.bd[0], -ENODEV); // the small one goes: the big one is the pool now
     if (!(cfst_write_file(c("/mnt/eng/h\0"), "after".ptr as *void, 5) && vfs_sync() == 0)) {
@@ -1062,16 +1162,22 @@ unsafe fn copyGeometry(s: borrow mut Rig, reason: *mut *CChar) -> bool {
     cosmofs_test_set_writeback(cfst_mount_of(eng()), false);
     pool = engPool();
     if (!(m0(pool).nblocks == 512 && m0(pool).region_blocks == 1)) {
-        return failed(reason,
-            "check failed: pool->m[0].nblocks == 512 && pool->m[0].region_blocks == 1 at line 1047\0");
+        return failed(
+            reason,
+            "check failed: pool->m[0].nblocks == 512 && pool->m[0].region_blocks == 1 at line 1047\0",
+        );
     }
-    if (!(cfst_read_matches(c("/mnt/eng/h\0"), "after".ptr as *void, 5)
-            && cfst_read_matches(c("/mnt/eng/g\0"), "geometry".ptr as *void, 8))) {
-        return failed(reason,
-            "check failed: read_matches(ENG \"/h\", \"after\", 5) && read...G \"/g\", \"geometry\", 8) at line 1052\0");
+    if (!(cfst_read_matches(c("/mnt/eng/h\0"), "after".ptr as *void, 5) &&
+        cfst_read_matches(c("/mnt/eng/g\0"), "geometry".ptr as *void, 8))) {
+        return failed(
+            reason,
+            "check failed: read_matches(ENG \"/h\", \"after\", 5) && read...G \"/g\", \"geometry\", 8) at line 1052\0",
+        );
     }
-    KernelLog.write(LogLevel.Info,
-        "selftest: cosmofs-copy-geometry: a bigger copy mounts the pool at the table's size");
+    KernelLog.write(
+        LogLevel.Info,
+        "selftest: cosmofs-copy-geometry: a bigger copy mounts the pool at the table's size",
+    );
     return true;
 }
 
@@ -1205,19 +1311,25 @@ unsafe fn resilver(s: borrow mut Rig, reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: mirror_up(bd, 512) at line 1184\0");
     }
     if (!(cfst_write_file(c("/mnt/eng/a\0"), d, len) && vfs_sync() == 0)) {
-        return failed(reason,
-            "check failed: write_file(ENG \"/a\", data, sizeof(data)) && vfs_sync() == 0 at line 1188\0");
+        return failed(
+            reason,
+            "check failed: write_file(ENG \"/a\", data, sizeof(data)) && vfs_sync() == 0 at line 1188\0",
+        );
     }
     ramblk_set_fail(s.bd[1], -ENODEV);
     if (!(cfst_write_file(c("/mnt/eng/b\0"), d, len) && vfs_sync() == 0)) {
-        return failed(reason,
-            "check failed: write_file(ENG \"/b\", data, sizeof(data)) && vfs_sync() == 0 at line 1193\0");
+        return failed(
+            reason,
+            "check failed: write_file(ENG \"/b\", data, sizeof(data)) && vfs_sync() == 0 at line 1193\0",
+        );
     }
     ramblk_set_fail(s.bd[1], 0);
     let pool = engPool();
     if (!(!pool.isNull() && cp(pool, 1).state == COPY_MISSING)) {
-        return failed(reason,
-            "check failed: pool != NULL && pool->m[0].copy[1].state == POOL_COPY_MISSING at line 1199\0");
+        return failed(
+            reason,
+            "check failed: pool != NULL && pool->m[0].copy[1].state == POOL_COPY_MISSING at line 1199\0",
+        );
     }
 
     // CFS-5: the pool's other copy is not the operator's to format.
@@ -1234,8 +1346,10 @@ unsafe fn resilver(s: borrow mut Rig, reason: *mut *CChar) -> bool {
     }
     let cp1 = cp(pool, 1);
     if (!(cp1.state == COPY_RESILVERING && !cp1.whole && cp1.cursor == 0)) {
-        return failed(reason,
-            "check failed: cp->state == POOL_COPY_RESILVERING && !cp->whole && cp->cursor == 0 at line 1217\0");
+        return failed(
+            reason,
+            "check failed: cp->state == POOL_COPY_RESILVERING && !cp->whole && cp->cursor == 0 at line 1217\0",
+        );
     }
     if (!(cosmofs_test_resilver_run(cfst_mount_of(eng()), 2) == 0)) {
         return failed(reason, "check failed: cosmofs_test_resilver_run(mount_of(ENG), 2) == 0 at line 1220\0");
@@ -1246,20 +1360,26 @@ unsafe fn resilver(s: borrow mut Rig, reason: *mut *CChar) -> bool {
 
     // A write during the resilver: on both devices, read raw.
     if (!(cfst_write_file(c("/mnt/eng/during\0"), during as *void, 4096) && vfs_sync() == 0)) {
-        return failed(reason,
-            "check failed: write_file(ENG \"/during\", during, sizeof(during)) && vfs_sync() == 0 at line 1229\0");
+        return failed(
+            reason,
+            "check failed: write_file(ENG \"/during\", during, sizeof(during)) && vfs_sync() == 0 at line 1229\0",
+        );
     }
     var dblk: u64 = 0;
     if (!(firstBlock(c("/mnt/eng/during\0"), borrow mut dblk as *mut u64) == 0)) {
         return failed(reason, "check failed: cosmofs_test_block_of(mount_of(ENG), ino, 0, &dblk) == 0 at line 1233\0");
     }
     if (!(rawBlock(s.bd[0], dblk & DVA_BLK_MASK, x) && memcmp(x as *void, during as *void, BLOCK) == 0)) {
-        return failed(reason,
-            "check failed: raw_block(bd[0], CFS_DVA_BLK(dblk), x) && memcmp(x, during, CFS_BLOCK) == 0 at line 1237\0");
+        return failed(
+            reason,
+            "check failed: raw_block(bd[0], CFS_DVA_BLK(dblk), x) && memcmp(x, during, CFS_BLOCK) == 0 at line 1237\0",
+        );
     }
     if (!(rawBlock(s.bd[1], dblk & DVA_BLK_MASK, y) && memcmp(y as *void, during as *void, BLOCK) == 0)) {
-        return failed(reason,
-            "check failed: raw_block(bd[1], CFS_DVA_BLK(dblk), y) && memcmp(y, during, CFS_BLOCK) == 0 at line 1241\0");
+        return failed(
+            reason,
+            "check failed: raw_block(bd[1], CFS_DVA_BLK(dblk), y) && memcmp(y, during, CFS_BLOCK) == 0 at line 1241\0",
+        );
     }
     if (!(cp1.state == COPY_RESILVERING)) {
         return failed(reason, "check failed: cp->state == POOL_COPY_RESILVERING at line 1244\0");
@@ -1275,8 +1395,10 @@ unsafe fn resilver(s: borrow mut Rig, reason: *mut *CChar) -> bool {
     var stSlot = [0u64; 16];
     let st = borrow mut stSlot as *mut [u64; 16] as *mut cosmofs_stats;
     if (!(stats(st) == 0 && sv(st).devices == 2 && sv(st).degraded == 0)) {
-        return failed(reason,
-            "check failed: cosmofs_stats(mount_of(ENG), &st) == 0 && st.dev...== 2 && st.degraded == 0 at line 1258\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_stats(mount_of(ENG), &st) == 0 && st.dev...== 2 && st.degraded == 0 at line 1258\0",
+        );
     }
     if (!(!mountsLineHas("/mnt/eng", c("degraded\0")))) {
         return failed(reason, "check failed: !mounts_line_has(ENG, \"degraded\") at line 1261\0");
@@ -1291,8 +1413,10 @@ unsafe fn resilver(s: borrow mut Rig, reason: *mut *CChar) -> bool {
     var scSlot = [0u64; 8];
     let sc = borrow mut scSlot as *mut [u64; 8] as *mut cosmofs_scrub_stats;
     if (!(cosmofs_scrub(cfst_mount_of(eng()), sc, 0) == 0 && scv(sc).bad_copies == 0 && scv(sc).unrecoverable == 0)) {
-        return failed(reason,
-            "check failed: cosmofs_scrub(mount_of(ENG), &sc, 0) == 0 && sc....&& sc.unrecoverable == 0 at line 1274\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_scrub(mount_of(ENG), &sc, 0) == 0 && sc....&& sc.unrecoverable == 0 at line 1274\0",
+        );
     }
 
     // Holes: writes copy 1 fails while copy 0 takes them, below its fault count. It stays ONLINE with holes, the
@@ -1301,14 +1425,18 @@ unsafe fn resilver(s: borrow mut Rig, reason: *mut *CChar) -> bool {
     g_pool_fault_errors.store(1000);
     ramblk_set_fail_writes(s.bd[1], -EIO); // writes only: a failed flush faults a copy at once, by design
     if (!(cfst_write_file(c("/mnt/eng/holes\0"), d, len) && vfs_sync() == 0)) {
-        return failed(reason,
-            "check failed: write_file(ENG \"/holes\", data, sizeof(data)) && vfs_sync() == 0 at line 1284\0");
+        return failed(
+            reason,
+            "check failed: write_file(ENG \"/holes\", data, sizeof(data)) && vfs_sync() == 0 at line 1284\0",
+        );
     }
     ramblk_set_fail_writes(s.bd[1], 0);
     g_pool_fault_errors.store(limit);
     if (!(cp1.state == COPY_ONLINE && pool_copy_any_missed(pool, 0, 1) && pool_degraded(pool))) {
-        return failed(reason,
-            "check failed: cp->state == POOL_COPY_ONLINE && pool_copy_any_m...) && pool_degraded(pool) at line 1290\0");
+        return failed(
+            reason,
+            "check failed: cp->state == POOL_COPY_ONLINE && pool_copy_any_m...) && pool_degraded(pool) at line 1290\0",
+        );
     }
     if (!(cfst_read_matches(c("/mnt/eng/holes\0"), d, len))) {
         return failed(reason, "check failed: read_matches(ENG \"/holes\", data, sizeof(data)) at line 1293\0");
@@ -1317,8 +1445,10 @@ unsafe fn resilver(s: borrow mut Rig, reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: cosmofs_test_resilver_run(mount_of(ENG), 0) == 0 at line 1296\0");
     }
     if (!(cp1.state == COPY_ONLINE && !pool_copy_any_missed(pool, 0, 1) && !pool_degraded(pool))) {
-        return failed(reason,
-            "check failed: cp->state == POOL_COPY_ONLINE && !pool_copy_any_... && !pool_degraded(pool) at line 1300\0");
+        return failed(
+            reason,
+            "check failed: cp->state == POOL_COPY_ONLINE && !pool_copy_any_... && !pool_degraded(pool) at line 1300\0",
+        );
     }
     if (!(vfs_sync() == 0 && sameAllocated(s.bd[0], s.bd[1], 0 as *mut u32))) {
         return failed(reason, "check failed: vfs_sync() == 0 && same_allocated(bd[0], bd[1], NULL) at line 1303\0");
@@ -1334,13 +1464,17 @@ unsafe fn resilver(s: borrow mut Rig, reason: *mut *CChar) -> bool {
     }
     cosmofs_test_set_writeback(cfst_mount_of(eng()), false);
     if (!(cfst_read_matches(c("/mnt/eng/a\0"), d, len) && cfst_read_matches(c("/mnt/eng/b\0"), d, len))) {
-        return failed(reason,
-            "check failed: read_matches(ENG \"/a\", data, sizeof(data)) && ...b\", data, sizeof(data)) at line 1317\0");
+        return failed(
+            reason,
+            "check failed: read_matches(ENG \"/a\", data, sizeof(data)) && ...b\", data, sizeof(data)) at line 1317\0",
+        );
     }
-    if (!(cfst_read_matches(c("/mnt/eng/during\0"), during as *void, 4096)
-            && cfst_read_matches(c("/mnt/eng/holes\0"), d, len))) {
-        return failed(reason,
-            "check failed: read_matches(ENG \"/during\", during, sizeof(dur...s\", data, sizeof(data)) at line 1322\0");
+    if (!(cfst_read_matches(c("/mnt/eng/during\0"), during as *void, 4096) &&
+        cfst_read_matches(c("/mnt/eng/holes\0"), d, len))) {
+        return failed(
+            reason,
+            "check failed: read_matches(ENG \"/during\", during, sizeof(dur...s\", data, sizeof(data)) at line 1322\0",
+        );
     }
     var buffer = [0u8; 120];
     var line = TextWriter.create(mut buffer[..]);
@@ -1384,8 +1518,10 @@ unsafe fn resilverResume(s: borrow mut Rig, reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: nd != NULL at line 1361\0");
     }
     if (!(cfst_write_file(c("/mnt/eng/a\0"), d, len) && vfs_sync() == 0)) {
-        return failed(reason,
-            "check failed: write_file(ENG \"/a\", data, sizeof(data)) && vfs_sync() == 0 at line 1365\0");
+        return failed(
+            reason,
+            "check failed: write_file(ENG \"/a\", data, sizeof(data)) && vfs_sync() == 0 at line 1365\0",
+        );
     }
     ramblk_set_fail(s.bd[1], -ENODEV);
     if (!(cfst_write_file(c("/mnt/eng/b\0"), d, 4096) && vfs_sync() == 0)) {
@@ -1399,8 +1535,10 @@ unsafe fn resilverResume(s: borrow mut Rig, reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: pool->m[0].ncopies == 2 && pool->m[0].copy[1].dev == nd at line 1376\0");
     }
     if (!(cp(pool, 1).state == COPY_RESILVERING && cp(pool, 1).whole)) {
-        return failed(reason,
-            "check failed: pool->m[0].copy[1].state == POOL_COPY_RESILVERIN...pool->m[0].copy[1].whole at line 1380\0");
+        return failed(
+            reason,
+            "check failed: pool->m[0].copy[1].state == POOL_COPY_RESILVERIN...pool->m[0].copy[1].whole at line 1380\0",
+        );
     }
     if (!(cosmofs_test_resilver_run(cfst_mount_of(eng()), 12) == 0)) {
         return failed(reason, "check failed: cosmofs_test_resilver_run(mount_of(ENG), 12) == 0 at line 1383\0");
@@ -1425,8 +1563,10 @@ unsafe fn resilverResume(s: borrow mut Rig, reason: *mut *CChar) -> bool {
     pool = engPool();
     let cp1 = cp(pool, 1);
     if (!(cp1.dev == nd && cp1.state == COPY_RESILVERING && cp1.whole && cp1.cursor == saved)) {
-        return failed(reason,
-            "check failed: cp->dev == nd && cp->state == POOL_COPY_RESILVER...e && cp->cursor == saved at line 1406\0");
+        return failed(
+            reason,
+            "check failed: cp->dev == nd && cp->state == POOL_COPY_RESILVER...e && cp->cursor == saved at line 1406\0",
+        );
     }
     if (!(cosmofs_test_resilver_run(cfst_mount_of(eng()), 0) == 0)) {
         return failed(reason, "check failed: cosmofs_test_resilver_run(mount_of(ENG), 0) == 0 at line 1409\0");
@@ -1449,10 +1589,12 @@ unsafe fn resilverResume(s: borrow mut Rig, reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: vfs_mount(ENG, \"cosmofs\", nd, 0) == 0 at line 1426\0");
     }
     cosmofs_test_set_writeback(cfst_mount_of(eng()), false);
-    if (!(cfst_read_matches(c("/mnt/eng/a\0"), d, len)
-            && cfst_read_matches(c("/mnt/eng/mid\0"), "mid".ptr as *void, 3))) {
-        return failed(reason,
-            "check failed: read_matches(ENG \"/a\", data, sizeof(data)) &...(ENG \"/mid\", \"mid\", 3) at line 1432\0");
+    if (!(cfst_read_matches(c("/mnt/eng/a\0"), d, len) &&
+        cfst_read_matches(c("/mnt/eng/mid\0"), "mid".ptr as *void, 3))) {
+        return failed(
+            reason,
+            "check failed: read_matches(ENG \"/a\", data, sizeof(data)) &...(ENG \"/mid\", \"mid\", 3) at line 1432\0",
+        );
     }
     var buffer = [0u8; 120];
     var line = TextWriter.create(mut buffer[..]);
@@ -1499,26 +1641,34 @@ unsafe fn spare(s: borrow mut Rig, reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: sp != NULL at line 1474\0");
     }
     if (!(cfst_write_file(c("/mnt/eng/a\0"), d, len) && vfs_sync() == 0)) {
-        return failed(reason,
-            "check failed: write_file(ENG \"/a\", data, sizeof(data)) && vfs_sync() == 0 at line 1478\0");
+        return failed(
+            reason,
+            "check failed: write_file(ENG \"/a\", data, sizeof(data)) && vfs_sync() == 0 at line 1478\0",
+        );
     }
     if (!(poolOp(POOL_SPARE_ADD, devName(sp), 0 as *CChar) == 0)) {
         return failed(reason, "check failed: pool_op(COSMOFS_POOL_SPARE_ADD, sp->name, NULL) == 0 at line 1481\0");
     }
     var pool = engPool();
     if (!(pv(pool).nspares == 1 && pv(pool).spare[0] == sp && vfs_bdev_mounted(sp))) {
-        return failed(reason,
-            "check failed: pool->nspares == 1 && pool->spare[0] == sp && vfs_bdev_mounted(sp) at line 1486\0");
+        return failed(
+            reason,
+            "check failed: pool->nspares == 1 && pool->spare[0] == sp && vfs_bdev_mounted(sp) at line 1486\0",
+        );
     }
     if (!(poolOp(POOL_SPARE_ADD, devName(sp), 0 as *CChar) == -EEXIST)) {
-        return failed(reason,
-            "check failed: pool_op(COSMOFS_POOL_SPARE_ADD, sp->name, NULL) == -EEXIST at line 1490\0");
+        return failed(
+            reason,
+            "check failed: pool_op(COSMOFS_POOL_SPARE_ADD, sp->name, NULL) == -EEXIST at line 1490\0",
+        );
     }
 
     ramblk_set_fail(s.bd[1], -ENODEV);
     if (!(cfst_write_file(c("/mnt/eng/b\0"), d, len) && vfs_sync() == 0)) {
-        return failed(reason,
-            "check failed: write_file(ENG \"/b\", data, sizeof(data)) && vfs_sync() == 0 at line 1496\0");
+        return failed(
+            reason,
+            "check failed: write_file(ENG \"/b\", data, sizeof(data)) && vfs_sync() == 0 at line 1496\0",
+        );
     }
     if (!(cp(pool, 1).state == COPY_MISSING)) {
         return failed(reason, "check failed: pool->m[0].copy[1].state == POOL_COPY_MISSING at line 1499\0");
@@ -1528,14 +1678,18 @@ unsafe fn spare(s: borrow mut Rig, reason: *mut *CChar) -> bool {
     }
     let cp1 = cp(pool, 1);
     if (!(cp1.dev == sp && cp1.state == COPY_ONLINE && pv(pool).nspares == 0)) {
-        return failed(reason,
-            "check failed: cp->dev == sp && cp->state == POOL_COPY_ONLINE && pool->nspares == 0 at line 1507\0");
+        return failed(
+            reason,
+            "check failed: cp->dev == sp && cp->state == POOL_COPY_ONLINE && pool->nspares == 0 at line 1507\0",
+        );
     }
     var stSlot = [0u64; 16];
     let st = borrow mut stSlot as *mut [u64; 16] as *mut cosmofs_stats;
     if (!(stats(st) == 0 && sv(st).devices == 2 && sv(st).degraded == 0)) {
-        return failed(reason,
-            "check failed: cosmofs_stats(mount_of(ENG), &st) == 0 && st.dev...== 2 && st.degraded == 0 at line 1513\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_stats(mount_of(ENG), &st) == 0 && st.dev...== 2 && st.degraded == 0 at line 1513\0",
+        );
     }
     if (!(vfs_sync() == 0)) {
         return failed(reason, "check failed: vfs_sync() == 0 at line 1516\0");
@@ -1553,13 +1707,17 @@ unsafe fn spare(s: borrow mut Rig, reason: *mut *CChar) -> bool {
     }
     cosmofs_test_set_writeback(cfst_mount_of(eng()), false);
     if (!(stats(st) == 0 && sv(st).devices == 2 && sv(st).degraded == 0)) {
-        return failed(reason,
-            "check failed: cosmofs_stats(mount_of(ENG), &st) == 0 && st.dev...== 2 && st.degraded == 0 at line 1532\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_stats(mount_of(ENG), &st) == 0 && st.dev...== 2 && st.degraded == 0 at line 1532\0",
+        );
     }
     pool = engPool();
     if (!(cp(pool, 1).dev == sp || cp(pool, 0).dev == sp)) {
-        return failed(reason,
-            "check failed: pool->m[0].copy[1].dev == sp || pool->m[0].copy[0].dev == sp at line 1537\0");
+        return failed(
+            reason,
+            "check failed: pool->m[0].copy[1].dev == sp || pool->m[0].copy[0].dev == sp at line 1537\0",
+        );
     }
     if (!(cfst_read_matches(c("/mnt/eng/b\0"), d, len))) {
         return failed(reason, "check failed: read_matches(ENG \"/b\", data, sizeof(data)) at line 1540\0");
@@ -1618,29 +1776,39 @@ unsafe fn attach(s: borrow mut Rig, reason: *mut *CChar) -> bool {
     }
     cosmofs_test_set_writeback(cfst_mount_of(eng()), false);
     if (!(cfst_write_file(c("/mnt/eng/a\0"), d, len) && vfs_sync() == 0)) {
-        return failed(reason,
-            "check failed: write_file(ENG \"/a\", data, sizeof(data)) && vfs_sync() == 0 at line 1595\0");
+        return failed(
+            reason,
+            "check failed: write_file(ENG \"/a\", data, sizeof(data)) && vfs_sync() == 0 at line 1595\0",
+        );
     }
     var stSlot = [0u64; 16];
     let st = borrow mut stSlot as *mut [u64; 16] as *mut cosmofs_stats;
     if (!(stats(st) == 0 && sv(st).devices == 1 && sv(st).version == FORMAT_VERSION)) {
-        return failed(reason,
-            "check failed: cosmofs_stats(mount_of(ENG), &st) == 0 && st.dev...on == CFS_FORMAT_VERSION at line 1601\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_stats(mount_of(ENG), &st) == 0 && st.dev...on == CFS_FORMAT_VERSION at line 1601\0",
+        );
     }
 
     // attach: one disk becomes a mirror.
     if (!(poolOp(POOL_ATTACH, devName(b0), devName(b1)) == 0)) {
-        return failed(reason,
-            "check failed: pool_op(COSMOFS_POOL_ATTACH, bd[0]->name, bd[1]->name) == 0 at line 1607\0");
+        return failed(
+            reason,
+            "check failed: pool_op(COSMOFS_POOL_ATTACH, bd[0]->name, bd[1]->name) == 0 at line 1607\0",
+        );
     }
     let pool = engPool();
     if (!(m0(pool).ncopies == 2 && cp(pool, 1).state == COPY_RESILVERING)) {
-        return failed(reason,
-            "check failed: pool->m[0].ncopies == 2 && pool->m[0].copy[1].st...== POOL_COPY_RESILVERING at line 1612\0");
+        return failed(
+            reason,
+            "check failed: pool->m[0].ncopies == 2 && pool->m[0].copy[1].st...== POOL_COPY_RESILVERING at line 1612\0",
+        );
     }
     if (!(stats(st) == 0 && sv(st).version == 13)) {
-        return failed(reason,
-            "check failed: cosmofs_stats(mount_of(ENG), &st) == 0 && st.version == 13 at line 1616\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_stats(mount_of(ENG), &st) == 0 && st.version == 13 at line 1616\0",
+        );
     }
     if (!(cosmofs_test_resilver_run(cfst_mount_of(eng()), 0) == 0)) {
         return failed(reason, "check failed: cosmofs_test_resilver_run(mount_of(ENG), 0) == 0 at line 1619\0");
@@ -1661,15 +1829,19 @@ unsafe fn attach(s: borrow mut Rig, reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: pool->m[0].copy[1].state == POOL_COPY_OFFLINE at line 1634\0");
     }
     if (!(poolOp(POOL_OFFLINE, devName(b0), none) == -EBUSY)) {
-        return failed(reason,
-            "check failed: pool_op(COSMOFS_POOL_OFFLINE, bd[0]->name, NULL) == -EBUSY at line 1638\0");
+        return failed(
+            reason,
+            "check failed: pool_op(COSMOFS_POOL_OFFLINE, bd[0]->name, NULL) == -EBUSY at line 1638\0",
+        );
     }
     if (!(poolOp(POOL_ONLINE, devName(b1), none) == 0)) {
         return failed(reason, "check failed: pool_op(COSMOFS_POOL_ONLINE, bd[1]->name, NULL) == 0 at line 1641\0");
     }
     if (!(cp(pool, 1).state == COPY_RESILVERING && !cp(pool, 1).whole)) {
-        return failed(reason,
-            "check failed: pool->m[0].copy[1].state == POOL_COPY_RESILVERIN...pool->m[0].copy[1].whole at line 1645\0");
+        return failed(
+            reason,
+            "check failed: pool->m[0].copy[1].state == POOL_COPY_RESILVERIN...pool->m[0].copy[1].whole at line 1645\0",
+        );
     }
     if (!(cosmofs_test_resilver_run(cfst_mount_of(eng()), 0) == 0)) {
         return failed(reason, "check failed: cosmofs_test_resilver_run(mount_of(ENG), 0) == 0 at line 1648\0");
@@ -1680,26 +1852,34 @@ unsafe fn attach(s: borrow mut Rig, reason: *mut *CChar) -> bool {
 
     // replace a good copy: bd[1] serves until bd[2] is done, then goes.
     if (!(poolOp(POOL_REPLACE, devName(b1), devName(b2)) == 0)) {
-        return failed(reason,
-            "check failed: pool_op(COSMOFS_POOL_REPLACE, bd[1]->name, bd[2]->name) == 0 at line 1657\0");
+        return failed(
+            reason,
+            "check failed: pool_op(COSMOFS_POOL_REPLACE, bd[1]->name, bd[2]->name) == 0 at line 1657\0",
+        );
     }
     if (!(m0(pool).ncopies == 3 && cp(pool, 1).peer != 0)) {
         return failed(reason, "check failed: pool->m[0].ncopies == 3 && pool->m[0].copy[1].peer != 0 at line 1660\0");
     }
     if (!(cp(pool, 2).dev == b2 && cp(pool, 2).state == COPY_RESILVERING)) {
-        return failed(reason,
-            "check failed: pool->m[0].copy[2].dev == bd[2] && pool->m[0].co...== POOL_COPY_RESILVERING at line 1664\0");
+        return failed(
+            reason,
+            "check failed: pool->m[0].copy[2].dev == bd[2] && pool->m[0].co...== POOL_COPY_RESILVERING at line 1664\0",
+        );
     }
     if (!(cosmofs_test_resilver_run(cfst_mount_of(eng()), 0) == 0)) {
         return failed(reason, "check failed: cosmofs_test_resilver_run(mount_of(ENG), 0) == 0 at line 1667\0");
     }
     if (!(m0(pool).ncopies == 2 && cp(pool, 1).dev == b2)) {
-        return failed(reason,
-            "check failed: pool->m[0].ncopies == 2 && pool->m[0].copy[1].dev == bd[2] at line 1671\0");
+        return failed(
+            reason,
+            "check failed: pool->m[0].ncopies == 2 && pool->m[0].copy[1].dev == bd[2] at line 1671\0",
+        );
     }
     if (!(cp(pool, 1).state == COPY_ONLINE && !vfs_bdev_mounted(b1))) {
-        return failed(reason,
-            "check failed: pool->m[0].copy[1].state == POOL_COPY_ONLINE && !vfs_bdev_mounted(bd[1]) at line 1675\0");
+        return failed(
+            reason,
+            "check failed: pool->m[0].copy[1].state == POOL_COPY_ONLINE && !vfs_bdev_mounted(bd[1]) at line 1675\0",
+        );
     }
     var aSlot = [0u64; 21];
     var bSlot = [0u64; 21];
@@ -1710,8 +1890,10 @@ unsafe fn attach(s: borrow mut Rig, reason: *mut *CChar) -> bool {
     let slots = cfs_super_slots(b1, a, borrow mut ra as *mut i32, b, borrow mut rb as *mut i32);
     // no longer the pool's
     if (!(slots == 0 && ra != 0 && rb != 0)) {
-        return failed(reason,
-            "check failed: cfs_super_slots(bd[1], &a, &ra, &b, &rb) == 0 && ra != 0 && rb != 0 at line 1687\0");
+        return failed(
+            reason,
+            "check failed: cfs_super_slots(bd[1], &a, &ra, &b, &rb) == 0 && ra != 0 && rb != 0 at line 1687\0",
+        );
     }
     if (!(vfs_sync() == 0 && sameAllocated(b0, b2, 0 as *mut u32))) {
         return failed(reason, "check failed: vfs_sync() == 0 && same_allocated(bd[0], bd[2], NULL) at line 1690\0");
@@ -1728,29 +1910,37 @@ unsafe fn attach(s: borrow mut Rig, reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: rot_copy(bd[0], CFS_DVA_BLK(ablk), 0x5c) at line 1701\0");
     }
     if (!(poolOp(POOL_REPLACE, devName(b2), devName(b1)) == 0)) {
-        return failed(reason,
-            "check failed: pool_op(COSMOFS_POOL_REPLACE, bd[2]->name, bd[1]->name) == 0 at line 1705\0");
+        return failed(
+            reason,
+            "check failed: pool_op(COSMOFS_POOL_REPLACE, bd[2]->name, bd[1]->name) == 0 at line 1705\0",
+        );
     }
     if (!(cosmofs_test_resilver_run(cfst_mount_of(eng()), 0) == 0)) {
         return failed(reason, "check failed: cosmofs_test_resilver_run(mount_of(ENG), 0) == 0 at line 1708\0");
     }
     var kv: u32 = 0;
     var kc: u32 = 0;
-    if (!(m0(pool).ncopies == 3 && pool_find_dev(pool, b2, borrow mut kv as *mut u32, borrow mut kc as *mut u32)
-            && cp(pool, kc).peer == 0)) {
-        return failed(reason,
-            "check failed: pool->m[0].ncopies == 3 && pool_find_dev(pool, b...>m[0].copy[kc].peer == 0 at line 1715\0");
+    if (!(m0(pool).ncopies == 3 && pool_find_dev(pool, b2, borrow mut kv as *mut u32, borrow mut kc as *mut u32) &&
+        cp(pool, kc).peer == 0)) {
+        return failed(
+            reason,
+            "check failed: pool->m[0].ncopies == 3 && pool_find_dev(pool, b...>m[0].copy[kc].peer == 0 at line 1715\0",
+        );
     }
     var scSlot = [0u64; 8];
     let sc = borrow mut scSlot as *mut [u64; 8] as *mut cosmofs_scrub_stats;
-    if (!(cosmofs_scrub(cfst_mount_of(eng()), sc, SCRUB_REPAIR) == 0 && scv(sc).repaired >= 2
-            && scv(sc).unrecoverable == 0)) {
-        return failed(reason,
-            "check failed: cosmofs_scrub(mount_of(ENG), &sc, COSMOFS_SCRUB_...&& sc.unrecoverable == 0 at line 1722\0");
+    if (!(cosmofs_scrub(cfst_mount_of(eng()), sc, SCRUB_REPAIR) == 0 && scv(sc).repaired >= 2 &&
+        scv(sc).unrecoverable == 0)) {
+        return failed(
+            reason,
+            "check failed: cosmofs_scrub(mount_of(ENG), &sc, COSMOFS_SCRUB_...&& sc.unrecoverable == 0 at line 1722\0",
+        );
     }
     if (!(poolOp(POOL_DETACH, devName(b2), none) == 0 && m0(pool).ncopies == 2)) {
-        return failed(reason,
-            "check failed: pool_op(COSMOFS_POOL_DETACH, bd[2]->name, NULL) ... pool->m[0].ncopies == 2 at line 1726\0");
+        return failed(
+            reason,
+            "check failed: pool_op(COSMOFS_POOL_DETACH, bd[2]->name, NULL) ... pool->m[0].ncopies == 2 at line 1726\0",
+        );
     }
     if (!(cfst_read_matches(c("/mnt/eng/a\0"), d, len))) {
         return failed(reason, "check failed: read_matches(ENG \"/a\", data, sizeof(data)) at line 1729\0");
@@ -1770,8 +1960,10 @@ unsafe fn attach(s: borrow mut Rig, reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: pool_op(COSMOFS_POOL_DETACH, bd[0]->name, NULL) == -EBUSY at line 1743\0");
     }
     if (!(stats(st) == 0 && sv(st).devices == 1 && sv(st).degraded == 0)) {
-        return failed(reason,
-            "check failed: cosmofs_stats(mount_of(ENG), &st) == 0 && st.dev...== 1 && st.degraded == 0 at line 1747\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_stats(mount_of(ENG), &st) == 0 && st.dev...== 1 && st.degraded == 0 at line 1747\0",
+        );
     }
     if (!(umount(eng()) == 0)) {
         return failed(reason, "check failed: vfs_umount(ENG) == 0 at line 1750\0");
@@ -1783,8 +1975,10 @@ unsafe fn attach(s: borrow mut Rig, reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: read_matches(ENG \"/a\", data, sizeof(data)) at line 1756\0");
     }
     if (!(stats(st) == 0 && sv(st).devices == 1 && sv(st).degraded == 0)) {
-        return failed(reason,
-            "check failed: cosmofs_stats(mount_of(ENG), &st) == 0 && st.dev...== 1 && st.degraded == 0 at line 1760\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_stats(mount_of(ENG), &st) == 0 && st.dev...== 1 && st.degraded == 0 at line 1760\0",
+        );
     }
     KernelLog.write(LogLevel.Info, "selftest: cosmofs-attach: attach, offline/online, replace and detach");
     return true;

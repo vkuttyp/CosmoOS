@@ -163,7 +163,7 @@ unsafe fn completeC(m: *mut mbuf) -> bool {
     var c = fold(chainPartial(m as *mbuf, start, first.pkt.len - start, 0));
     if ((first.pkt.csum_flags & NET_CSUM_UDP) != 0 && c == 0) { c = 0xffff; }
     let bytes = SliceMut.fromRaw(first.data, first.len as usize);
-    bytes[field as usize] = truncate<u8>(c);       // the u16 in memory order, as the C's memcpy stored it
+    bytes[field as usize] = truncate<u8>(c); // the u16 in memory order, as the C's memcpy stored it
     bytes[field as usize + 1] = truncate<u8>(c >> 8);
     first.pkt.csum_flags = first.pkt.csum_flags & (NET_CSUM_TX ^ 0xffff);
     return true;

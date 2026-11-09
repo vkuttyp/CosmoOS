@@ -8,7 +8,18 @@
 // words, its C layout (family, port, then the IPv4 address in the union), and the firewall's host flow likewise. The
 // firewall's verdicts are C enums, unsigned ints with FW_DROP 0.
 
-@header("kernel/net/ether.h", "kernel/net/ip.h", "kernel/net/cksum.h", "kernel/net/dhcp.h", "kernel/net/fw.h", "kernel/net/nat.h", "kernel/net/raw.h", "kernel/net/tcp.h", "kernel/net/udp.h", "arch/cpu.h")
+@header(
+    "kernel/net/ether.h",
+    "kernel/net/ip.h",
+    "kernel/net/cksum.h",
+    "kernel/net/dhcp.h",
+    "kernel/net/fw.h",
+    "kernel/net/nat.h",
+    "kernel/net/raw.h",
+    "kernel/net/tcp.h",
+    "kernel/net/udp.h",
+    "arch/cpu.h",
+)
 extern "C" {
     /// kernel/include/kernel/mbuf.h: the fields IPv4 reads and writes.
     struct mbuf {
@@ -117,12 +128,36 @@ extern "C" {
     fn arp_resolve(nif: *mut netif, ip: u32, mac: *mut u8, m: *mut mbuf) -> i32;
     fn ether_output(nif: *mut netif, m: *mut mbuf, dst: *u8, etype: u16) -> i32;
     fn fw_output_verdict(out: *mut netif, outFlags: u32, m: *mut mbuf, src: u32, dst: u32, proto: u8) -> u32;
-    fn fw_host_flow_of(out: *mut netif, outFlags: u32, m: *mut mbuf, src: u32, dst: u32, proto: u8, f: *mut fw_host_flow) -> bool;
+    fn fw_host_flow_of(
+        out: *mut netif,
+        outFlags: u32,
+        m: *mut mbuf,
+        src: u32,
+        dst: u32,
+        proto: u8,
+        f: *mut fw_host_flow,
+    ) -> bool;
     fn fw_host_record(f: *fw_host_flow);
-    fn fw_forward_verdict(input: *mut netif, out: *mut netif, outFlags: u32, m: *mut mbuf, iph: *ipv4_hdr, ihl: u32) -> u32;
+    fn fw_forward_verdict(
+        input: *mut netif,
+        out: *mut netif,
+        outFlags: u32,
+        m: *mut mbuf,
+        iph: *ipv4_hdr,
+        ihl: u32,
+    ) -> u32;
     fn fw_input_verdict(nif: *mut netif, m: *mut mbuf, iph: *ipv4_hdr, ihl: u32) -> u32;
     fn fw_host_verdict(nif: *mut netif, m: *mut mbuf, iph: *ipv4_hdr, ihl: u32) -> u32;
-    fn nat_out(input: *mut netif, inFlags: u32, out: *mut netif, outFlags: u32, m: *mut mbuf, iph: *ipv4_hdr, ihl: u32, newSrc: *mut u32) -> i32;
+    fn nat_out(
+        input: *mut netif,
+        inFlags: u32,
+        out: *mut netif,
+        outFlags: u32,
+        m: *mut mbuf,
+        iph: *ipv4_hdr,
+        ihl: u32,
+        newSrc: *mut u32,
+    ) -> i32;
     fn nat_in(nif: *mut netif, m: *mut mbuf, iph: *ipv4_hdr, ihl: u32, total: u16) -> bool;
     fn dhcp_client_input(nif: *mut netif, m: *mut mbuf, ihl: u32) -> bool;
     fn raw_icmp_input(m: *mbuf, iph: *ipv4_hdr);
@@ -285,7 +320,10 @@ struct Rate {
     count: u32;
 }
 
-static RATE: IrqSpinLock<Rate> = IrqSpinLock<Rate>.constant("icmp-rate\0".ptr as *CChar, Rate { windowNs: 0, count: 0 });
+static RATE: IrqSpinLock<Rate> = IrqSpinLock<Rate>.constant(
+    "icmp-rate\0".ptr as *CChar,
+    Rate { windowNs: 0, count: 0 },
+);
 
 /// Unreachables and echo replies, ICMP_RATE_PER_SEC a second host-wide (IPv4 and IPv6).
 /// Safety: clock_now_ns only reads the clock.
@@ -684,7 +722,7 @@ unsafe fn sendTimeExceeded(orig: *mut mbuf, iph: *ipv4_hdr) {
 /// and its destination the peer; null unless the quote is a well-formed IPv4 header this host could have sent and the
 /// transport's first 8 bytes are there.
 struct QuotedFlow {
-    local: [u32; 5];  // struct netaddr: family and port, then the address (20 bytes)
+    local: [u32; 5]; // struct netaddr: family and port, then the address (20 bytes)
     remote: [u32; 5];
     proto: u8;
     seq: u32;
@@ -700,7 +738,10 @@ unsafe fn quotedFlow(m: *mut mbuf) -> QuotedFlow? {
     }
     var ihl: u32 = 0;
     let q = quote[..];
-    if (!netparse_ipv4_quote(borrow quote as *[u8; 28] as *u8, borrow mut ihl as *mut u32) || !netif_owns_ipv4(word(q, 12))) {
+    if (!netparse_ipv4_quote(
+        borrow quote as *[u8; 28] as *u8,
+        borrow mut ihl as *mut u32,
+    ) || !netif_owns_ipv4(word(q, 12))) {
         return null;
     }
     var th = [0u8; 8];
@@ -768,7 +809,12 @@ unsafe fn needFragmentation(m: *mut mbuf, nextHopMtu: u32) {
         mtu = IPV4_PMTU_MIN;
     }
     let told = truncate<u16>(if (mtu > 65535) 65535 else mtu);
-    if (tcp_pmtu_notify(borrow f.local as *[u32; 5] as *netaddr, borrow f.remote as *[u32; 5] as *netaddr, f.seq, told)) {
+    if (tcp_pmtu_notify(
+        borrow f.local as *[u32; 5] as *netaddr,
+        borrow f.remote as *[u32; 5] as *netaddr,
+        f.seq,
+        told,
+    )) {
         pmtuUpdate(f.remoteAddress, mtu); // confirmed by a live connection: remember it for the next ones
     }
 }
@@ -954,7 +1000,8 @@ unsafe fn forward(input: *mut netif, inFlags: u32, packet: *mut mbuf, ihl: u32, 
     let inMask = maskOf(input);
     if (inAddr != 0 && inMask != 0) {
         let net = inAddr & inMask;
-        let bad = if ((inFlags & NETIF_MASQUERADE) != 0) src != (net | GUEST_HOST_N) else ((src ^ inAddr) & inMask) != 0;
+        let bad =
+            if ((inFlags & NETIF_MASQUERADE) != 0) src != (net | GUEST_HOST_N) else ((src ^ inAddr) & inMask) != 0;
         if (bad) {
             count(borrow FWD_SPOOFED);
             m_freem(m);
@@ -1005,7 +1052,16 @@ unsafe fn forward(input: *mut netif, inFlags: u32, packet: *mut mbuf, ihl: u32, 
                 put(out);
                 return;
             }
-            if (nat_out(input, inFlags, out, outFlags, m, Ptr.toBorrow(m).data as *ipv4_hdr, ihl, borrow mut newSrc as *mut u32) != 0) {
+            if (nat_out(
+                input,
+                inFlags,
+                out,
+                outFlags,
+                m,
+                Ptr.toBorrow(m).data as *ipv4_hdr,
+                ihl,
+                borrow mut newSrc as *mut u32,
+            ) != 0) {
                 count(borrow FWD_NAT_DROP);
                 put(out);
                 m_freem(m);
@@ -1046,8 +1102,10 @@ unsafe fn input(nif: *mut netif, received: *mut mbuf) {
     }
     var ihl: u32 = 0;
     var total: u32 = 0;
-    if (!netparse_ipv4_outer(Ptr.toBorrow(m).data as *u8, Ptr.toBorrow(m).pkt.len, borrow mut ihl as *mut u32,
-        borrow mut total as *mut u32)) {
+    if (!netparse_ipv4_outer(
+        Ptr.toBorrow(m).data as *u8, Ptr.toBorrow(m).pkt.len, borrow mut ihl as *mut u32,
+        borrow mut total as *mut u32,
+    )) {
         count(borrow RX_BAD_HEADER);
         m_freem(m);
         return;

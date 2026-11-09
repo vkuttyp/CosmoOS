@@ -10,15 +10,16 @@
 // callback takes the imported enum vnode_type (ADR 0079); a build without CONFIG_DEBUG runs no replay (a `cfg` block,
 // ADR 0080 §3.3), and the values below are the headers', which the C compiler checks.
 
-@header("kernel/blk.h", "kernel/vfs.h", "kernel/kmalloc.h", "kernel/ramblk.h", "kernel/string.h",
-    "kernel/cosmofs.h", "uapi/cosmo/syscall.h")
+@header(
+    "kernel/blk.h", "kernel/vfs.h", "kernel/kmalloc.h", "kernel/ramblk.h", "kernel/string.h",
+    "kernel/cosmofs.h", "uapi/cosmo/syscall.h",
+)
 extern "C" {
     struct blkdev;
     struct mount;
     enum vnode_type: u32;
     struct vnode_ops {
-        readdir: extern "C" fn(*mut vnode, *mut u64, extern "C" fn(*mut void, *CChar, usize, u64, vnode_type) -> i32,
-            *mut void) -> i32;
+        readdir: extern "C" fn(*mut vnode, *mut u64, extern "C" fn(*mut void, *CChar, usize, u64, vnode_type) -> i32, *mut void) -> i32;
     }
     struct vnode {
         mnt: *mut mount;
@@ -144,7 +145,7 @@ struct Crash {
     nrSyncs: u32;
     state: [Expect; 32];
     nrState: u32;
-    leakTotal: u64; // blocks a replayed prefix stranded: must be zero
+    leakTotal: u64;       // blocks a replayed prefix stranded: must be zero
     prefixesChecked: u32; // images the structural check actually ran on
     // The snapshot half (docs/audit/next-subsystem-snap-deadlist.md): a block named by two deadlist entries is what an
     // interrupted keeper write-back used to leave, and cosmofs_check cannot see it, so the suite asks per prefix.
@@ -302,8 +303,10 @@ unsafe fn wlSync(c: borrow mut Crash, bd: *mut blkdev) -> bool {
     c.nrSyncs += 1;
     let s = Ptr.toBorrowMut(sp);
     s.logLen = ramblk_record_count(bd);
-    memcpy(borrow mut s.files as *mut [Expect; 32] as *mut void, borrow c.state as *[Expect; 32] as *void,
-        layoutOf<Expect>().size * MAX_FILES as usize);
+    memcpy(
+        borrow mut s.files as *mut [Expect; 32] as *mut void, borrow c.state as *[Expect; 32] as *void,
+        layoutOf<Expect>().size * MAX_FILES as usize,
+    );
     s.nrFiles = c.nrState;
     return true;
 }
@@ -482,8 +485,10 @@ fn sayDirty(k: u32, rc: i32, r: borrow cosmofs_check_report) {
 
 /// Mount the prefix of `k` writes (the last one torn when `torn`) and check it against the last committed state.
 /// Safety: `bd` is the recorded device, `base` its image before the workload, `log` its log; `why` writable.
-unsafe fn checkPrefix(c: borrow mut Crash, bd: *mut blkdev, base: *u8, log: *ramblk_log, k: u32, torn: bool,
-    why: *mut *CChar) -> bool {
+unsafe fn checkPrefix(
+    c: borrow mut Crash, bd: *mut blkdev, base: *u8, log: *ramblk_log, k: u32, torn: bool,
+    why: *mut *CChar,
+) -> bool {
     ramblk_restore(bd, base);
     ramblk_replay(bd, log, k, torn);
     var mp = [0u8; 96];
@@ -714,8 +719,10 @@ unsafe fn workload(c: borrow mut Crash, bd: *mut blkdev, reason: *mut *CChar) ->
     }
     var held = 0 as *mut file;
     if (vfs_open(0 as *mut vnode, mntPath(mut p, "/tmpfile"), O_RDONLY, 0, borrow mut held as *mut *mut file) != 0) {
-        return failed(reason,
-            "check failed: vfs_open(NULL, MNT \"/tmpfile\", COSMO_O_RDONLY, 0, &held) == 0 at line 701\0");
+        return failed(
+            reason,
+            "check failed: vfs_open(NULL, MNT \"/tmpfile\", COSMO_O_RDONLY, 0, &held) == 0 at line 701\0",
+        );
     }
     if (!wlUnlink(c, mntPath(mut p, "/tmpfile"))) {
         return failed(reason, "check failed: wl_unlink(MNT \"/tmpfile\") at line 704\0");
@@ -774,8 +781,10 @@ unsafe fn listDir(vn: *mut vnode, names: *mut u8, isdir: *mut u8, n: *mut u32) -
     let lock = borrow mut Ptr.toBorrowMut(vn).lock as *mut mutex;
     mutex_lock(lock);
     let ops = Ptr.toBorrow(vn as *vnode).ops;
-    let rc = if (Ptr.toBorrow(ops).readdir.isNull()) -ENOTSUP else Ptr.toBorrow(ops).readdir(vn,
-        borrow mut pos as *mut u64, collect, borrow mut l as *mut CrashList as *mut void);
+    let rc = if (Ptr.toBorrow(ops).readdir.isNull()) -ENOTSUP else Ptr.toBorrow(ops).readdir(
+        vn,
+        borrow mut pos as *mut u64, collect, borrow mut l as *mut CrashList as *mut void,
+    );
     mutex_unlock(lock);
     n.write(l.n);
     return rc;

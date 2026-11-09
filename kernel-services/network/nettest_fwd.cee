@@ -5,7 +5,21 @@
 // fills (a firewall rule, a control command, the NAT and firewall listings and counters) is built in a zeroed room of
 // this file's, as the C's designated initialisers zeroed what they did not name, and read back field by field.
 
-@header("nettest.h", "kernel/net/inet.h", "kernel/net/ip.h", "kernel/net/ether.h", "kernel/net/tap.h", "kernel/net/nat.h", "kernel/net/fw.h", "uapi/cosmo/netctl.h", "kernel/netif.h", "kernel/mbuf.h", "kernel/vfs.h", "kernel/selftest.h", "kernel/wait.h")
+@header(
+    "nettest.h",
+    "kernel/net/inet.h",
+    "kernel/net/ip.h",
+    "kernel/net/ether.h",
+    "kernel/net/tap.h",
+    "kernel/net/nat.h",
+    "kernel/net/fw.h",
+    "uapi/cosmo/netctl.h",
+    "kernel/netif.h",
+    "kernel/mbuf.h",
+    "kernel/vfs.h",
+    "kernel/selftest.h",
+    "kernel/wait.h",
+)
 extern "C" {
     struct mbuf;
     struct netif_ip4 {

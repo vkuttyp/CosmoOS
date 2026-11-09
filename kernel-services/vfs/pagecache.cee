@@ -10,9 +10,11 @@
 // into itself, beside its lock and the dirty bound's waitqueue and lockdep class; the injected readpage failure is
 // faultinject.h's, and the lockdep assertion a `cfg` block (ADR 0080 §3.3).
 
-@header("kernel/errno.h", "kernel/kmalloc.h", "kernel/list.h", "kernel/mutex.h", "kernel/object.h", "kernel/page.h",
+@header(
+    "kernel/errno.h", "kernel/kmalloc.h", "kernel/list.h", "kernel/mutex.h", "kernel/object.h", "kernel/page.h",
     "kernel/pagecache.h", "kernel/pmm.h", "kernel/spinlock.h", "kernel/string.h", "kernel/vfs.h", "kernel/vmm.h",
-    "kernel/wait.h", "arch/mmu.h", "kernel/faultinject.h", "kernel/lockdep.h")
+    "kernel/wait.h", "arch/mmu.h", "kernel/faultinject.h", "kernel/lockdep.h",
+)
 extern "C" {
     struct page {
         flags: u32;
@@ -135,7 +137,10 @@ extern "C" {
 // ---- The LRU, the dirty bound's wait, and the seams ----
 
 /// The global LRU of clean, reclaimable pages: head = most recent.
-static mut LRU: list_node = list_node { next: borrow mut LRU as *mut list_node, prev: borrow mut LRU as *mut list_node };
+static mut LRU: list_node = list_node {
+    next: borrow mut LRU as *mut list_node,
+    prev: borrow mut LRU as *mut list_node,
+};
 static mut LRU_LOCK: spinlock_t = SPINLOCK_INIT("pagecache-lru\0".ptr as *CChar);
 /// The dirty bound's waitqueue, set up at boot, and the lockdep completion class of its sleep.
 static mut DIRTY_WQ: waitqueue = waitqueue {};
@@ -155,14 +160,18 @@ unsafe fn dirtyWq() -> *mut waitqueue => borrow mut DIRTY_WQ as *mut waitqueue;
 /// lockdep's record of the dirty bound's sleep and its wake.
 /// Safety: after pagecache_dirty_init.
 unsafe fn dirtyWait() {
-    lockdep_completion_wait(dirtyWq() as *void, borrow mut DIRTY_CLASS as *mut u16, "pagecache-dirty\0".ptr as *CChar,
-        DIRTY_IP.load());
+    lockdep_completion_wait(
+        dirtyWq() as *void, borrow mut DIRTY_CLASS as *mut u16, "pagecache-dirty\0".ptr as *CChar,
+        DIRTY_IP.load(),
+    );
 }
 
 /// Safety: as dirtyWait.
 unsafe fn dirtySignal() {
-    lockdep_completion_signal(dirtyWq() as *void, borrow mut DIRTY_CLASS as *mut u16, "pagecache-dirty\0".ptr as *CChar,
-        DIRTY_IP.load());
+    lockdep_completion_signal(
+        dirtyWq() as *void, borrow mut DIRTY_CLASS as *mut u16, "pagecache-dirty\0".ptr as *CChar,
+        DIRTY_IP.load(),
+    );
 }
 
 /// lockdep_assert_held(m, LOCKDEP_KIND_MUTEX), which only a lockdep build makes.
@@ -190,7 +199,7 @@ const U64_MAX: u64 = 0xffffffffffffffff;
 // not counted.
 const DIRTY_DIVISOR: u64 = 2;
 const THROTTLE_NS: u64 = 100000000; // one sleep, then the count is looked at again
-const THROTTLE_WAITS: u32 = 50; // at most 5 s behind other files' dirty pages
+const THROTTLE_WAITS: u32 = 50;     // at most 5 s behind other files' dirty pages
 
 /// The global cap on cached pages; 0: no limit.
 static LIMIT: AtomicU64 = AtomicU64.constant(0);
@@ -868,8 +877,10 @@ unsafe fn sync(vn: *mut vnode) -> i32 {
 
             var done: u32 = 0;
             if (n > 1 && !ops.writepages.isNull()) {
-                rc = ops.writepages(vn, first, borrow mut bufs as *mut [*mut void; 8] as **mut void, n,
-                    borrow mut done as *mut u32);
+                rc = ops.writepages(
+                    vn, first, borrow mut bufs as *mut [*mut void; 8] as **mut void, n,
+                    borrow mut done as *mut u32,
+                );
                 if (rc == 0 && (done == 0 || done > n)) {
                     rc = -EIO; // a filesystem that reports nonsense
                 }

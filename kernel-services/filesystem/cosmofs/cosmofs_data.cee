@@ -13,9 +13,11 @@
 // What a build configuration decides -- the fault seams, the debug build's note -- is faultinject.h's seams and a `cfg`
 // block (ADR 0080 §3.3), and the run bound a self-test may lower is cosmofs_internal.h's cfs_max_extents.
 
-@header("kernel/faultinject.h", "kernel/kmalloc.h", "kernel/string.h", "kernel/chacha20.h", "kernel/lz4.h",
+@header(
+    "kernel/faultinject.h", "kernel/kmalloc.h", "kernel/string.h", "kernel/chacha20.h", "kernel/lz4.h",
     "kernel/crc32c.h",
-    "cosmofs_internal.h")
+    "cosmofs_internal.h",
+)
 extern "C" {
     struct cfs_mhdr {
         generation: u64;
@@ -167,7 +169,7 @@ fn extPsize(count: u32) -> u32 =>
 /// cosmofs_format.h's cfs_ext_pack: the count word of a compressed record.
 fn extPack(algo: u32, psize: u32, count: u32) -> u32 =>
     CFS_EXT_COMPRESSED | ((algo & CFS_EXT_ALGO_MASK) << CFS_EXT_ALGO_SHIFT) |
-    (((psize - 1) & CFS_EXT_PSIZE_MASK) << CFS_EXT_PSIZE_SHIFT) | (count & CFS_EXT_COUNT_MASK);
+        (((psize - 1) & CFS_EXT_PSIZE_MASK) << CFS_EXT_PSIZE_SHIFT) | (count & CFS_EXT_COUNT_MASK);
 
 /// Run `i` of an array.
 /// Safety: `ext` holds more than `i` runs.
@@ -264,8 +266,7 @@ unsafe fn extentsLoad(fs: *mut cfs, inp: *cfs_inode, out: *mut *mut cfs_extent, 
                     kfree(ext as *mut void);
                     return -EFBIG;
                 }
-                let ncap = if (cap * 2 > cfs_max_extents(fs as *cfs)) cfs_max_extents(fs as
-                    *cfs) else cap * 2;
+                let ncap = if (cap * 2 > cfs_max_extents(fs as *cfs)) cfs_max_extents(fs as *cfs) else cap * 2;
                 let grown = krealloc(ext as *mut void, ncap as usize * EXT, 0) as *mut cfs_extent;
                 if (grown.isNull()) {
                     cfs_buf_put(fs, b);
@@ -531,8 +532,8 @@ unsafe fn extentsMerge(ext: *mut cfs_extent, n: u32) -> u32 {
         }
         if (w > 0) {
             let p = run(ext, w - 1);
-            if (!extCompressed(p.count) && !extCompressed(e.count) && p.start.wrappingAdd(p.count as u64) == e.start
-                && p.lblk as u64 + p.count as u64 == e.lblk as u64 && p.count as u64 + e.count as u64 < 0x7fffffff) {
+            if (!extCompressed(p.count) && !extCompressed(e.count) && p.start.wrappingAdd(p.count as u64) == e.start &&
+                p.lblk as u64 + p.count as u64 == e.lblk as u64 && p.count as u64 + e.count as u64 < 0x7fffffff) {
                 p.count = p.count + e.count;
                 continue;
             }
@@ -788,8 +789,10 @@ unsafe fn truncateRecord(fs: *mut cfs, inp: *mut cfs_inode, keep: u64) -> i32 {
         let survives = truncate<u32>(keep - r.lblk as u64);
         var i: u32 = 0;
         while (i < survives && rc == 0) {
-            rc = dataWriteBlock(fs, inp, r.lblk as u64 + i as u64, rec.add(i as usize * CFS_BLOCK) as *void,
-                CFS_ALLOC_DATA);
+            rc = dataWriteBlock(
+                fs, inp, r.lblk as u64 + i as u64, rec.add(i as usize * CFS_BLOCK) as *void,
+                CFS_ALLOC_DATA,
+            );
             i += 1;
         }
         if (rc != 0) {
@@ -914,8 +917,14 @@ unsafe fn nextBlockHint(fs: *mut cfs, inp: *cfs_inode, lblk: u64) -> u64 {
 /// Encrypt a block into `out` and record what a reader needs: the tag that authenticates it, the nonce it was sealed
 /// with, and a keyless CRC of the ciphertext for whoever has no key.
 /// Safety: as extentsLoad; `plain` CFS_BLOCK bytes, `out` CFS_BLOCK writable bytes, `e` an entry.
-unsafe fn sealBlock(fs: *mut cfs, inp: *cfs_inode, lblk: u64, plain: *void, out: *mut u8, e: *mut cfs_csum_aead)
-    -> i32 {
+unsafe fn sealBlock(
+    fs: *mut cfs,
+    inp: *cfs_inode,
+    lblk: u64,
+    plain: *void,
+    out: *mut u8,
+    e: *mut cfs_csum_aead,
+) -> i32 {
     if (!Ptr.toBorrow(fs as *cfs).have_key) {
         return -ENOKEY;
     }
@@ -929,9 +938,11 @@ unsafe fn sealBlock(fs: *mut cfs, inp: *cfs_inode, lblk: u64, plain: *void, out:
     // The position is authenticated with the block, so a valid block cannot be moved to another offset and opened
     // there.
     var aad = [ino, lblk];
-    chacha20_seal(borrow key as *[u8; 32] as *u8, borrow en.nonce as *[u8; 12] as *u8,
+    chacha20_seal(
+        borrow key as *[u8; 32] as *u8, borrow en.nonce as *[u8; 12] as *u8,
         borrow aad as *[u64; 2] as *void, 16, out as *mut void, CFS_BLOCK,
-        borrow mut en.tag as *mut [u8; 16] as *mut u8);
+        borrow mut en.tag as *mut [u8; 16] as *mut u8,
+    );
     key = [0u8; 32];
     en.crc = crc32c(out as *void, CFS_BLOCK);
     return 0;
@@ -993,8 +1004,10 @@ unsafe fn dataWriteBlock(fs: *mut cfs, inp: *mut cfs_inode, lblk: u64, buf: *voi
     var nblk: u64 = 0;
     var got: u64 = 0;
     var old: u64 = 0;
-    var rc = cfs_alloc_run(fs, cls, nextBlockHint(fs, inp as *cfs_inode, lblk), 1, borrow mut nblk as *mut u64,
-        borrow mut got as *mut u64);
+    var rc = cfs_alloc_run(
+        fs, cls, nextBlockHint(fs, inp as *cfs_inode, lblk), 1, borrow mut nblk as *mut u64,
+        borrow mut got as *mut u64,
+    );
     if (rc != 0) {
         kfree(cipher as *mut void);
         return rc;
@@ -1030,8 +1043,15 @@ unsafe fn dataWriteBlock(fs: *mut cfs, inp: *mut cfs_inode, lblk: u64, buf: *voi
 
 /// Write `n` blocks at `start`.. as their entries say: sealed (with `cipher`) or with their CRC32C, from `data`.
 /// Safety: as setExtent; `data` `n` blocks; `cipher` null or a block; `prev` `n` saved entries.
-unsafe fn writeBlocks(fs: *mut cfs, inp: *mut cfs_inode, lblk0: u64, start: u64, data: *u8, n: u32, cipher: *mut u8)
-    -> i32 {
+unsafe fn writeBlocks(
+    fs: *mut cfs,
+    inp: *mut cfs_inode,
+    lblk0: u64,
+    start: u64,
+    data: *u8,
+    n: u32,
+    cipher: *mut u8,
+) -> i32 {
     var rc: i32 = 0;
     var i: u32 = 0;
     while (i < n && rc == 0) {
@@ -1065,8 +1085,10 @@ unsafe fn writeBlocks(fs: *mut cfs, inp: *mut cfs_inode, lblk0: u64, start: u64,
 unsafe fn plainRunWrite(fs: *mut cfs, inp: *mut cfs_inode, lblk0: u64, data: *u8, n: u32) -> i32 {
     var start: u64 = 0;
     var got: u64 = 0;
-    var rc = cfs_alloc_run(fs, CFS_ALLOC_DATA, nextBlockHint(fs, inp as *cfs_inode, lblk0), n,
-        borrow mut start as *mut u64, borrow mut got as *mut u64);
+    var rc = cfs_alloc_run(
+        fs, CFS_ALLOC_DATA, nextBlockHint(fs, inp as *cfs_inode, lblk0), n,
+        borrow mut start as *mut u64, borrow mut got as *mut u64,
+    );
     if (rc != 0) {
         return rc;
     }
@@ -1119,8 +1141,10 @@ unsafe fn plainRunWrite(fs: *mut cfs, inp: *mut cfs_inode, lblk0: u64, data: *u8
 unsafe fn compressedWrite(fs: *mut cfs, inp: *mut cfs_inode, lblk0: u64, packed: *u8, psize: u32, n: u32) -> i32 {
     var start: u64 = 0;
     var got: u64 = 0;
-    var rc = cfs_alloc_run(fs, CFS_ALLOC_DATA, nextBlockHint(fs, inp as *cfs_inode, lblk0), psize,
-        borrow mut start as *mut u64, borrow mut got as *mut u64);
+    var rc = cfs_alloc_run(
+        fs, CFS_ALLOC_DATA, nextBlockHint(fs, inp as *cfs_inode, lblk0), psize,
+        borrow mut start as *mut u64, borrow mut got as *mut u64,
+    );
     if (rc == 0 && got < psize as u64) {
         // Not contiguous enough for a record; give it back.
         for (k in 0u64..got) {
@@ -1236,8 +1260,10 @@ unsafe fn recordWrite(fs: *mut cfs, inp: *mut cfs_inode, lblk0: u64, data: *u8, 
         dropped = true;
     }
     for (i in 0u32..n) {
-        let rc = dataWriteBlock(fs, inp, lblk0 + i as u64, data.add(i as usize * CFS_BLOCK) as *void,
-            CFS_ALLOC_DATA);
+        let rc = dataWriteBlock(
+            fs, inp, lblk0 + i as u64, data.add(i as usize * CFS_BLOCK) as *void,
+            CFS_ALLOC_DATA,
+        );
         if (rc != 0) {
             // The record is out of the map and its blocks are on the deferred list: what is not yet rewritten would
             // read back as a hole. The committed record is the only good copy, so the transaction is abandoned rather

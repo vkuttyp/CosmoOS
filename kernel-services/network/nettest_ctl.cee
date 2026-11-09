@@ -4,7 +4,19 @@
 // A snapshot is a run of sections whose offsets follow from the counts in their own headers, so a header may lie at
 // any offset its predecessors leave; each is copied into an aligned room before it is read, as the C memcpy'd it.
 
-@header("nettest.h", "kernel/net/inet.h", "kernel/net/ip.h", "kernel/net/ether.h", "kernel/net/tap.h", "kernel/net/nat.h", "uapi/cosmo/netctl.h", "kernel/netif.h", "kernel/mbuf.h", "kernel/vfs.h", "kernel/selftest.h")
+@header(
+    "nettest.h",
+    "kernel/net/inet.h",
+    "kernel/net/ip.h",
+    "kernel/net/ether.h",
+    "kernel/net/tap.h",
+    "kernel/net/nat.h",
+    "uapi/cosmo/netctl.h",
+    "kernel/netif.h",
+    "kernel/mbuf.h",
+    "kernel/vfs.h",
+    "kernel/selftest.h",
+)
 extern "C" {
     struct mbuf;
     struct netif;

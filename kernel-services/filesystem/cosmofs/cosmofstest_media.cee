@@ -6,9 +6,11 @@
 // are cosmofstest_lib.cee's. The layout written here as constants is the headers', which the C compiler checks, and
 // a build without CONFIG_DEBUG runs none of these tests (a `cfg` block; ADR 0080).
 
-@header("kernel/blk.h", "kernel/vfs.h", "kernel/kmalloc.h", "kernel/string.h", "kernel/storage.h", "kernel/crc32c.h",
+@header(
+    "kernel/blk.h", "kernel/vfs.h", "kernel/kmalloc.h", "kernel/string.h", "kernel/storage.h", "kernel/crc32c.h",
     "kernel/log.h", "kernel/cosmofs.h", "uapi/cosmo/syscall.h", "kernel/errno.h", "kernel/selftest.h",
-    "cosmofs_format.h")
+    "cosmofs_format.h",
+)
 extern "C" {
     struct cosmofs_stats;
     struct blkdev;
@@ -81,16 +83,24 @@ extern "C" {
     @cvalue("COSMO_O_RDONLY == 0 && COSMO_O_RDWR == 2 && COSMO_O_CREAT == 0x40 && COSMOFS_SCRUB_REPAIR == 1")
     const COSMOFSTEST_MEDIA_FACT_0: bool = true;
     /// cosmofstest_media.cee's superblock and label offsets
-    @cvalue("CFS_MHDR_SIZE == 32 && offsetof(struct cfs_mhdr, crc) == 24 && CFS_SUPER_A == 0 && CFS_SUPER_B == 1 && offsetof(struct cfs_super, magic) == 0 && offsetof(struct cfs_super, generation) == 24 && offsetof(struct cfs_super, imap_root) == 32 && offsetof(struct cfs_super, crc) == 160 && offsetof(struct cfs_label, magic) == 0 && sizeof(((struct cfs_label *)0)->magic) == 8 && offsetof(struct cfs_label, generation) == 48 && offsetof(struct cfs_label, crc) == 72")
+    @cvalue(
+        "CFS_MHDR_SIZE == 32 && offsetof(struct cfs_mhdr, crc) == 24 && CFS_SUPER_A == 0 && CFS_SUPER_B == 1 && offsetof(struct cfs_super, magic) == 0 && offsetof(struct cfs_super, generation) == 24 && offsetof(struct cfs_super, imap_root) == 32 && offsetof(struct cfs_super, crc) == 160 && offsetof(struct cfs_label, magic) == 0 && sizeof(((struct cfs_label *)0)->magic) == 8 && offsetof(struct cfs_label, generation) == 48 && offsetof(struct cfs_label, crc) == 72",
+    )
     const COSMOFSTEST_MEDIA_FACT_1: bool = true;
     /// cosmofstest_media.cee's inode and DVA layout
-    @cvalue("CFS_INODE_SIZE == 256 && CFS_INODES_PER_BLOCK == 15 && CFS_PTRS_PER_BLOCK == 508 && offsetof(struct cfs_inode, ino) == 48 && offsetof(struct cfs_inode, direct) == 56 && sizeof(struct cfs_extent) == 16 && offsetof(struct cfs_extent, count) == 8 && offsetof(struct cfs_extent, lblk) == 12 && CFS_DVA_VDEV_SHIFT == 56")
+    @cvalue(
+        "CFS_INODE_SIZE == 256 && CFS_INODES_PER_BLOCK == 15 && CFS_PTRS_PER_BLOCK == 508 && offsetof(struct cfs_inode, ino) == 48 && offsetof(struct cfs_inode, direct) == 56 && sizeof(struct cfs_extent) == 16 && offsetof(struct cfs_extent, count) == 8 && offsetof(struct cfs_extent, lblk) == 12 && CFS_DVA_VDEV_SHIFT == 56",
+    )
     const COSMOFSTEST_MEDIA_FACT_2: bool = true;
     /// cosmofstest_media.cee's struct cosmofs_stats offsets
-    @cvalue("sizeof(struct cosmofs_stats) <= 128 && offsetof(struct cosmofs_stats, generation) == 0 && offsetof(struct cosmofs_stats, free_blocks) == 8 && offsetof(struct cosmofs_stats, total_blocks) == 16 && offsetof(struct cosmofs_stats, members) == 72 && offsetof(struct cosmofs_stats, devices) == 76 && offsetof(struct cosmofs_stats, repairs) == 80 && offsetof(struct cosmofs_stats, degraded) == 88")
+    @cvalue(
+        "sizeof(struct cosmofs_stats) <= 128 && offsetof(struct cosmofs_stats, generation) == 0 && offsetof(struct cosmofs_stats, free_blocks) == 8 && offsetof(struct cosmofs_stats, total_blocks) == 16 && offsetof(struct cosmofs_stats, members) == 72 && offsetof(struct cosmofs_stats, devices) == 76 && offsetof(struct cosmofs_stats, repairs) == 80 && offsetof(struct cosmofs_stats, degraded) == 88",
+    )
     const COSMOFSTEST_MEDIA_FACT_3: bool = true;
     /// cosmofstest_media.cee's struct cosmofs_scrub_stats offsets and struct cosmo_stat's size
-    @cvalue("sizeof(struct cosmofs_scrub_stats) <= 128 && offsetof(struct cosmofs_scrub_stats, blocks_read) == 0 && offsetof(struct cosmofs_scrub_stats, inodes) == 8 && offsetof(struct cosmofs_scrub_stats, repaired) == 16 && offsetof(struct cosmofs_scrub_stats, unrecoverable) == 24 && sizeof(struct cosmo_stat) <= 64")
+    @cvalue(
+        "sizeof(struct cosmofs_scrub_stats) <= 128 && offsetof(struct cosmofs_scrub_stats, blocks_read) == 0 && offsetof(struct cosmofs_scrub_stats, inodes) == 8 && offsetof(struct cosmofs_scrub_stats, repaired) == 16 && offsetof(struct cosmofs_scrub_stats, unrecoverable) == 24 && sizeof(struct cosmo_stat) <= 64",
+    )
     const COSMOFSTEST_MEDIA_FACT_4: bool = true;
 }
 
@@ -243,8 +253,10 @@ unsafe fn badmap(s: borrow mut Badmap, bd: *mut blkdev, reason: *mut *CChar) -> 
     let orc = vfs_open(0 as *mut vnode, p("/mnt/eng/two\0"), O_RDWR | O_CREAT, 420, borrow mut f as *mut *mut file);
     s.f = f;
     if (orc != 0) {
-        return failed(reason,
-            "check failed: vfs_open(NULL, ENG \"/two\", COSMO_O_RDWR | COSMO_O_CREAT, 0644, &f) == 0 at line 225\0");
+        return failed(
+            reason,
+            "check failed: vfs_open(NULL, ENG \"/two\", COSMO_O_RDWR | COSMO_O_CREAT, 0644, &f) == 0 at line 225\0",
+        );
     }
     let page = kmalloc(CFS_BLOCK, 0) as *mut u8;
     s.page = page;
@@ -314,8 +326,10 @@ unsafe fn badmap(s: borrow mut Badmap, bd: *mut blkdev, reason: *mut *CChar) -> 
     let d1 = d0 + EXTENT_SIZE;
     if (!(rd64(blk as *u8, at + INODE_INO) == ino && rd32(blk as *u8, d0 + EXTENT_COUNT) == 1 &&
         rd32(blk as *u8, d1 + EXTENT_COUNT) == 1 && rd32(blk as *u8, d1 + EXTENT_LBLK) == 5)) {
-        return failed(reason,
-            "check failed: in->ino == ino && in->direct[0].count == 1 && ... && in->direct[1].lblk == 5 at line 296\0");
+        return failed(
+            reason,
+            "check failed: in->ino == ino && in->direct[0].count == 1 && ... && in->direct[1].lblk == 5 at line 296\0",
+        );
     }
     var tmp = [0u8; 16];
     memcpy(borrow mut tmp as *mut [u8; 16] as *mut void, blk.add(d0) as *void, EXTENT_SIZE);
@@ -400,8 +414,10 @@ unsafe fn selftestSnapshot(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: st1.generation > st0.generation at line 376\0");
     }
     if (vfs_mkdir(0 as *mut vnode, p("/mnt/eng/.snapshots/first\0"), 493) != -EEXIST) {
-        return failed(reason,
-            "check failed: vfs_mkdir(NULL, ENG \"/.snapshots/first\", 0755) == -EEXIST at line 380\0");
+        return failed(
+            reason,
+            "check failed: vfs_mkdir(NULL, ENG \"/.snapshots/first\", 0755) == -EEXIST at line 380\0",
+        );
     }
 
     // The live tree moves: rewrite, delete, add.
@@ -420,28 +436,40 @@ unsafe fn selftestSnapshot(reason: *mut *CChar) -> bool {
 
     // The snapshot still has what was there, at every depth.
     if (!cfst_read_matches(p("/mnt/eng/.snapshots/first/keep\0"), "before".ptr as *void, 6)) {
-        return failed(reason,
-            "check failed: read_matches(ENG \"/.snapshots/first/keep\", \"before\", 6) at line 400\0");
+        return failed(
+            reason,
+            "check failed: read_matches(ENG \"/.snapshots/first/keep\", \"before\", 6) at line 400\0",
+        );
     }
     if (!cfst_read_matches(p("/mnt/eng/.snapshots/first/dir/deep\0"), "old".ptr as *void, 3)) {
-        return failed(reason,
-            "check failed: read_matches(ENG \"/.snapshots/first/dir/deep\", \"old\", 3) at line 404\0");
+        return failed(
+            reason,
+            "check failed: read_matches(ENG \"/.snapshots/first/dir/deep\", \"old\", 3) at line 404\0",
+        );
     }
     if (stat(p("/mnt/eng/.snapshots/first/fresh\0"), s) != -ENOENT) { // born after it
-        return failed(reason,
-            "check failed: vfs_stat(NULL, ENG \"/.snapshots/first/fresh\", &s) == -ENOENT at line 408\0");
+        return failed(
+            reason,
+            "check failed: vfs_stat(NULL, ENG \"/.snapshots/first/fresh\", &s) == -ENOENT at line 408\0",
+        );
     }
 
     // A snapshot is read-only, and .snapshots is not a place for files.
     var f = 0 as *mut file;
-    if (vfs_open(0 as *mut vnode, p("/mnt/eng/.snapshots/first/new\0"), O_RDWR | O_CREAT, 420,
-        borrow mut f as *mut *mut file) != -EROFS) {
-        return failed(reason,
-            "check failed: vfs_open(NULL, ENG \"/.snapshots/first/new\", ..., &f) == -EROFS at line 416\0");
+    if (vfs_open(
+        0 as *mut vnode, p("/mnt/eng/.snapshots/first/new\0"), O_RDWR | O_CREAT, 420,
+        borrow mut f as *mut *mut file,
+    ) != -EROFS) {
+        return failed(
+            reason,
+            "check failed: vfs_open(NULL, ENG \"/.snapshots/first/new\", ..., &f) == -EROFS at line 416\0",
+        );
     }
     if (vfs_mkdir(0 as *mut vnode, p("/mnt/eng/.snapshots/first/sub\0"), 493) != -EROFS) {
-        return failed(reason,
-            "check failed: vfs_mkdir(NULL, ENG \"/.snapshots/first/sub\", 0755) == -EROFS at line 420\0");
+        return failed(
+            reason,
+            "check failed: vfs_mkdir(NULL, ENG \"/.snapshots/first/sub\", 0755) == -EROFS at line 420\0",
+        );
     }
     if (vfs_unlink(0 as *mut vnode, p("/mnt/eng/.snapshots/first/keep\0")) != -EROFS) {
         return failed(reason, "check failed: vfs_unlink(NULL, ENG \"/.snapshots/first/keep\") == -EROFS at line 423\0");
@@ -451,21 +479,29 @@ unsafe fn selftestSnapshot(reason: *mut *CChar) -> bool {
     // snapshot for the live tree's directory of the same inode number -- today's contents, and writable, under a path
     // that says otherwise.
     if (!cfst_read_matches(p("/mnt/eng/.snapshots/first/dir/../keep\0"), "before".ptr as *void, 6)) { // not "after!"
-        return failed(reason,
-            "check failed: read_matches(ENG \"/.snapshots/first/dir/../keep\", \"before\", 6) at line 431\0");
+        return failed(
+            reason,
+            "check failed: read_matches(ENG \"/.snapshots/first/dir/../keep\", \"before\", 6) at line 431\0",
+        );
     }
     if (vfs_unlink(0 as *mut vnode, p("/mnt/eng/.snapshots/first/dir/../keep\0")) != -EROFS) {
-        return failed(reason,
-            "check failed: vfs_unlink(NULL, ENG \"/.snapshots/first/dir/../keep\") == -EROFS at line 435\0");
+        return failed(
+            reason,
+            "check failed: vfs_unlink(NULL, ENG \"/.snapshots/first/dir/../keep\") == -EROFS at line 435\0",
+        );
     }
     if (!cfst_read_matches(p("/mnt/eng/.snapshots/first/dir/../dir/deep\0"), "old".ptr as *void, 3)) {
-        return failed(reason,
-            "check failed: read_matches(ENG \"/.snapshots/first/dir/../dir/deep\", \"old\", 3) at line 439\0");
+        return failed(
+            reason,
+            "check failed: read_matches(ENG \"/.snapshots/first/dir/../dir/deep\", \"old\", 3) at line 439\0",
+        );
     }
     // At a snapshot's root the way up is .snapshots, and out of that is the live tree again.
     if (!cfst_read_matches(p("/mnt/eng/.snapshots/first/../first/keep\0"), "before".ptr as *void, 6)) {
-        return failed(reason,
-            "check failed: read_matches(ENG \"/.snapshots/first/../first/keep\", \"before\", 6) at line 444\0");
+        return failed(
+            reason,
+            "check failed: read_matches(ENG \"/.snapshots/first/../first/keep\", \"before\", 6) at line 444\0",
+        );
     }
     if (!cfst_read_matches(p("/mnt/eng/.snapshots/../keep\0"), "after!".ptr as *void, 6)) {
         return failed(reason, "check failed: read_matches(ENG \"/.snapshots/../keep\", \"after!\", 6) at line 447\0");
@@ -483,16 +519,22 @@ unsafe fn selftestSnapshot(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: vfs_mkdir(NULL, ENG \"/.snapshots/second\", 0755) == 0 at line 459\0");
     }
     if (!cfst_read_matches(p("/mnt/eng/.snapshots/second/keep\0"), "after!".ptr as *void, 6)) {
-        return failed(reason,
-            "check failed: read_matches(ENG \"/.snapshots/second/keep\", \"after!\", 6) at line 463\0");
+        return failed(
+            reason,
+            "check failed: read_matches(ENG \"/.snapshots/second/keep\", \"after!\", 6) at line 463\0",
+        );
     }
     if (!cfst_read_matches(p("/mnt/eng/.snapshots/first/keep\0"), "before".ptr as *void, 6)) { // untouched
-        return failed(reason,
-            "check failed: read_matches(ENG \"/.snapshots/first/keep\", \"before\", 6) at line 467\0");
+        return failed(
+            reason,
+            "check failed: read_matches(ENG \"/.snapshots/first/keep\", \"before\", 6) at line 467\0",
+        );
     }
     if (stat(p("/mnt/eng/.snapshots/first/born-late\0"), s) != -ENOENT) {
-        return failed(reason,
-            "check failed: vfs_stat(NULL, ENG \"/.snapshots/first/born-late\", &s) == -ENOENT at line 471\0");
+        return failed(
+            reason,
+            "check failed: vfs_stat(NULL, ENG \"/.snapshots/first/born-late\", &s) == -ENOENT at line 471\0",
+        );
     }
 
     // Kill the late file: its blocks die while only `second` names them.
@@ -523,8 +565,10 @@ unsafe fn selftestSnapshot(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: vfs_stat(NULL, ENG \"/.snapshots/second\", &s) == -ENOENT at line 499\0");
     }
     if (!cfst_read_matches(p("/mnt/eng/.snapshots/first/keep\0"), "before".ptr as *void, 6)) {
-        return failed(reason,
-            "check failed: read_matches(ENG \"/.snapshots/first/keep\", \"before\", 6) at line 503\0");
+        return failed(
+            reason,
+            "check failed: read_matches(ENG \"/.snapshots/first/keep\", \"before\", 6) at line 503\0",
+        );
     }
     if (!cfst_read_matches(p("/mnt/eng/keep\0"), "after!".ptr as *void, 6)) {
         return failed(reason, "check failed: read_matches(ENG \"/keep\", \"after!\", 6) at line 506\0");
@@ -558,10 +602,14 @@ unsafe fn selftestSnapshot(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: vfs_mkdir(NULL, ENG \"/.snapshots/busy\", 0755) == 0 at line 534\0");
     }
     var held = 0 as *mut file;
-    if (vfs_open(0 as *mut vnode, p("/mnt/eng/.snapshots/busy/keep\0"), O_RDONLY, 0,
-        borrow mut held as *mut *mut file) != 0) {
-        return failed(reason,
-            "check failed: vfs_open(NULL, ENG \"/.snapshots/busy/keep\", COSMO_O_RDONLY, 0, &held) == 0 at line 540\0");
+    if (vfs_open(
+        0 as *mut vnode, p("/mnt/eng/.snapshots/busy/keep\0"), O_RDONLY, 0,
+        borrow mut held as *mut *mut file,
+    ) != 0) {
+        return failed(
+            reason,
+            "check failed: vfs_open(NULL, ENG \"/.snapshots/busy/keep\", COSMO_O_RDONLY, 0, &held) == 0 at line 540\0",
+        );
     }
     if (vfs_rmdir(0 as *mut vnode, p("/mnt/eng/.snapshots/busy\0")) != -EBUSY) {
         return failed(reason, "check failed: vfs_rmdir(NULL, ENG \"/.snapshots/busy\") == -EBUSY at line 543\0");
@@ -593,8 +641,10 @@ unsafe fn selftestSnapshot(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: vfs_mkdir(NULL, ENG \"/.snapshots/ident-b\", 0755) == 0 at line 569\0");
     }
     if (!cfst_read_matches(p("/mnt/eng/.snapshots/ident-a/ident\0"), "aaa".ptr as *void, 3)) {
-        return failed(reason,
-            "check failed: read_matches(ENG \"/.snapshots/ident-a/ident\", \"aaa\", 3) at line 573\0");
+        return failed(
+            reason,
+            "check failed: read_matches(ENG \"/.snapshots/ident-a/ident\", \"aaa\", 3) at line 573\0",
+        );
     }
     if (vfs_rmdir(0 as *mut vnode, p("/mnt/eng/.snapshots/ident-a\0")) != 0) {
         return failed(reason, "check failed: vfs_rmdir(NULL, ENG \"/.snapshots/ident-a\") == 0 at line 576\0");
@@ -606,12 +656,16 @@ unsafe fn selftestSnapshot(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: vfs_mkdir(NULL, ENG \"/.snapshots/ident-c\", 0755) == 0 at line 582\0");
     }
     if (!cfst_read_matches(p("/mnt/eng/.snapshots/ident-b/ident\0"), "bbb".ptr as *void, 3)) {
-        return failed(reason,
-            "check failed: read_matches(ENG \"/.snapshots/ident-b/ident\", \"bbb\", 3) at line 586\0");
+        return failed(
+            reason,
+            "check failed: read_matches(ENG \"/.snapshots/ident-b/ident\", \"bbb\", 3) at line 586\0",
+        );
     }
     if (!cfst_read_matches(p("/mnt/eng/.snapshots/ident-c/ident\0"), "ccc".ptr as *void, 3)) {
-        return failed(reason,
-            "check failed: read_matches(ENG \"/.snapshots/ident-c/ident\", \"ccc\", 3) at line 590\0");
+        return failed(
+            reason,
+            "check failed: read_matches(ENG \"/.snapshots/ident-c/ident\", \"ccc\", 3) at line 590\0",
+        );
     }
     if (vfs_rmdir(0 as *mut vnode, p("/mnt/eng/.snapshots/ident-b\0")) != 0) {
         return failed(reason, "check failed: vfs_rmdir(NULL, ENG \"/.snapshots/ident-b\") == 0 at line 593\0");
@@ -802,8 +856,10 @@ unsafe fn mirror(s: borrow mut Mirror, reason: *mut *CChar) -> bool {
     let orc = vfs_open(0 as *mut vnode, p("/mnt/eng/mirrored\0"), O_RDONLY, 0, borrow mut f as *mut *mut file);
     s.f = f;
     if (orc != 0) {
-        return failed(reason,
-            "check failed: vfs_open(NULL, ENG \"/mirrored\", COSMO_O_RDONLY, 0, &f) == 0 at line 782\0");
+        return failed(
+            reason,
+            "check failed: vfs_open(NULL, ENG \"/mirrored\", COSMO_O_RDONLY, 0, &f) == 0 at line 782\0",
+        );
     }
     let ino = Ptr.toBorrow(Ptr.toBorrow(f as *file).vn as *vnode).ino;
     filePut(f);
@@ -833,27 +889,35 @@ unsafe fn mirror(s: borrow mut Mirror, reason: *mut *CChar) -> bool {
     var scslot = [0u64; 16];
     let sc = borrow mut scslot as *mut [u64; 16];
     if (!engScrub(sc)) {
-        return failed(reason,
-            "check failed: cosmofs_scrub(mount_of(ENG), &sc, COSMOFS_SCRUB_REPAIR) == 0 at line 813\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_scrub(mount_of(ENG), &sc, COSMOFS_SCRUB_REPAIR) == 0 at line 813\0",
+        );
     }
     if (!(f64(sc, SC_BLOCKS_READ) > 0 && f64(sc, SC_INODES) >= 3 && f64(sc, SC_UNRECOVERABLE) == 0)) {
-        return failed(reason,
-            "check failed: sc.blocks_read > 0 && sc.inodes >= 3 && sc.unrecoverable == 0 at line 817\0");
+        return failed(
+            reason,
+            "check failed: sc.blocks_read > 0 && sc.inodes >= 3 && sc.unrecoverable == 0 at line 817\0",
+        );
     }
     if (!(f64(sc, SC_REPAIRED) >= 1)) {
         return failed(reason, "check failed: sc.repaired >= 1 at line 820\0");
     }
     if (!(engStats(st) && f64(st, ST_REPAIRS) > repairs0)) {
-        return failed(reason,
-            "check failed: cosmofs_stats(mount_of(ENG), &st) == 0 && st.repairs > repairs0 at line 824\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_stats(mount_of(ENG), &st) == 0 && st.repairs > repairs0 at line 824\0",
+        );
     }
 
     // A second scrub finds nothing to do: the first one fixed it.
     var sc2slot = [0u64; 16];
     let sc2 = borrow mut sc2slot as *mut [u64; 16];
     if (!engScrub(sc2)) {
-        return failed(reason,
-            "check failed: cosmofs_scrub(mount_of(ENG), &sc2, COSMOFS_SCRUB_REPAIR) == 0 at line 832\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_scrub(mount_of(ENG), &sc2, COSMOFS_SCRUB_REPAIR) == 0 at line 832\0",
+        );
     }
     if (!(f64(sc2, SC_REPAIRED) == 0 && f64(sc2, SC_UNRECOVERABLE) == 0)) {
         return failed(reason, "check failed: sc2.repaired == 0 && sc2.unrecoverable == 0 at line 835\0");
@@ -873,8 +937,10 @@ unsafe fn mirror(s: borrow mut Mirror, reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: pool_open(bd[0], &sp) == 0 at line 849\0");
     }
     if (!(pool_read(sp, SUPER_A, sblk as *mut void) == 0 || pool_read(sp, SUPER_B, sblk as *mut void) == 0)) {
-        return failed(reason,
-            "check failed: pool_read(sp, CFS_SUPER_A, sblk) == 0 || pool_read(sp, CFS_SUPER_B, ...) at line 853\0");
+        return failed(
+            reason,
+            "check failed: pool_read(sp, CFS_SUPER_A, sblk) == 0 || pool_read(sp, CFS_SUPER_B, ...) at line 853\0",
+        );
     }
     var imapRoot: u64 = 0;
     var sgen: u64 = 0;
@@ -901,15 +967,19 @@ unsafe fn mirror(s: borrow mut Mirror, reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: read_matches(ENG \"/dir/inner\", \"inner\", 5) at line 877\0");
     }
     if (!engScrub(sc)) {
-        return failed(reason,
-            "check failed: cosmofs_scrub(mount_of(ENG), &sc, COSMOFS_SCRUB_REPAIR) == 0 at line 881\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_scrub(mount_of(ENG), &sc, COSMOFS_SCRUB_REPAIR) == 0 at line 881\0",
+        );
     }
     if (!(f64(sc, SC_REPAIRED) >= 1 && f64(sc, SC_UNRECOVERABLE) == 0)) {
         return failed(reason, "check failed: sc.repaired >= 1 && sc.unrecoverable == 0 at line 884\0");
     }
     if (!(engScrub(sc2) && f64(sc2, SC_REPAIRED) == 0)) {
-        return failed(reason,
-            "check failed: cosmofs_scrub(mount_of(ENG), &sc2, ...) == 0 && sc2.repaired == 0 at line 888\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_scrub(mount_of(ENG), &sc2, ...) == 0 && sc2.repaired == 0 at line 888\0",
+        );
     }
 
     // Now rot copy 0 of the same block: the read falls back to copy 1 and repairs copy 0.
@@ -920,8 +990,10 @@ unsafe fn mirror(s: borrow mut Mirror, reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: read_matches(ENG \"/mirrored\", data, sizeof(data)) at line 896\0");
     }
     if (!(engScrub(sc) && f64(sc, SC_UNRECOVERABLE) == 0)) {
-        return failed(reason,
-            "check failed: cosmofs_scrub(mount_of(ENG), &sc, ...) == 0 && sc.unrecoverable == 0 at line 900\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_scrub(mount_of(ENG), &sc, ...) == 0 && sc.unrecoverable == 0 at line 900\0",
+        );
     }
 
     // Both copies gone: that file is unreadable, and the rest of the filesystem is not.
@@ -935,8 +1007,10 @@ unsafe fn mirror(s: borrow mut Mirror, reason: *mut *CChar) -> bool {
     let grc = vfs_open(0 as *mut vnode, p("/mnt/eng/mirrored\0"), O_RDONLY, 0, borrow mut g as *mut *mut file);
     s.f = g;
     if (grc != 0) {
-        return failed(reason,
-            "check failed: vfs_open(NULL, ENG \"/mirrored\", COSMO_O_RDONLY, 0, &f) == 0 at line 915\0");
+        return failed(
+            reason,
+            "check failed: vfs_open(NULL, ENG \"/mirrored\", COSMO_O_RDONLY, 0, &f) == 0 at line 915\0",
+        );
     }
     if (file_read(g, borrow mut g_got as *mut [u8; 4096] as *mut void, CFS_BLOCK) != -EIO as i64) {
         return failed(reason, "check failed: file_read(f, got, sizeof(got)) == -EIO at line 918\0");
@@ -947,8 +1021,10 @@ unsafe fn mirror(s: borrow mut Mirror, reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: read_matches(ENG \"/dir/inner\", \"inner\", 5) at line 923\0");
     }
     if (!(engScrub(sc) && f64(sc, SC_UNRECOVERABLE) == 1)) {
-        return failed(reason,
-            "check failed: cosmofs_scrub(mount_of(ENG), &sc, ...) == 0 && sc.unrecoverable == 1 at line 927\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_scrub(mount_of(ENG), &sc, ...) == 0 && sc.unrecoverable == 1 at line 927\0",
+        );
     }
 
     if (vfs_umount2(eng(), 0) != 0) {
@@ -1026,8 +1102,10 @@ unsafe fn selftestMirrorStale(reason: *mut *CChar) -> bool {
     }
     let across = "two members, two copies";
     if (!cfst_write_file(p("/mnt/eng/across\0"), across.ptr as *void, 23)) {
-        return failed(reason,
-            "check failed: write_file(ENG \"/across\", \"two members, two copies\", 23) at line 1006\0");
+        return failed(
+            reason,
+            "check failed: write_file(ENG \"/across\", \"two members, two copies\", 23) at line 1006\0",
+        );
     }
     if (vfs_sync() != 0) {
         return failed(reason, "check failed: vfs_sync() == 0 at line 1009\0");
@@ -1052,14 +1130,18 @@ unsafe fn selftestMirrorStale(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: st.members == 2 && st.devices == 3 && st.degraded == 1 at line 1028\0");
     }
     if (!cfst_read_matches(p("/mnt/eng/across\0"), across.ptr as *void, 23)) {
-        return failed(reason,
-            "check failed: read_matches(ENG \"/across\", \"two members, two copies\", 23) at line 1032\0");
+        return failed(
+            reason,
+            "check failed: read_matches(ENG \"/across\", \"two members, two copies\", 23) at line 1032\0",
+        );
     }
     var scslot = [0u64; 16];
     let sc = borrow mut scslot as *mut [u64; 16];
     if (!(engScrub(sc) && f64(sc, SC_UNRECOVERABLE) == 0)) {
-        return failed(reason,
-            "check failed: cosmofs_scrub(mount_of(ENG), &sc, ...) == 0 && sc.unrecoverable == 0 at line 1038\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_scrub(mount_of(ENG), &sc, ...) == 0 && sc.unrecoverable == 0 at line 1038\0",
+        );
     }
     if (vfs_umount2(eng(), 0) != 0) {
         return failed(reason, "check failed: vfs_umount(ENG) == 0 at line 1041\0");
@@ -1241,8 +1323,10 @@ unsafe fn compress(s: borrow mut Compress, reason: *mut *CChar) -> bool {
 
     // A page written inside a compressed record: the record is read, rebuilt around the new page, and written again.
     memset(sparse.add(3 * 4096) as *mut void, 0x5a, 4096);
-    if (!rewrite(s, sparse, 3 * 4096, 4096,
-        "check failed: file_pwrite(f, sparse_data + 3 * 4096, 4096, 3 * 4096) == 4096 at line 1221\0", reason)) {
+    if (!rewrite(
+        s, sparse, 3 * 4096, 4096,
+        "check failed: file_pwrite(f, sparse_data + 3 * 4096, 4096, 3 * 4096) == 4096 at line 1221\0", reason,
+    )) {
         return false;
     }
     if (!cfst_read_matches(p("/mnt/eng/small\0"), sparse as *void, len)) {
@@ -1251,8 +1335,10 @@ unsafe fn compress(s: borrow mut Compress, reason: *mut *CChar) -> bool {
 
     // A partial page inside a record, which reads the record to fill in what the write does not cover.
     memset(sparse.add(9 * 4096 + 100) as *mut void, 0x33, 500);
-    if (!rewrite(s, sparse, 9 * 4096 + 100, 500,
-        "check failed: file_pwrite(f, sparse_data + 9 * 4096 + 100, 500, ...) == 500 at line 1231\0", reason)) {
+    if (!rewrite(
+        s, sparse, 9 * 4096 + 100, 500,
+        "check failed: file_pwrite(f, sparse_data + 9 * 4096 + 100, 500, ...) == 500 at line 1231\0", reason,
+    )) {
         return false;
     }
     if (!cfst_read_matches(p("/mnt/eng/small\0"), sparse as *void, len)) {
@@ -1263,8 +1349,10 @@ unsafe fn compress(s: borrow mut Compress, reason: *mut *CChar) -> bool {
     // whole. The plain fallback used to write its first block over the record -- that block's checksum, then a
     // mapping set_extent refused -- and the write-back failed with the record left unreadable (shell completeness S7).
     memcpy(sparse.add(16 * 4096) as *mut void, dense.add(16 * 4096) as *void, 8 * 4096);
-    if (!rewrite(s, sparse, 16 * 4096, 8 * 4096,
-        "check failed: file_pwrite(f, sparse_data + 16 * 4096, 8 * 4096, ...) == 8 * 4096 at line 1243\0", reason)) {
+    if (!rewrite(
+        s, sparse, 16 * 4096, 8 * 4096,
+        "check failed: file_pwrite(f, sparse_data + 16 * 4096, 8 * 4096, ...) == 8 * 4096 at line 1243\0", reason,
+    )) {
         return false;
     }
     if (!cfst_read_matches(p("/mnt/eng/small\0"), sparse as *void, len)) {
@@ -1286,8 +1374,10 @@ unsafe fn compress(s: borrow mut Compress, reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: trc == 0 at line 1262\0");
     }
     if (!readMatchesPrefix(p("/mnt/eng/small\0"), sparse as *void, cut)) {
-        return failed(reason,
-            "check failed: read_matches_prefix(ENG \"/small\", sparse_data, 10 * 4096 + 7) at line 1266\0");
+        return failed(
+            reason,
+            "check failed: read_matches_prefix(ENG \"/small\", sparse_data, 10 * 4096 + 7) at line 1266\0",
+        );
     }
     if (vfs_truncate(0 as *mut vnode, p("/mnt/eng/small\0"), len as u64) != 0) {
         return failed(reason, "check failed: vfs_truncate(NULL, ENG \"/small\", len) == 0 at line 1269\0");
@@ -1296,8 +1386,10 @@ unsafe fn compress(s: borrow mut Compress, reason: *mut *CChar) -> bool {
     let orc = vfs_open(0 as *mut vnode, p("/mnt/eng/small\0"), O_RDONLY, 0, borrow mut f as *mut *mut file);
     s.f = f;
     if (orc != 0) {
-        return failed(reason,
-            "check failed: vfs_open(NULL, ENG \"/small\", COSMO_O_RDONLY, 0, &f) == 0 at line 1276\0");
+        return failed(
+            reason,
+            "check failed: vfs_open(NULL, ENG \"/small\", COSMO_O_RDONLY, 0, &f) == 0 at line 1276\0",
+        );
     }
     if (file_read(f, back as *mut void, len) != truncate<i64>(len)) {
         return failed(reason, "check failed: file_read(f, back, len) == (int64_t)len at line 1279\0");
@@ -1317,8 +1409,10 @@ unsafe fn compress(s: borrow mut Compress, reason: *mut *CChar) -> bool {
     var scslot = [0u64; 16];
     let sc = borrow mut scslot as *mut [u64; 16];
     if (!(engScrub(sc) && f64(sc, SC_UNRECOVERABLE) == 0)) {
-        return failed(reason,
-            "check failed: cosmofs_scrub(mount_of(ENG), &sc, ...) == 0 && sc.unrecoverable == 0 at line 1297\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_scrub(mount_of(ENG), &sc, ...) == 0 && sc.unrecoverable == 0 at line 1297\0",
+        );
     }
 
     kfree(dense as *mut void);
@@ -1332,8 +1426,10 @@ unsafe fn compress(s: borrow mut Compress, reason: *mut *CChar) -> bool {
 
 /// `wlen` bytes of `data` at `off` written into /mnt/eng/small, synced.
 /// Safety: `data` COMPRESS_LEN bytes; `reason` writable.
-unsafe fn rewrite(s: borrow mut Compress, data: *mut u8, off: usize, wlen: usize, why: StringView,
-    reason: *mut *CChar) -> bool {
+unsafe fn rewrite(
+    s: borrow mut Compress, data: *mut u8, off: usize, wlen: usize, why: StringView,
+    reason: *mut *CChar,
+) -> bool {
     var f = 0 as *mut file;
     let orc = vfs_open(0 as *mut vnode, p("/mnt/eng/small\0"), O_RDWR, 0, borrow mut f as *mut *mut file);
     s.f = f;

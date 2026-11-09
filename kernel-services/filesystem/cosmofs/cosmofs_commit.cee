@@ -161,7 +161,10 @@ unsafe fn commitStopped(fs: *mut cfs) -> bool {
 unsafe fn switchStop(fs: *mut cfs) {
     if (cfg("CONFIG_COSMOFS_STOP")) {
         if (Ptr.toBorrow(fs as *cfs).switching) {
-            KernelLog.write(LogLevel.Info, "cosmofs: test stop: the rollback switch's blocks are written and its root is not");
+            KernelLog.write(
+                LogLevel.Info,
+                "cosmofs: test stop: the rollback switch's blocks are written and its root is not",
+            );
             while (true) {
                 thread_sleep_ns(1000000000);
             }
@@ -619,10 +622,8 @@ unsafe fn commitReserve(fs: *mut cfs, res: *mut cfs_res, withRecord: bool) -> i3
     // What the record must be able to name, and what the snapshot list may add to it: the blocks its copies supersede
     // are freed by this root like any other, so they are entries here too.
     let pendingBound = f.nr_pending.wrappingAdd(f.nr_chunks).wrappingAdd(f.nmembers);
-    let bound: u64 = if (withRecord)
-        pendingBound as u64 + f.nr_exempt as u64 + cfs_snapshot_exempt_bound(fs) as u64
-    else
-        0;
+    let bound: u64 = if (withRecord) pendingBound as u64 + f.nr_exempt as u64 + cfs_snapshot_exempt_bound(fs) as u64
+        else 0;
     // And the blocks the snapshot list's own work needs, which are blocks rather than entries: the chain's copy, a
     // copied deadlist head and a fresh deadlist block per CFS_DEAD_PER_BLOCK holds. One reservation, two consumers --
     // the deadlist fill takes from the front and the record gets what is left, so a block nobody needed is a leftover
@@ -957,8 +958,10 @@ unsafe fn orphanReplay(fs: *mut cfs) -> i32 {
             let empty = borrow mut emptySlot as *mut [u64; 32] as *mut cfs_inode;
             let wrc = cfs_inode_write(fs, ino, empty as *cfs_inode);
             if (wrc != 0) {
-                errorRc("cosmofs: orphan inode ", ino, " was released but its slot could not be cleared (", wrc,
-                    "); refusing the mount");
+                errorRc(
+                    "cosmofs: orphan inode ", ino, " was released but its slot could not be cleared (", wrc,
+                    "); refusing the mount",
+                );
                 kfree(inos as *mut void);
                 return wrc;
             }
@@ -984,8 +987,10 @@ unsafe fn orphanReplay(fs: *mut cfs) -> i32 {
         KernelLog.send(LogLevel.Info, line);
     }
     if (suspect != 0) {
-        errorLine("cosmofs: the orphan record named ", suspect as u64,
-            " inode(s) that still have links; run the structural check");
+        errorLine(
+            "cosmofs: the orphan record named ", suspect as u64,
+            " inode(s) that still have links; run the structural check",
+        );
     }
     return 0;
 }

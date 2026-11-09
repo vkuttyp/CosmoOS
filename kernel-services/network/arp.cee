@@ -8,7 +8,15 @@
 // table owns a parked packet, and an entry's interface outlives it (arp_flush empties an interface's entries under
 // the lock before netif_unregister lets the interface go; invariant N25).
 
-@header("kernel/net/ether.h", "kernel/net/ip.h", "kernel/net/fw.h", "kernel/net/nat.h", "kernel/net/tapsvc.h", "kernel/timer.h", "arch/cpu.h")
+@header(
+    "kernel/net/ether.h",
+    "kernel/net/ip.h",
+    "kernel/net/fw.h",
+    "kernel/net/nat.h",
+    "kernel/net/tapsvc.h",
+    "kernel/timer.h",
+    "arch/cpu.h",
+)
 extern "C" {
     /// kernel/include/kernel/mbuf.h: the fields resolution reads and writes.
     struct mbuf {
@@ -118,13 +126,13 @@ const REACHABLE: u8 = 2;
 /// One neighbour: the interface and the packet are C objects held by address (a usize, so the table is Send). A
 /// free entry is all zeros, as the C's memset left it.
 struct Entry {
-    ip: u32;        // network order, as nif->ip4.addr
+    ip: u32; // network order, as nif->ip4.addr
     mac: [u8; 6];
     state: u8;
     updatedNs: u64;
     pending: usize; // an mbuf the entry owns, parked until the neighbour answers; 0 for none
     tries: u32;
-    nif: usize;     // the interface, whose flush removes the entry before the interface goes
+    nif: usize; // the interface, whose flush removes the entry before the interface goes
 }
 
 @constant
@@ -133,7 +141,7 @@ fn freeEntry() -> Entry => Entry { ip: 0, mac: [0; 6], state: FREE, updatedNs: 0
 /// The counters the table's lock covers; the others are atomics, counted outside it (as the C's __atomic_fetch_add).
 struct Table {
     entries: [Entry; 64];
-    count: u64;          // arp_stats.entries
+    count: u64; // arp_stats.entries
     pendingDropped: u64;
     timeouts: u64;
     unsolicited: u64;
@@ -656,7 +664,13 @@ unsafe fn age(now: u64) {
     for (k in 0..count) {
         let nif = retries[k].nif as *mut netif;
         REQUESTS_SENT.fetchAddWith(1, Ordering.Relaxed);
-        send(nif, ARP_OP_REQUEST, retries[k].ip, borrow ZERO_MAC as *[u8; 6] as *u8, borrow BROADCAST_MAC as *[u8; 6] as *u8);
+        send(
+            nif,
+            ARP_OP_REQUEST,
+            retries[k].ip,
+            borrow ZERO_MAC as *[u8; 6] as *u8,
+            borrow BROADCAST_MAC as *[u8; 6] as *u8,
+        );
         kobject_put(borrow mut Ptr.toBorrowMut(nif).obj as *mut kobject);
     }
 }

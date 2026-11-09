@@ -4,10 +4,12 @@
 // and its line here. The two test devices' operation tables and the completions the blocked read waits on are this
 // file's statics; the bounce's fallback needs fault injection, and a build without it skips it (ADR 0080).
 
-@header("kernel/kmalloc.h", "kernel/log.h", "kernel/mountns.h", "kernel/object.h", "kernel/pipe.h", "kernel/string.h",
+@header(
+    "kernel/kmalloc.h", "kernel/log.h", "kernel/mountns.h", "kernel/object.h", "kernel/pipe.h", "kernel/string.h",
     "kernel/syscall.h", "kernel/thread.h", "kernel/timer.h", "kernel/vfs.h", "kernel/wait.h", "uapi/cosmo/fsctl.h",
     "kernel/completion.h", "kernel/errno.h", "kernel/faultinject.h", "kernel/handle.h", "kernel/pagecache.h",
-    "kernel/types.h", "kernel/utsns.h", "kernel/page.h")
+    "kernel/types.h", "kernel/utsns.h", "kernel/page.h",
+)
 extern "C" {
     struct mount {
         id: u64;
@@ -182,15 +184,17 @@ unsafe fn bounceFallback(reason: *mut *CChar) -> bool {
         }
         return ok;
     }
-    KernelLog.write(LogLevel.Info,
-        "selftest: read-bounce: the fallback needs fault injection, compiled out of this build");
+    KernelLog.write(
+        LogLevel.Info,
+        "selftest: read-bounce: the fallback needs fault injection, compiled out of this build",
+    );
     return true;
 }
 
 // errno.h, syscall.h, fsctl.h and thread.h, which the C compiler checks.
-const MODE_DIR: u32 = 0x1ED; // 0755
+const MODE_DIR: u32 = 0x1ED;  // 0755
 const MODE_FILE: u32 = 0x1A4; // 0644
-const MODE_DEV: u32 = 0x180; // 0600
+const MODE_DEV: u32 = 0x180;  // 0600
 const MS: u64 = 1000000;
 
 // COMPLETIONS's: the blocked read's release, and the two threads' ends.
@@ -301,8 +305,10 @@ unsafe fn typeIs(m: *cosmo_fsctl_mount, s: StringView) -> bool =>
 unsafe fn selftestFsctlList(reason: *mut *CChar) -> bool {
     var f = 0 as *mut file;
     if (!(open("/dev/fsctl\0", O_RDWR, 0, borrow mut f as *mut *mut file) == 0 && !f.isNull())) {
-        return failed2(reason, "check failed: vfs_open(NULL, \"/dev/fsctl\", COSMO_O_RDWR, 0, &f) == 0 && f != NULL ",
-            "at line 228\0");
+        return failed2(
+            reason, "check failed: vfs_open(NULL, \"/dev/fsctl\", COSMO_O_RDWR, 0, &f) == 0 && f != NULL ",
+            "at line 228\0",
+        );
     }
 
     let cap = resultSize() + 64 * mountSize();
@@ -337,8 +343,10 @@ unsafe fn selftestFsctlList(reason: *mut *CChar) -> bool {
     }
     let h = Ptr.toBorrow(buf as *cosmo_fsctl_result);
     if (!(h.version == FSCTL_VERSION && h.kind == FSCTL_LIST)) {
-        return failed2(reason, "check failed: h->version == COSMO_FSCTL_VERSION && h->kind == COSMO_FSCTL_LIST at ",
-            "line 0\0");
+        return failed2(
+            reason, "check failed: h->version == COSMO_FSCTL_VERSION && h->kind == COSMO_FSCTL_LIST at ",
+            "line 0\0",
+        );
     }
     if (!(h.bytes as usize == mountSize())) {
         return failed(reason, "check failed: h->bytes == sizeof(struct cosmo_fsctl_mount) at line 267\0");
@@ -432,15 +440,21 @@ unsafe fn selftestFsctlList(reason: *mut *CChar) -> bool {
 
 /// fsctl-result-per-open's body; the caller frees what it opened and allocated, whatever this returns.
 /// Safety: `reason` is writable; the four slots are writable and start null.
-unsafe fn resultPerOpen(reason: *mut *CChar, ap: *mut *mut file, bp: *mut *mut file, bap: *mut *mut u8,
-    bbp: *mut *mut u8) -> bool {
+unsafe fn resultPerOpen(
+    reason: *mut *CChar, ap: *mut *mut file, bp: *mut *mut file, bap: *mut *mut u8,
+    bbp: *mut *mut u8,
+) -> bool {
     if (!(open("/dev/fsctl\0", O_RDWR, 0, ap) == 0 && !(*Ptr.toBorrow(ap as **mut file)).isNull())) {
-        return failed2(reason, "check failed: vfs_open(NULL, \"/dev/fsctl\", COSMO_O_RDWR, 0, &a) == 0 && a != NULL ",
-            "at line 362\0");
+        return failed2(
+            reason, "check failed: vfs_open(NULL, \"/dev/fsctl\", COSMO_O_RDWR, 0, &a) == 0 && a != NULL ",
+            "at line 362\0",
+        );
     }
     if (!(open("/dev/fsctl\0", O_RDWR, 0, bp) == 0 && !(*Ptr.toBorrow(bp as **mut file)).isNull())) {
-        return failed2(reason, "check failed: vfs_open(NULL, \"/dev/fsctl\", COSMO_O_RDWR, 0, &b) == 0 && b != NULL ",
-            "at line 366\0");
+        return failed2(
+            reason, "check failed: vfs_open(NULL, \"/dev/fsctl\", COSMO_O_RDWR, 0, &b) == 0 && b != NULL ",
+            "at line 366\0",
+        );
     }
     let a = *Ptr.toBorrow(ap as **mut file);
     let b = *Ptr.toBorrow(bp as **mut file);
@@ -502,8 +516,10 @@ unsafe fn resultPerOpen(reason: *mut *CChar, ap: *mut *mut file, bp: *mut *mut f
 
     // A buffer too small is refused rather than truncated: half a listing parses as a whole one.
     if (!(file_read(a, ba as *mut void, resultSize()) == -ERANGE as i64)) {
-        return failed2(reason, "check failed: file_read(a, ba, sizeof(struct cosmo_fsctl_result)) == -ERANGE at line ",
-            "0\0");
+        return failed2(
+            reason, "check failed: file_read(a, ba, sizeof(struct cosmo_fsctl_result)) == -ERANGE at line ",
+            "0\0",
+        );
     }
     return true;
 }
@@ -518,11 +534,15 @@ unsafe fn selftestFsctlResultPerOpen(reason: *mut *CChar) -> bool {
     var b = 0 as *mut file;
     var ba = 0 as *mut u8;
     var bb = 0 as *mut u8;
-    let ok = resultPerOpen(reason, borrow mut a as *mut *mut file, borrow mut b as *mut *mut file,
-        borrow mut ba as *mut *mut u8, borrow mut bb as *mut *mut u8);
+    let ok = resultPerOpen(
+        reason, borrow mut a as *mut *mut file, borrow mut b as *mut *mut file,
+        borrow mut ba as *mut *mut u8, borrow mut bb as *mut *mut u8,
+    );
     if (ok) {
-        KernelLog.write(LogLevel.Info,
-            "selftest: fsctl-result-per-open: two open files, two results, neither the other's");
+        KernelLog.write(
+            LogLevel.Info,
+            "selftest: fsctl-result-per-open: two open files, two results, neither the other's",
+        );
     }
     kfree(ba as *mut void);
     kfree(bb as *mut void);
@@ -601,10 +621,14 @@ unsafe fn waitDone(done: *mut completion, ms: u64) -> bool {
 @export("selftest_vfs_chr_write_during_blocked_read")
 unsafe fn selftestVfsChrWriteDuringBlockedRead(reason: *mut *CChar) -> bool {
     // NULL: `out` would hand back a reference this test never drops.
-    if (!(ramfs_mkchr(c("/dev/chrblock-test\0"), MODE_DEV, chrblockOps(), 0 as *mut void,
-        0 as *mut *mut vnode) == 0)) {
-        return failed2(reason, "check failed: ramfs_mkchr(\"/dev/chrblock-test\", 0600, &chrblock_ops, NULL, NULL) == ",
-            "0 at line 530\0");
+    if (!(ramfs_mkchr(
+        c("/dev/chrblock-test\0"), MODE_DEV, chrblockOps(), 0 as *mut void,
+        0 as *mut *mut vnode,
+    ) == 0)) {
+        return failed2(
+            reason, "check failed: ramfs_mkchr(\"/dev/chrblock-test\", 0600, &chrblock_ops, NULL, NULL) == ",
+            "0 at line 530\0",
+        );
     }
     completion_init((borrow mut COMPLETIONS[(C_RELEASE) as usize] as *mut completion), c("chrblock-release\0"));
     CHRBLOCK_IN_READ.storeWith(false, StoreOrdering.Release);
@@ -612,12 +636,16 @@ unsafe fn selftestVfsChrWriteDuringBlockedRead(reason: *mut *CChar) -> bool {
     var rf = 0 as *mut file;
     var wf = 0 as *mut file;
     if (!(open("/dev/chrblock-test\0", O_RDWR, 0, borrow mut rf as *mut *mut file) == 0 && !rf.isNull())) {
-        return failed2(reason, "check failed: vfs_open(NULL, \"/dev/chrblock-test\", COSMO_O_RDWR, 0, &rf) == 0 && rf ",
-            "!= NULL at line 539\0");
+        return failed2(
+            reason, "check failed: vfs_open(NULL, \"/dev/chrblock-test\", COSMO_O_RDWR, 0, &rf) == 0 && rf ",
+            "!= NULL at line 539\0",
+        );
     }
     if (!(open("/dev/chrblock-test\0", O_RDWR, 0, borrow mut wf as *mut *mut file) == 0 && !wf.isNull())) {
-        return failed2(reason, "check failed: vfs_open(NULL, \"/dev/chrblock-test\", COSMO_O_RDWR, 0, &wf) == 0 && wf ",
-            "!= NULL at line 543\0");
+        return failed2(
+            reason, "check failed: vfs_open(NULL, \"/dev/chrblock-test\", COSMO_O_RDWR, 0, &wf) == 0 && wf ",
+            "!= NULL at line 543\0",
+        );
     }
     completion_init((borrow mut COMPLETIONS[(C_READER) as usize] as *mut completion), c("chrblock-reader\0"));
     completion_init((borrow mut COMPLETIONS[(C_WRITER) as usize] as *mut completion), c("chrblock-writer\0"));
@@ -659,8 +687,10 @@ unsafe fn selftestVfsChrWriteDuringBlockedRead(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: writer_returned at line 582\0");
     }
 
-    KernelLog.write(LogLevel.Info,
-        "selftest: vfs-chr-write-during-blocked-read: the write completed with a reader blocked in the driver");
+    KernelLog.write(
+        LogLevel.Info,
+        "selftest: vfs-chr-write-during-blocked-read: the write completed with a reader blocked in the driver",
+    );
     if (!(vfs_unlink(0 as *mut vnode, c("/dev/chrblock-test\0")) == 0)) { // the node: the object census
         return failed(reason, "check failed: vfs_unlink(NULL, \"/dev/chrblock-test\") == 0 at line 588\0");
     }
@@ -715,10 +745,14 @@ unsafe fn chropenReadFile(vn: *mut vnode, f: *mut file, off: u64, buf: *mut void
 @export("selftest_vfs_chrdev_open")
 unsafe fn selftestVfsChrdevOpen(reason: *mut *CChar) -> bool {
     var node = 0 as *mut vnode;
-    if (!(ramfs_mkchr(c("/dev/chropen-test\0"), MODE_DEV, chropenOps(), 0 as *mut void,
-        borrow mut node as *mut *mut vnode) == 0)) {
-        return failed2(reason, "check failed: ramfs_mkchr(\"/dev/chropen-test\", 0600, &chropen_ops, NULL, &node) == ",
-            "0 at line 644\0");
+    if (!(ramfs_mkchr(
+        c("/dev/chropen-test\0"), MODE_DEV, chropenOps(), 0 as *mut void,
+        borrow mut node as *mut *mut vnode,
+    ) == 0)) {
+        return failed2(
+            reason, "check failed: ramfs_mkchr(\"/dev/chropen-test\", 0600, &chropen_ops, NULL, &node) == ",
+            "0 at line 644\0",
+        );
     }
     CHROPEN_OPENS.store(0);
     CHROPEN_RELEASES.store(0);
@@ -728,12 +762,16 @@ unsafe fn selftestVfsChrdevOpen(reason: *mut *CChar) -> bool {
     var a = 0 as *mut file;
     var b = 0 as *mut file;
     if (!(open("/dev/chropen-test\0", O_RDWR, 0, borrow mut a as *mut *mut file) == 0 && !a.isNull())) {
-        return failed2(reason, "check failed: vfs_open(NULL, \"/dev/chropen-test\", COSMO_O_RDWR, 0, &a) == 0 && a != ",
-            "NULL at line 655\0");
+        return failed2(
+            reason, "check failed: vfs_open(NULL, \"/dev/chropen-test\", COSMO_O_RDWR, 0, &a) == 0 && a != ",
+            "NULL at line 655\0",
+        );
     }
     if (!(open("/dev/chropen-test\0", O_RDWR, 0, borrow mut b as *mut *mut file) == 0 && !b.isNull())) {
-        return failed2(reason, "check failed: vfs_open(NULL, \"/dev/chropen-test\", COSMO_O_RDWR, 0, &b) == 0 && b != ",
-            "NULL at line 659\0");
+        return failed2(
+            reason, "check failed: vfs_open(NULL, \"/dev/chropen-test\", COSMO_O_RDWR, 0, &b) == 0 && b != ",
+            "NULL at line 659\0",
+        );
     }
     if (!(CHROPEN_OPENS.load() == 2 && Ptr.toBorrow(a as *file).priv != Ptr.toBorrow(b as *file).priv)) {
         return failed(reason, "check failed: g_chropen_opens == 2 && a->priv != b->priv at line 662\0");
@@ -741,12 +779,16 @@ unsafe fn selftestVfsChrdevOpen(reason: *mut *CChar) -> bool {
     var ida: u32 = 0;
     var idb: u32 = 0;
     if (!(file_read(a, borrow mut ida as *mut u32 as *mut void, 4) == 4 && ida == 1)) {
-        return failed2(reason, "check failed: file_read(a, &ida, sizeof(ida)) == (int64_t)sizeof(ida) && ida == 1 at ",
-            "line 0\0");
+        return failed2(
+            reason, "check failed: file_read(a, &ida, sizeof(ida)) == (int64_t)sizeof(ida) && ida == 1 at ",
+            "line 0\0",
+        );
     }
     if (!(file_read(b, borrow mut idb as *mut u32 as *mut void, 4) == 4 && idb == 2)) {
-        return failed2(reason, "check failed: file_read(b, &idb, sizeof(idb)) == (int64_t)sizeof(idb) && idb == 2 at ",
-            "line 0\0");
+        return failed2(
+            reason, "check failed: file_read(b, &idb, sizeof(idb)) == (int64_t)sizeof(idb) && idb == 2 at ",
+            "line 0\0",
+        );
     }
 
     // (2) release runs exactly once, on the last reference, and not before
@@ -768,16 +810,20 @@ unsafe fn selftestVfsChrdevOpen(reason: *mut *CChar) -> bool {
     CHROPEN_REFUSE.store(true);
     var f3 = 0 as *mut file;
     if (!(open("/dev/chropen-test\0", O_RDWR, 0, borrow mut f3 as *mut *mut file) == -EBUSY && f3.isNull())) {
-        return failed2(reason, "check failed: vfs_open(NULL, \"/dev/chropen-test\", COSMO_O_RDWR, 0, &c) == -EBUSY && ",
-            "c == NULL at line 695\0");
+        return failed2(
+            reason, "check failed: vfs_open(NULL, \"/dev/chropen-test\", COSMO_O_RDWR, 0, &c) == -EBUSY && ",
+            "c == NULL at line 695\0",
+        );
     }
     if (!(CHROPEN_OPENS.load() == 2 && CHROPEN_RELEASES.load() == 2)) {
         return failed(reason, "check failed: g_chropen_opens == 2 && g_chropen_releases == 2 at line 698\0");
     }
     CHROPEN_REFUSE.store(false);
 
-    KernelLog.write(LogLevel.Info,
-        "selftest: vfs-chrdev-open: per-open instances distinct, release once on last close, refusal clean");
+    KernelLog.write(
+        LogLevel.Info,
+        "selftest: vfs-chrdev-open: per-open instances distinct, release once on last close, refusal clean",
+    );
     vnode_put(node); // ramfs_mkchr's reference, and the node itself: the object census
     if (!(vfs_unlink(0 as *mut vnode, c("/dev/chropen-test\0")) == 0)) {
         return failed(reason, "check failed: vfs_unlink(NULL, \"/dev/chropen-test\") == 0 at line 706\0");
@@ -859,8 +905,10 @@ unsafe fn selftestReadBounce(reason: *mut *CChar) -> bool {
     }
     filePut(f);
     if (!(open("/tmp/bounce.bin\0", O_RDONLY, 0, borrow mut f as *mut *mut file) == 0)) {
-        return failed2(reason, "check failed: vfs_open(NULL, \"/tmp/bounce.bin\", COSMO_O_RDONLY, 0, &f) == 0 at line ",
-            "0\0");
+        return failed2(
+            reason, "check failed: vfs_open(NULL, \"/tmp/bounce.bin\", COSMO_O_RDONLY, 0, &f) == 0 at line ",
+            "0\0",
+        );
     }
     let _ = memset(big as *mut void, 0, 65536);
     if (!(file_read(f, big as *mut void, 65536) == 65536)) {
@@ -877,15 +925,19 @@ unsafe fn selftestReadBounce(reason: *mut *CChar) -> bool {
     }
     let tail = truncate<i64>(RB_FILE_SIZE - 3072);
     if (!(file_seek(f, tail, SEEK_SET) == tail)) {
-        return failed2(reason, "check failed: file_seek(f, (int64_t)(RB_FILE_SIZE - 3072), COSMO_SEEK_SET) == ... at ",
-            "line 0\0");
+        return failed2(
+            reason, "check failed: file_seek(f, (int64_t)(RB_FILE_SIZE - 3072), COSMO_SEEK_SET) == ... at ",
+            "line 0\0",
+        );
     }
     if (!(file_read(f, big as *mut void, 65536) == 3072)) {
         return failed(reason, "check failed: file_read(f, big, 65536) == 3072 at line 807\0");
     }
     if (!(at(big as *u8, 0) == rbPattern(RB_FILE_SIZE - 3072) && at(big as *u8, 3071) == rbPattern(RB_FILE_SIZE - 1))) {
-        return failed2(reason, "check failed: big[0] == rb_pattern(RB_FILE_SIZE - 3072) && big[3071] == ",
-            "rb_pattern(RB_FILE_SIZE - 1) at line 811\0");
+        return failed2(
+            reason, "check failed: big[0] == rb_pattern(RB_FILE_SIZE - 3072) && big[3071] == ",
+            "rb_pattern(RB_FILE_SIZE - 1) at line 811\0",
+        );
     }
     filePut(f);
     if (!(vfs_unlink(0 as *mut vnode, c("/tmp/bounce.bin\0")) == 0)) {

@@ -8,8 +8,10 @@
 // written here as constants are the headers', which the C compiler checks, and a build without CONFIG_DEBUG runs none
 // of these tests (a `cfg` block; ADR 0080).
 
-@header("kernel/blk.h", "kernel/vfs.h", "kernel/kmalloc.h", "kernel/string.h", "kernel/crc32c.h", "kernel/cosmofs.h",
-    "uapi/cosmo/syscall.h", "cosmofs_internal.h", "kernel/errno.h", "kernel/selftest.h", "cosmofs_format.h")
+@header(
+    "kernel/blk.h", "kernel/vfs.h", "kernel/kmalloc.h", "kernel/string.h", "kernel/crc32c.h", "kernel/cosmofs.h",
+    "uapi/cosmo/syscall.h", "cosmofs_internal.h", "kernel/errno.h", "kernel/selftest.h", "cosmofs_format.h",
+)
 extern "C" {
     struct cosmofs_stats;
     struct blkdev;
@@ -96,13 +98,19 @@ extern "C" {
     @cvalue("COSMO_O_RDONLY == 0 && COSMO_O_RDWR == 2")
     const COSMOFSTEST_ROLLBACK_FACT_0: bool = true;
     /// cosmofstest_rollback.cee's cosmofs.h values
-    @cvalue("COSMOFS_SNAP_CREATE == 1 && COSMOFS_SNAP_LIST == 2 && COSMOFS_SNAP_DELETE == 3 && COSMOFS_SNAP_ROLLBACK == 4 && COSMOFS_SNAP_CANCEL == 5 && COSMOFS_SNAP_CLONE == 6 && COSMOFS_SNAP_BOOT_OK == 7 && COSMOFS_POOL_PENDING == 1 && COSMOFS_POOL_HELD == 2 && COSMOFS_SNAP_I_TARGET == 2 && COSMOFS_SNAP_I_SAFETY == 4 && COSMOFS_SNAP_I_HELD == 8 && COSMOFS_CORRUPT_ROLLBACK_CRC == 18 && COSMOFS_CHECK_REPAIR == 1")
+    @cvalue(
+        "COSMOFS_SNAP_CREATE == 1 && COSMOFS_SNAP_LIST == 2 && COSMOFS_SNAP_DELETE == 3 && COSMOFS_SNAP_ROLLBACK == 4 && COSMOFS_SNAP_CANCEL == 5 && COSMOFS_SNAP_CLONE == 6 && COSMOFS_SNAP_BOOT_OK == 7 && COSMOFS_POOL_PENDING == 1 && COSMOFS_POOL_HELD == 2 && COSMOFS_SNAP_I_TARGET == 2 && COSMOFS_SNAP_I_SAFETY == 4 && COSMOFS_SNAP_I_HELD == 8 && COSMOFS_CORRUPT_ROLLBACK_CRC == 18 && COSMOFS_CHECK_REPAIR == 1",
+    )
     const COSMOFSTEST_ROLLBACK_FACT_1: bool = true;
     /// cosmofstest_rollback.cee's slots for cosmofs.h's and syscall.h's structs
-    @cvalue("sizeof(struct cosmofs_snap_info) <= 13 * 8 && sizeof(struct cosmofs_snap_req) <= 12 * 8 && sizeof(struct cosmofs_check_report) <= 200 * 8 && sizeof(struct cosmo_stat) <= 8 * 8 && sizeof(struct cosmofs_stats) <= 32 * 8 && offsetof(struct cosmofs_stats, free_blocks) == 8")
+    @cvalue(
+        "sizeof(struct cosmofs_snap_info) <= 13 * 8 && sizeof(struct cosmofs_snap_req) <= 12 * 8 && sizeof(struct cosmofs_check_report) <= 200 * 8 && sizeof(struct cosmo_stat) <= 8 * 8 && sizeof(struct cosmofs_stats) <= 32 * 8 && offsetof(struct cosmofs_stats, free_blocks) == 8",
+    )
     const COSMOFSTEST_ROLLBACK_FACT_2: bool = true;
     /// cosmofstest_rollback.cee's cosmofs_format.h values and offsets
-    @cvalue("sizeof(struct cfs_rollback) == 120 && offsetof(struct cfs_rollback, magic) == 0 && offsetof(struct cfs_rollback, version) == 4 && offsetof(struct cfs_rollback, state) == 8 && offsetof(struct cfs_rollback, target_uuid) == 16 && offsetof(struct cfs_rollback, safety_uuid) == 32 && offsetof(struct cfs_rollback, target_id) == 48 && offsetof(struct cfs_rollback, safety_id) == 56 && offsetof(struct cfs_rollback, generation) == 64 && offsetof(struct cfs_rollback, requested_ns) == 72 && offsetof(struct cfs_rollback, crc) == 112 && CFS_ROLLBACK_MAGIC == 0x42524643u && CFS_ROLLBACK_PENDING == 1 && CFS_ROLLBACK_HELD == 2")
+    @cvalue(
+        "sizeof(struct cfs_rollback) == 120 && offsetof(struct cfs_rollback, magic) == 0 && offsetof(struct cfs_rollback, version) == 4 && offsetof(struct cfs_rollback, state) == 8 && offsetof(struct cfs_rollback, target_uuid) == 16 && offsetof(struct cfs_rollback, safety_uuid) == 32 && offsetof(struct cfs_rollback, target_id) == 48 && offsetof(struct cfs_rollback, safety_id) == 56 && offsetof(struct cfs_rollback, generation) == 64 && offsetof(struct cfs_rollback, requested_ns) == 72 && offsetof(struct cfs_rollback, crc) == 112 && CFS_ROLLBACK_MAGIC == 0x42524643u && CFS_ROLLBACK_PENDING == 1 && CFS_ROLLBACK_HELD == 2",
+    )
     const COSMOFSTEST_ROLLBACK_FACT_3: bool = true;
 }
 
@@ -209,8 +217,10 @@ unsafe fn xorshiftFill(out: *mut u8, inv: *mut u8, len: usize, seed: u64) {
 
 /// A request with `op`, `name`, `name2`, `out` and `max`, answered; `total` and `pool_flags` get the request's.
 /// Safety: the names null or terminated strings; `out` null or `max` records.
-unsafe fn snapReq(op: u32, name: *CChar, name2: *CChar, out: *mut cosmofs_snap_info, max: u32, noSizes: bool,
-    count: *mut u32, total: *mut u32, poolFlags: *mut u32) -> i32 {
+unsafe fn snapReq(
+    op: u32, name: *CChar, name2: *CChar, out: *mut cosmofs_snap_info, max: u32, noSizes: bool,
+    count: *mut u32, total: *mut u32, poolFlags: *mut u32,
+) -> i32 {
     var slot = [0u64; 12];
     let req = borrow mut slot as *mut [u64; 12] as *mut cosmofs_snap_req;
     let r = Ptr.toBorrowMut(req);
@@ -273,8 +283,10 @@ unsafe fn rollbackReq(target: *CChar, safety: *CChar, out: *mut cosmofs_snap_inf
 unsafe fn cloneReq(origin: *CChar, clone: *CChar) -> i32 {
     var out = [0u64; 13];
     let none = 0 as *mut u32;
-    return snapReq(SNAP_CLONE, origin, clone, borrow mut out as *mut [u64; 13] as *mut cosmofs_snap_info, 1, false,
-        none, none, none);
+    return snapReq(
+        SNAP_CLONE, origin, clone, borrow mut out as *mut [u64; 13] as *mut cosmofs_snap_info, 1, false,
+        none, none, none,
+    );
 }
 
 /// BOOT_OK; `total` gets how many holds it released.
@@ -363,8 +375,10 @@ unsafe fn selftestRollback(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: cfst_write_file(ENG \"/dir/x\", \"ex\", 2) at line 344\0");
     }
     if (create(path("base\0"), np) != 0) {
-        return failed(reason,
-            "check failed: cfst_snapctl(COSMOFS_SNAP_CREATE, \"base\", info, 1, &n) == 0 at line 348\0");
+        return failed(
+            reason,
+            "check failed: cfst_snapctl(COSMOFS_SNAP_CREATE, \"base\", info, 1, &n) == 0 at line 348\0",
+        );
     }
     if (!cfst_write_file(path("/mnt/eng/a\0"), "two".ptr as *void, 3)) {
         return failed(reason, "check failed: cfst_write_file(ENG \"/a\", \"two\", 3) at line 351\0");
@@ -407,36 +421,48 @@ unsafe fn selftestRollback(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: snap_flags_of(safety1) == COSMOFS_SNAP_I_SAFETY at line 388\0");
     }
     if (snap(SNAP_DELETE, path("base\0")) != -EBUSY) {
-        return failed(reason,
-            "check failed: cfst_snapctl(COSMOFS_SNAP_DELETE, \"base\", NULL, 0, NULL) == -EBUSY at line 392\0");
+        return failed(
+            reason,
+            "check failed: cfst_snapctl(COSMOFS_SNAP_DELETE, \"base\", NULL, 0, NULL) == -EBUSY at line 392\0",
+        );
     }
     if (snap(SNAP_DELETE, s1) != -EBUSY) {
-        return failed(reason,
-            "check failed: cfst_snapctl(COSMOFS_SNAP_DELETE, safety1, NULL, 0, NULL) == -EBUSY at line 396\0");
+        return failed(
+            reason,
+            "check failed: cfst_snapctl(COSMOFS_SNAP_DELETE, safety1, NULL, 0, NULL) == -EBUSY at line 396\0",
+        );
     }
     if (rollbackReq(path("base\0"), 0 as *CChar, info()) != -EBUSY) {
         return failed(reason, "check failed: rollback_req(\"base\", NULL, info) == -EBUSY at line 399\0");
     }
     if (!checkClean()) {
-        return failed(reason,
-            "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, 0) == 0 && rep.clean at line 403\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, 0) == 0 && rep.clean at line 403\0",
+        );
     }
 
     // Withdrawn: the record goes, the safety snapshot stays and is an ordinary snapshot again.
     if (snap(SNAP_CANCEL, 0 as *CChar) != 0) {
-        return failed(reason,
-            "check failed: cfst_snapctl(COSMOFS_SNAP_CANCEL, NULL, NULL, 0, NULL) == 0 at line 409\0");
+        return failed(
+            reason,
+            "check failed: cfst_snapctl(COSMOFS_SNAP_CANCEL, NULL, NULL, 0, NULL) == 0 at line 409\0",
+        );
     }
     if (snap(SNAP_CANCEL, 0 as *CChar) != -ENOENT) {
-        return failed(reason,
-            "check failed: cfst_snapctl(COSMOFS_SNAP_CANCEL, NULL, NULL, 0, NULL) == -ENOENT at line 413\0");
+        return failed(
+            reason,
+            "check failed: cfst_snapctl(COSMOFS_SNAP_CANCEL, NULL, NULL, 0, NULL) == -ENOENT at line 413\0",
+        );
     }
     if (!(poolFlagsNow() == 0 && snapFlagsOf(s1) == 0)) {
         return failed(reason, "check failed: pool_flags_now() == 0 && snap_flags_of(safety1) == 0 at line 416\0");
     }
     if (snap(SNAP_DELETE, s1) != 0) {
-        return failed(reason,
-            "check failed: cfst_snapctl(COSMOFS_SNAP_DELETE, safety1, NULL, 0, NULL) == 0 at line 420\0");
+        return failed(
+            reason,
+            "check failed: cfst_snapctl(COSMOFS_SNAP_DELETE, safety1, NULL, 0, NULL) == 0 at line 420\0",
+        );
     }
 
     // Requested again, with the safety snapshot named; then a file written after the request, which is in neither
@@ -471,16 +497,22 @@ unsafe fn selftestRollback(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: vfs_stat(NULL, ENG \"/after\", &st) == -ENOENT at line 452\0");
     }
     if (!cfst_read_matches(path("/mnt/eng/.snapshots/keep-me/a\0"), "two".ptr as *void, 3)) {
-        return failed(reason,
-            "check failed: cfst_read_matches(ENG \"/.snapshots/keep-me/a\", \"two\", 3) at line 456\0");
+        return failed(
+            reason,
+            "check failed: cfst_read_matches(ENG \"/.snapshots/keep-me/a\", \"two\", 3) at line 456\0",
+        );
     }
     if (!cfst_read_matches(path("/mnt/eng/.snapshots/keep-me/new\0"), big() as *void, bigLen)) {
-        return failed(reason,
-            "check failed: cfst_read_matches(ENG \"/.snapshots/keep-me/new\", big, sizeof(big)) at line 460\0");
+        return failed(
+            reason,
+            "check failed: cfst_read_matches(ENG \"/.snapshots/keep-me/new\", big, sizeof(big)) at line 460\0",
+        );
     }
     if (!absent(path("/mnt/eng/.snapshots/keep-me/after\0"))) {
-        return failed(reason,
-            "check failed: vfs_stat(NULL, ENG \"/.snapshots/keep-me/after\", &st) == -ENOENT at line 464\0");
+        return failed(
+            reason,
+            "check failed: vfs_stat(NULL, ENG \"/.snapshots/keep-me/after\", &st) == -ENOENT at line 464\0",
+        );
     }
     if (poolFlagsNow() != POOL_HELD) {
         return failed(reason, "check failed: pool_flags_now() == COSMOFS_POOL_HELD at line 467\0");
@@ -489,24 +521,32 @@ unsafe fn selftestRollback(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: snap_flags_of(\"keep-me\") == COSMOFS_SNAP_I_HELD at line 470\0");
     }
     if (snap(SNAP_DELETE, path("keep-me\0")) != -EBUSY) {
-        return failed(reason,
-            "check failed: cfst_snapctl(COSMOFS_SNAP_DELETE, \"keep-me\", NULL, 0, NULL) == -EBUSY at line 474\0");
+        return failed(
+            reason,
+            "check failed: cfst_snapctl(COSMOFS_SNAP_DELETE, \"keep-me\", NULL, 0, NULL) == -EBUSY at line 474\0",
+        );
     }
     if (!checkClean()) {
-        return failed(reason,
-            "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, 0) == 0 && rep.clean at line 478\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, 0) == 0 && rep.clean at line 478\0",
+        );
     }
 
     // The boot completed: the hold goes.
     var total: u32 = 0;
     let tp = borrow mut total as *mut u32;
     if (!(bootOk(tp) == 0 && total == 1)) {
-        return failed(reason,
-            "check failed: cosmofs_snapctl(cfst_mount_of(ENG), &ok) == 0 && ok.total == 1 at line 486\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_snapctl(cfst_mount_of(ENG), &ok) == 0 && ok.total == 1 at line 486\0",
+        );
     }
     if (!(bootOk(tp) == 0 && total == 0)) {
-        return failed(reason,
-            "check failed: cosmofs_snapctl(cfst_mount_of(ENG), &ok) == 0 && ok.total == 0 at line 490\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_snapctl(cfst_mount_of(ENG), &ok) == 0 && ok.total == 0 at line 490\0",
+        );
     }
     if (poolFlagsNow() != 0) {
         return failed(reason, "check failed: pool_flags_now() == 0 at line 493\0");
@@ -514,12 +554,16 @@ unsafe fn selftestRollback(reason: *mut *CChar) -> bool {
 
     // Every snapshot gone: nothing live was freed, nothing is held for nobody.
     if (snap(SNAP_DELETE, path("keep-me\0")) != 0) {
-        return failed(reason,
-            "check failed: cfst_snapctl(COSMOFS_SNAP_DELETE, \"keep-me\", NULL, 0, NULL) == 0 at line 499\0");
+        return failed(
+            reason,
+            "check failed: cfst_snapctl(COSMOFS_SNAP_DELETE, \"keep-me\", NULL, 0, NULL) == 0 at line 499\0",
+        );
     }
     if (snap(SNAP_DELETE, path("base\0")) != 0) {
-        return failed(reason,
-            "check failed: cfst_snapctl(COSMOFS_SNAP_DELETE, \"base\", NULL, 0, NULL) == 0 at line 503\0");
+        return failed(
+            reason,
+            "check failed: cfst_snapctl(COSMOFS_SNAP_DELETE, \"base\", NULL, 0, NULL) == 0 at line 503\0",
+        );
     }
     if (vfs_sync() != 0) {
         return failed(reason, "check failed: vfs_sync() == 0 at line 506\0");
@@ -541,8 +585,10 @@ unsafe fn selftestRollback(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: cfst_read_matches(ENG \"/dir/x\", \"ex\", 2) at line 522\0");
     }
     if (!checkClean()) {
-        return failed(reason,
-            "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, 0) == 0 && rep.clean at line 526\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, 0) == 0 && rep.clean at line 526\0",
+        );
     }
 
     // A record that does not check out: refused at the mount, named by the checker, removed by its repair.
@@ -560,8 +606,10 @@ unsafe fn selftestRollback(reason: *mut *CChar) -> bool {
     }
     var rec: u64 = 0;
     if (cosmofs_test_corrupt(mnt(), CORRUPT_ROLLBACK_CRC, 0, borrow mut rec as *mut u64) != 0) {
-        return failed(reason,
-            "check failed: cosmofs_test_corrupt(cfst_mount_of(ENG), COSMOFS_CORRUPT_ROLLBACK_CRC, 0... at line 545\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_test_corrupt(cfst_mount_of(ENG), COSMOFS_CORRUPT_ROLLBACK_CRC, 0... at line 545\0",
+        );
     }
     if (vfs_sync() != 0) {
         return failed(reason, "check failed: vfs_sync() == 0 at line 548\0");
@@ -573,20 +621,28 @@ unsafe fn selftestRollback(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: cfst_read_matches(ENG \"/a\", \"four\", 4) at line 554\0");
     }
     if (!(cosmofs_check(mnt(), rep(), 0) == 0 && !Ptr.toBorrow(rr()).clean)) {
-        return failed(reason,
-            "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, 0) == 0 && !rep.clean at line 558\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, 0) == 0 && !rep.clean at line 558\0",
+        );
     }
     if (!(Ptr.toBorrow(rr()).rollback_record.count == 1 && Ptr.toBorrow(rr()).rollback_record.name[0] == rec)) {
-        return failed(reason,
-            "check failed: rep.rollback_record.count == 1 && rep.rollback_record.name[0] == rec at line 562\0");
+        return failed(
+            reason,
+            "check failed: rep.rollback_record.count == 1 && rep.rollback_record.name[0] == rec at line 562\0",
+        );
     }
     if (!(cosmofs_check(mnt(), rep(), CHECK_REPAIR) == 0 && Ptr.toBorrow(rr()).rollback_record.repaired == 1)) {
-        return failed(reason,
-            "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, COSMOFS_CHECK_REPAIR) == 0 && re... at line 566\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, COSMOFS_CHECK_REPAIR) == 0 && re... at line 566\0",
+        );
     }
     if (!checkClean()) {
-        return failed(reason,
-            "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, 0) == 0 && rep.clean at line 570\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, 0) == 0 && rep.clean at line 570\0",
+        );
     }
     if (poolFlagsNow() != 0) {
         return failed(reason, "check failed: pool_flags_now() == 0 at line 573\0");
@@ -716,16 +772,22 @@ unsafe fn selftestRollbackShared(reason: *mut *CChar) -> bool {
         }
     }
     if (!cfst_read_matches(path("/mnt/eng/.snapshots/t/gone\0"), big() as *void, len)) {
-        return failed(reason,
-            "check failed: cfst_read_matches(ENG \"/.snapshots/t/gone\", big, sizeof(big)) at line 699\0");
+        return failed(
+            reason,
+            "check failed: cfst_read_matches(ENG \"/.snapshots/t/gone\", big, sizeof(big)) at line 699\0",
+        );
     }
     if (!cfst_read_matches(path("/mnt/eng/.snapshots/t/keep\0"), big() as *void, len)) {
-        return failed(reason,
-            "check failed: cfst_read_matches(ENG \"/.snapshots/t/keep\", big, sizeof(big)) at line 703\0");
+        return failed(
+            reason,
+            "check failed: cfst_read_matches(ENG \"/.snapshots/t/keep\", big, sizeof(big)) at line 703\0",
+        );
     }
     if (!checkClean()) {
-        return failed(reason,
-            "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, 0) == 0 && rep.clean at line 707\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, 0) == 0 && rep.clean at line 707\0",
+        );
     }
 
     // Back to the safety snapshot while held: allowed; withdrawn, the hold is back until BOOT_OK.
@@ -736,47 +798,65 @@ unsafe fn selftestRollbackShared(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: pool_flags_now() == COSMOFS_POOL_PENDING at line 715\0");
     }
     if (snap(SNAP_CANCEL, 0 as *CChar) != 0) {
-        return failed(reason,
-            "check failed: cfst_snapctl(COSMOFS_SNAP_CANCEL, NULL, NULL, 0, NULL) == 0 at line 719\0");
+        return failed(
+            reason,
+            "check failed: cfst_snapctl(COSMOFS_SNAP_CANCEL, NULL, NULL, 0, NULL) == 0 at line 719\0",
+        );
     }
     if (poolFlagsNow() != POOL_HELD) {
         return failed(reason, "check failed: pool_flags_now() == COSMOFS_POOL_HELD at line 722\0");
     }
     if (snap(SNAP_DELETE, path("s\0")) != -EBUSY) {
-        return failed(reason,
-            "check failed: cfst_snapctl(COSMOFS_SNAP_DELETE, \"s\", NULL, 0, NULL) == -EBUSY at line 726\0");
+        return failed(
+            reason,
+            "check failed: cfst_snapctl(COSMOFS_SNAP_DELETE, \"s\", NULL, 0, NULL) == -EBUSY at line 726\0",
+        );
     }
     var total: u32 = 0;
     if (!(bootOk(borrow mut total as *mut u32) == 0 && total == 1)) {
-        return failed(reason,
-            "check failed: cosmofs_snapctl(cfst_mount_of(ENG), &ok) == 0 && ok.total == 1 at line 731\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_snapctl(cfst_mount_of(ENG), &ok) == 0 && ok.total == 1 at line 731\0",
+        );
     }
     if (snap(SNAP_DELETE, infoName()) != 0) {
-        return failed(reason,
-            "check failed: cfst_snapctl(COSMOFS_SNAP_DELETE, info[0].name, NULL, 0, NULL) == 0 at line 735\0");
+        return failed(
+            reason,
+            "check failed: cfst_snapctl(COSMOFS_SNAP_DELETE, info[0].name, NULL, 0, NULL) == 0 at line 735\0",
+        );
     }
     if (snap(SNAP_DELETE, path("s\0")) != 0) {
-        return failed(reason,
-            "check failed: cfst_snapctl(COSMOFS_SNAP_DELETE, \"s\", NULL, 0, NULL) == 0 at line 739\0");
+        return failed(
+            reason,
+            "check failed: cfst_snapctl(COSMOFS_SNAP_DELETE, \"s\", NULL, 0, NULL) == 0 at line 739\0",
+        );
     }
     if (snap(SNAP_DELETE, path("m\0")) != 0) {
-        return failed(reason,
-            "check failed: cfst_snapctl(COSMOFS_SNAP_DELETE, \"m\", NULL, 0, NULL) == 0 at line 743\0");
+        return failed(
+            reason,
+            "check failed: cfst_snapctl(COSMOFS_SNAP_DELETE, \"m\", NULL, 0, NULL) == 0 at line 743\0",
+        );
     }
     if (!cfst_read_matches(path("/mnt/eng/.snapshots/t/gone\0"), big() as *void, len)) {
-        return failed(reason,
-            "check failed: cfst_read_matches(ENG \"/.snapshots/t/gone\", big, sizeof(big)) at line 747\0");
+        return failed(
+            reason,
+            "check failed: cfst_read_matches(ENG \"/.snapshots/t/gone\", big, sizeof(big)) at line 747\0",
+        );
     }
     if (snap(SNAP_DELETE, path("t\0")) != 0) {
-        return failed(reason,
-            "check failed: cfst_snapctl(COSMOFS_SNAP_DELETE, \"t\", NULL, 0, NULL) == 0 at line 751\0");
+        return failed(
+            reason,
+            "check failed: cfst_snapctl(COSMOFS_SNAP_DELETE, \"t\", NULL, 0, NULL) == 0 at line 751\0",
+        );
     }
     if (vfs_sync() != 0) {
         return failed(reason, "check failed: vfs_sync() == 0 at line 754\0");
     }
     if (!checkClean()) {
-        return failed(reason,
-            "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, 0) == 0 && rep.clean at line 758\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, 0) == 0 && rep.clean at line 758\0",
+        );
     }
     if (!cfst_remount_eng(bd, reason)) {
         return failed(reason, "check failed: cfst_remount_eng(bd, reason) at line 761\0");
@@ -785,8 +865,10 @@ unsafe fn selftestRollbackShared(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: cfst_read_matches(ENG \"/gone\", other, sizeof(other)) at line 764\0");
     }
     if (!checkClean()) {
-        return failed(reason,
-            "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, 0) == 0 && rep.clean at line 768\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, 0) == 0 && rep.clean at line 768\0",
+        );
     }
     var buffer = [0u8; 288];
     var line = TextWriter.create(mut buffer[..]);
@@ -822,8 +904,10 @@ unsafe fn selftestRollbackAtomic(reason: *mut *CChar) -> bool {
             return failed(reason, "check failed: cfst_write_file(ENG \"/a\", \"one\", 3) at line 799\0");
         }
         if (create(path("base\0"), borrow mut n as *mut u32) != 0) {
-            return failed(reason,
-                "check failed: cfst_snapctl(COSMOFS_SNAP_CREATE, \"base\", info, 1, &n) == 0 at line 803\0");
+            return failed(
+                reason,
+                "check failed: cfst_snapctl(COSMOFS_SNAP_CREATE, \"base\", info, 1, &n) == 0 at line 803\0",
+            );
         }
         if (!cfst_write_file(path("/mnt/eng/a\0"), "two".ptr as *void, 3)) { // open work: the request commits it first
             return failed(reason, "check failed: cfst_write_file(ENG \"/a\", \"two\", 3) at line 806\0");
@@ -962,8 +1046,10 @@ unsafe fn selftestRollbackRecord(reason: *mut *CChar) -> bool {
     r.setU64(RB_REQUESTED_NS, 0xFEDCBA9876543210);
     r.seal();
     if (!(r.u32At(RB_MAGIC) == ROLLBACK_MAGIC && r.u32At(RB_VERSION) == 1 && r.u32At(RB_CRC) != 0)) {
-        return failed(reason,
-            "check failed: r.magic == CFS_ROLLBACK_MAGIC && r.version == 1 && r.crc != 0 at line 941\0");
+        return failed(
+            reason,
+            "check failed: r.magic == CFS_ROLLBACK_MAGIC && r.version == 1 && r.crc != 0 at line 941\0",
+        );
     }
     if (r.parse(mut back) != 0) {
         return failed(reason, "check failed: cfs_rollback_parse(&r, &back) == 0 at line 944\0");
@@ -1029,8 +1115,10 @@ unsafe fn selftestRollbackRecord(reason: *mut *CChar) -> bool {
     bad.setU32(RB_STATE, ROLLBACK_HELD);
     bad.seal();
     if (!(bad.parse(mut back) == 0 && back.u32At(RB_STATE) == ROLLBACK_HELD)) {
-        return failed(reason,
-            "check failed: cfs_rollback_parse(&bad, &back) == 0 && back.state == CFS_ROLLBACK_HELD at line 1008\0");
+        return failed(
+            reason,
+            "check failed: cfs_rollback_parse(&bad, &back) == 0 && back.state == CFS_ROLLBACK_HELD at line 1008\0",
+        );
     }
     var buffer = [0u8; 192];
     var line = TextWriter.create(mut buffer[..]);
@@ -1078,8 +1166,10 @@ unsafe fn selftestClone(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: cfst_write_file(ENG \"/d/f\", \"deep\", 4) at line 1051\0");
     }
     if (create(path("o\0"), borrow mut n as *mut u32) != 0) {
-        return failed(reason,
-            "check failed: cfst_snapctl(COSMOFS_SNAP_CREATE, \"o\", info, 1, &n) == 0 at line 1055\0");
+        return failed(
+            reason,
+            "check failed: cfst_snapctl(COSMOFS_SNAP_CREATE, \"o\", info, 1, &n) == 0 at line 1055\0",
+        );
     }
     if (cloneReq(path("o\0"), path("o\0")) != -EEXIST) {
         return failed(reason, "check failed: clone_req(\"o\", \"o\") == -EEXIST at line 1058\0");
@@ -1110,8 +1200,10 @@ unsafe fn selftestClone(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: cfst_write_file(ENG \"/.snapshots/c/a\", \"clone\", 5) at line 1083\0");
     }
     if (!cfst_write_file(path("/mnt/eng/.snapshots/c/new\0"), big() as *void, len)) {
-        return failed(reason,
-            "check failed: cfst_write_file(ENG \"/.snapshots/c/new\", big, sizeof(big)) at line 1087\0");
+        return failed(
+            reason,
+            "check failed: cfst_write_file(ENG \"/.snapshots/c/new\", big, sizeof(big)) at line 1087\0",
+        );
     }
     if (vfs_mkdir(0 as *mut vnode, path("/mnt/eng/.snapshots/c/sub\0"), 493) != 0) {
         return failed(reason, "check failed: vfs_mkdir(NULL, ENG \"/.snapshots/c/sub\", 0755) == 0 at line 1090\0");
@@ -1153,8 +1245,10 @@ unsafe fn selftestClone(reason: *mut *CChar) -> bool {
     // An fsync is the vnode's own tree's: a clone file's inode goes to the clone, a snapshot file's nowhere -- neither
     // onto the live inode of the same number.
     if (vfs_open(0 as *mut vnode, path("/mnt/eng/.snapshots/c/a\0"), O_RDWR, 0, fp) != 0) {
-        return failed(reason,
-            "check failed: vfs_open(NULL, ENG \"/.snapshots/c/a\", COSMO_O_RDWR, 0, &f) == 0 at line 1130\0");
+        return failed(
+            reason,
+            "check failed: vfs_open(NULL, ENG \"/.snapshots/c/a\", COSMO_O_RDWR, 0, &f) == 0 at line 1130\0",
+        );
     }
     if (file_write(f, "fsync".ptr as *void, 5) != 5) {
         return failed(reason, "check failed: file_write(f, \"fsync\", 5) == 5 at line 1133\0");
@@ -1165,8 +1259,10 @@ unsafe fn selftestClone(reason: *mut *CChar) -> bool {
     filePut(f);
     f = 0 as *mut file;
     if (vfs_open(0 as *mut vnode, path("/mnt/eng/.snapshots/o/a\0"), O_RDONLY, 0, fp) != 0) {
-        return failed(reason,
-            "check failed: vfs_open(NULL, ENG \"/.snapshots/o/a\", COSMO_O_RDONLY, 0, &f) == 0 at line 1142\0");
+        return failed(
+            reason,
+            "check failed: vfs_open(NULL, ENG \"/.snapshots/o/a\", COSMO_O_RDONLY, 0, &f) == 0 at line 1142\0",
+        );
     }
     if (file_sync(f) != 0) {
         return failed(reason, "check failed: file_sync(f) == 0 at line 1145\0");
@@ -1186,8 +1282,10 @@ unsafe fn selftestClone(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: cfst_write_file(ENG \"/.snapshots/c/a\", \"clone\", 5) at line 1159\0");
     }
     if (!checkClean()) {
-        return failed(reason,
-            "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, 0) == 0 && rep.clean at line 1163\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, 0) == 0 && rep.clean at line 1163\0",
+        );
     }
     var freeWritten: u64 = 0;
     if (!freeBlocks(borrow mut freeWritten as *mut u64)) {
@@ -1199,8 +1297,10 @@ unsafe fn selftestClone(reason: *mut *CChar) -> bool {
 
     // The rules around it.
     if (snap(SNAP_DELETE, path("o\0")) != -EBUSY) {
-        return failed(reason,
-            "check failed: cfst_snapctl(COSMOFS_SNAP_DELETE, \"o\", NULL, 0, NULL) == -EBUSY at line 1176\0");
+        return failed(
+            reason,
+            "check failed: cfst_snapctl(COSMOFS_SNAP_DELETE, \"o\", NULL, 0, NULL) == -EBUSY at line 1176\0",
+        );
     }
     if (rollbackReq(path("c\0"), 0 as *CChar, info()) != -EINVAL) {
         return failed(reason, "check failed: rollback_req(\"c\", NULL, info) == -EINVAL at line 1179\0");
@@ -1209,16 +1309,22 @@ unsafe fn selftestClone(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: clone_req(\"c\", \"cc\") == -EINVAL at line 1182\0");
     }
     if (vfs_rename(0 as *mut vnode, path("/mnt/eng/.snapshots/c/sub\0"), path("/mnt/eng/moved\0")) != -EXDEV) {
-        return failed(reason,
-            "check failed: vfs_rename(NULL, ENG \"/.snapshots/c/sub\", ENG \"/moved\") == -EXDEV at line 1186\0");
+        return failed(
+            reason,
+            "check failed: vfs_rename(NULL, ENG \"/.snapshots/c/sub\", ENG \"/moved\") == -EXDEV at line 1186\0",
+        );
     }
     if (vfs_symlink(0 as *mut vnode, path("/mnt/eng/.snapshots/o/link\0"), path("x\0")) != -EROFS) {
-        return failed(reason,
-            "check failed: vfs_symlink(NULL, ENG \"/.snapshots/o/link\", \"x\") == -EROFS at line 1190\0");
+        return failed(
+            reason,
+            "check failed: vfs_symlink(NULL, ENG \"/.snapshots/o/link\", \"x\") == -EROFS at line 1190\0",
+        );
     }
     if (vfs_rename(0 as *mut vnode, path("/mnt/eng/.snapshots/o/a\0"), path("/mnt/eng/.snapshots/o/b\0")) != -EROFS) {
-        return failed(reason,
-            "check failed: vfs_rename(NULL, ENG \"/.snapshots/o/a\", ENG \"/.snapshots/o/b\") == -E... at line 1194\0");
+        return failed(
+            reason,
+            "check failed: vfs_rename(NULL, ENG \"/.snapshots/o/a\", ENG \"/.snapshots/o/b\") == -E... at line 1194\0",
+        );
     }
     if (vfs_symlink(0 as *mut vnode, path("/mnt/eng/.snapshots/c/link\0"), path("a\0")) != 0) { // a clone takes one
         return failed(reason, "check failed: vfs_symlink(NULL, ENG \"/.snapshots/c/link\", \"a\") == 0 at line 1197\0");
@@ -1232,8 +1338,10 @@ unsafe fn selftestClone(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: cfst_read_matches(ENG \"/.snapshots/c/a\", \"clone\", 5) at line 1205\0");
     }
     if (!cfst_read_matches(path("/mnt/eng/.snapshots/c/new\0"), big() as *void, len)) {
-        return failed(reason,
-            "check failed: cfst_read_matches(ENG \"/.snapshots/c/new\", big, sizeof(big)) at line 1209\0");
+        return failed(
+            reason,
+            "check failed: cfst_read_matches(ENG \"/.snapshots/c/new\", big, sizeof(big)) at line 1209\0",
+        );
     }
     if (!absent(path("/mnt/eng/.snapshots/c/d/f\0"))) {
         return failed(reason, "check failed: vfs_stat(NULL, ENG \"/.snapshots/c/d/f\", &cs) == -ENOENT at line 1212\0");
@@ -1245,18 +1353,24 @@ unsafe fn selftestClone(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: cfst_read_matches(ENG \"/a\", \"live2\", 5) at line 1218\0");
     }
     if (!checkClean()) {
-        return failed(reason,
-            "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, 0) == 0 && rep.clean at line 1222\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, 0) == 0 && rep.clean at line 1222\0",
+        );
     }
 
     // Busy while something inside it is open, like a snapshot.
     if (vfs_open(0 as *mut vnode, path("/mnt/eng/.snapshots/c/a\0"), O_RDONLY, 0, fp) != 0) {
-        return failed(reason,
-            "check failed: vfs_open(NULL, ENG \"/.snapshots/c/a\", COSMO_O_RDONLY, 0, &f) == 0 at line 1228\0");
+        return failed(
+            reason,
+            "check failed: vfs_open(NULL, ENG \"/.snapshots/c/a\", COSMO_O_RDONLY, 0, &f) == 0 at line 1228\0",
+        );
     }
     if (snap(SNAP_DELETE, path("c\0")) != -EBUSY) {
-        return failed(reason,
-            "check failed: cfst_snapctl(COSMOFS_SNAP_DELETE, \"c\", NULL, 0, NULL) == -EBUSY at line 1232\0");
+        return failed(
+            reason,
+            "check failed: cfst_snapctl(COSMOFS_SNAP_DELETE, \"c\", NULL, 0, NULL) == -EBUSY at line 1232\0",
+        );
     }
     filePut(f);
 
@@ -1266,8 +1380,10 @@ unsafe fn selftestClone(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: cosmofs_stats(cfst_mount_of(ENG), &st) == 0 at line 1239\0");
     }
     if (snap(SNAP_DELETE, path("c\0")) != 0) {
-        return failed(reason,
-            "check failed: cfst_snapctl(COSMOFS_SNAP_DELETE, \"c\", NULL, 0, NULL) == 0 at line 1243\0");
+        return failed(
+            reason,
+            "check failed: cfst_snapctl(COSMOFS_SNAP_DELETE, \"c\", NULL, 0, NULL) == 0 at line 1243\0",
+        );
     }
     if (vfs_sync() != 0) {
         return failed(reason, "check failed: vfs_sync() == 0 at line 1246\0");
@@ -1293,15 +1409,19 @@ unsafe fn selftestClone(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: vfs_stat(NULL, ENG \"/.snapshots/c\", &cs) == -ENOENT at line 1266\0");
     }
     if (snap(SNAP_DELETE, path("o\0")) != 0) {
-        return failed(reason,
-            "check failed: cfst_snapctl(COSMOFS_SNAP_DELETE, \"o\", NULL, 0, NULL) == 0 at line 1270\0");
+        return failed(
+            reason,
+            "check failed: cfst_snapctl(COSMOFS_SNAP_DELETE, \"o\", NULL, 0, NULL) == 0 at line 1270\0",
+        );
     }
     if (vfs_sync() != 0) {
         return failed(reason, "check failed: vfs_sync() == 0 at line 1273\0");
     }
     if (!checkClean()) {
-        return failed(reason,
-            "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, 0) == 0 && rep.clean at line 1277\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, 0) == 0 && rep.clean at line 1277\0",
+        );
     }
     if (!cfst_remount_eng(bd, reason)) {
         return failed(reason, "check failed: cfst_remount_eng(bd, reason) at line 1280\0");
@@ -1310,8 +1430,10 @@ unsafe fn selftestClone(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: cfst_read_matches(ENG \"/a\", \"live2\", 5) at line 1283\0");
     }
     if (!checkClean()) {
-        return failed(reason,
-            "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, 0) == 0 && rep.clean at line 1287\0");
+        return failed(
+            reason,
+            "check failed: cosmofs_check(cfst_mount_of(ENG), &rep, 0) == 0 && rep.clean at line 1287\0",
+        );
     }
     var buffer = [0u8; 192];
     var line = TextWriter.create(mut buffer[..]);

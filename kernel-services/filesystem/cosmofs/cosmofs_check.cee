@@ -16,8 +16,10 @@
 // words, checked against their C sizes (tests/host/test_cfscheck.c): a CeeSafe local cannot hold C state. The pages
 // the maps are made of come from the page allocator, through kernel/page.h's direct map.
 
-@header("kernel/page.h", "kernel/pmm.h", "kernel/blk.h", "kernel/vfs.h", "kernel/storage.h", "kernel/timer.h", "kernel/kmalloc.h", "kernel/string.h",
-    "kernel/cosmofs.h", "cosmofs_internal.h")
+@header(
+    "kernel/page.h", "kernel/pmm.h", "kernel/blk.h", "kernel/vfs.h", "kernel/storage.h", "kernel/timer.h", "kernel/kmalloc.h", "kernel/string.h",
+    "kernel/cosmofs.h", "cosmofs_internal.h",
+)
 extern "C" {
     struct blkdev {
         name: [u8; 16];

@@ -3,10 +3,12 @@
 // selftest table names, failing with the condition that did not hold and its line here. aio-pwrite-dirty needs the
 // ring's test body, which only a self-test build has: elsewhere it passes without running.
 
-@header("kernel/aio.h", "kernel/cosmofs.h", "kernel/kmalloc.h", "kernel/log.h", "kernel/mutex.h", "kernel/object.h",
+@header(
+    "kernel/aio.h", "kernel/cosmofs.h", "kernel/kmalloc.h", "kernel/log.h", "kernel/mutex.h", "kernel/object.h",
     "kernel/pagecache.h", "kernel/ramblk.h", "kernel/string.h", "kernel/vfs.h", "kernel/completion.h", "kernel/errno.h",
     "kernel/faultinject.h", "kernel/handle.h", "kernel/syscall.h", "kernel/thread.h", "kernel/types.h",
-    "kernel/utsns.h", "kernel/page.h", "uapi/cosmo/fsctl.h")
+    "kernel/utsns.h", "kernel/page.h", "uapi/cosmo/fsctl.h",
+)
 extern "C" {
     struct mount {
         cache_dirty: AtomicU64;
@@ -21,8 +23,7 @@ extern "C" {
         lock: mutex;
     }
     struct kobject_io_type {
-        read_filled: extern "C" fn(*mut kobject, *mut void, usize, usize,
-            extern "C" fn(*mut void, *void, usize) -> i32, *mut void) -> i64;
+        read_filled: extern "C" fn(*mut kobject, *mut void, usize, usize, extern "C" fn(*mut void, *void, usize) -> i32, *mut void) -> i64;
     }
     struct blkdev;
 
@@ -74,9 +75,9 @@ extern "C" {
 }
 
 // errno.h, syscall.h, vfs.h, page.h and kmalloc.h, which the C compiler checks.
-const MODE_DIR: u32 = 0x1ED; // 0755
+const MODE_DIR: u32 = 0x1ED;  // 0755
 const MODE_FILE: u32 = 0x1A4; // 0644
-const MODE_OWN: u32 = 0x180; // 0600
+const MODE_OWN: u32 = 0x180;  // 0600
 
 /// Safety: `reason` is writable; `why` ends in a zero byte.
 unsafe fn failed(reason: *mut *CChar, why: StringView) -> bool {
@@ -154,8 +155,10 @@ static mut F_BOUNCE: [u8; 8192] = [0; 8192];
 
 /// Safety: `f` is an open file whose io type fills; the rest as read_filled takes them.
 unsafe fn fill(io: *kobject_io_type, f: *mut file, len: usize, cx: borrow mut FilledCtx) -> i64 =>
-    Ptr.toBorrow(io).read_filled(f as *mut kobject, borrow mut F_BOUNCE as *mut [u8; 8192] as *mut void, CAP, len,
-        filledPut, cx as *mut FilledCtx as *mut void);
+    Ptr.toBorrow(io).read_filled(
+        f as *mut kobject, borrow mut F_BOUNCE as *mut [u8; 8192] as *mut void, CAP, len,
+        filledPut, cx as *mut FilledCtx as *mut void,
+    );
 
 /// Safety: `reason` is writable; runs at boot, alone, with /dev/zero and /dev/null made.
 @export("selftest_file_read_filled")
@@ -185,8 +188,10 @@ unsafe fn selftestFileReadFilled(reason: *mut *CChar) -> bool {
     }
     var cx = filled(f, dst, 0);
     if (!(fill(io, f, SZ, mut cx) == truncate<i64>(SZ - 100))) {
-        return failed2(reason, "check failed: io->read_filled(&f->obj, bounce, CAP, SZ, filled_put, &c) == SZ - 100 ",
-            "at line 178\0");
+        return failed2(
+            reason, "check failed: io->read_filled(&f->obj, bounce, CAP, SZ, filled_put, &c) == SZ - 100 ",
+            "at line 178\0",
+        );
     }
     if (!(cx.pieces == 3 && !cx.unlocked && cx.done == SZ - 100)) {
         return failed(reason, "check failed: c.pieces == 3 && !c.unlocked && c.done == SZ - 100 at line 181\0");
@@ -207,8 +212,10 @@ unsafe fn selftestFileReadFilled(reason: *mut *CChar) -> bool {
     }
     var c2 = filled(f, dst, 2);
     if (!(fill(io, f, SZ, mut c2) == truncate<i64>(CAP))) {
-        return failed2(reason, "check failed: io->read_filled(&f->obj, bounce, CAP, SZ, filled_put, &c) == CAP at ",
-            "line 0\0");
+        return failed2(
+            reason, "check failed: io->read_filled(&f->obj, bounce, CAP, SZ, filled_put, &c) == CAP at ",
+            "line 0\0",
+        );
     }
     if (!(file_seek(f, 0, SEEK_CUR) == truncate<i64>(CAP))) {
         return failed(reason, "check failed: file_seek(f, 0, COSMO_SEEK_CUR) == CAP at line 203\0");
@@ -216,8 +223,10 @@ unsafe fn selftestFileReadFilled(reason: *mut *CChar) -> bool {
     // The first piece faults: -EFAULT, the position where it was.
     var c3 = filled(f, dst, 1);
     if (!(fill(io, f, SZ, mut c3) == -EFAULT as i64)) {
-        return failed2(reason, "check failed: io->read_filled(&f->obj, bounce, CAP, SZ, filled_put, &c) == -EFAULT at ",
-            "line 0\0");
+        return failed2(
+            reason, "check failed: io->read_filled(&f->obj, bounce, CAP, SZ, filled_put, &c) == -EFAULT at ",
+            "line 0\0",
+        );
     }
     if (!(file_seek(f, 0, SEEK_CUR) == truncate<i64>(CAP))) {
         return failed(reason, "check failed: file_seek(f, 0, COSMO_SEEK_CUR) == CAP at line 212\0");
@@ -294,8 +303,13 @@ struct DwState {
 /// The dirty writer's body, by file_write (pagecache-dirty-writer) or by one ring request (aio-pwrite-dirty), at
 /// `dir`; the caller lets go of everything in `st`.
 /// Safety: `reason` is writable; `dir` and `file` end in a zero byte; `st` starts with the disk and buffers, or nulls.
-unsafe fn dirtyWriter(reason: *mut *CChar, st: borrow mut DwState, dir: StringView, path: StringView, aio: bool)
-    -> bool {
+unsafe fn dirtyWriter(
+    reason: *mut *CChar,
+    st: borrow mut DwState,
+    dir: StringView,
+    path: StringView,
+    aio: bool,
+) -> bool {
     if (!(!st.bd.isNull() && !st.buf.isNull() && !st.back.isNull())) {
         return failed(reason, "check failed: bd != NULL && buf != NULL && back != NULL at line 289\0");
     }
@@ -320,8 +334,10 @@ unsafe fn dirtyWriter(reason: *mut *CChar, st: borrow mut DwState, dir: StringVi
     let bound = DW_LIMIT / 2;
 
     if (!(open(path, O_RDWR | O_CREAT, MODE_FILE, borrow mut st.f as *mut *mut file) == 0)) {
-        return failed2(reason, "check failed: vfs_open(NULL, path, COSMO_O_RDWR | COSMO_O_CREAT, 0644, &f) == 0 at ",
-            "line 0\0");
+        return failed2(
+            reason, "check failed: vfs_open(NULL, path, COSMO_O_RDWR | COSMO_O_CREAT, 0644, &f) == 0 at ",
+            "line 0\0",
+        );
     }
     let dirty = borrow Ptr.toBorrow(st.m as *mount).cache_dirty;
     var buffer: [u8; 192] = [0; 192];
@@ -355,8 +371,10 @@ unsafe fn dirtyWriter(reason: *mut *CChar, st: borrow mut DwState, dir: StringVi
         while (i < DW_WRITES) {
             dwNoise(st.buf, 65536, i);
             if (!(file_pread(st.f, st.back as *mut void, 65536, i as u64 * 65536) == 65536)) {
-                return failed2(reason, "check failed: file_pread(f, back, 65536, (uint64_t)i * 65536) == 65536 at ",
-                    "line 0\0");
+                return failed2(
+                    reason, "check failed: file_pread(f, back, 65536, (uint64_t)i * 65536) == 65536 at ",
+                    "line 0\0",
+                );
             }
             if (!(memcmp(st.back as *void, st.buf as *void, 65536) == 0)) {
                 return failed(reason, "check failed: memcmp(back, buf, 65536) == 0 at line 351\0");
@@ -391,8 +409,10 @@ unsafe fn dirtyWriter(reason: *mut *CChar, st: borrow mut DwState, dir: StringVi
     var k: usize = 0;
     while (k < AW_BYTES / 65536) {
         if (!(file_pread(st.f, st.back as *mut void, 65536, k as u64 * 65536) == 65536)) {
-            return failed2(reason, "check failed: file_pread(f, back, 65536, (uint64_t)i * 65536) == 65536 at line ",
-                "383\0");
+            return failed2(
+                reason, "check failed: file_pread(f, back, 65536, (uint64_t)i * 65536) == 65536 at line ",
+                "383\0",
+            );
         }
         if (!(memcmp(st.back as *void, st.buf.add(k * 65536) as *void, 65536) == 0)) {
             return failed(reason, "check failed: memcmp(back, buf + (size_t)i * 65536, 65536) == 0 at line 387\0");

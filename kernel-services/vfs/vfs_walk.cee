@@ -9,8 +9,10 @@
 // The vnodes and files stay C (vfs.h). A walk's state is this file's own struct; the rest of the VFS walks to a
 // parent through vfs_walk_parent. The values this file writes as its own constants are the headers', which C checks.
 
-@header("kernel/cred.h", "kernel/errno.h", "kernel/kmalloc.h", "kernel/mountns.h", "kernel/mutex.h",
-    "kernel/string.h", "kernel/vfs.h", "vfs_internal.h")
+@header(
+    "kernel/cred.h", "kernel/errno.h", "kernel/kmalloc.h", "kernel/mountns.h", "kernel/mutex.h",
+    "kernel/string.h", "kernel/vfs.h", "vfs_internal.h",
+)
 extern "C" {
     struct file;
     struct mount_ns;
@@ -267,7 +269,9 @@ unsafe fn chown(vn: *mut vnode, uid: u32, gid: u32) -> i32 {
     mutex_lock(lockOf(vn));
     let owner = Ptr.toBorrow(c).euid == Ptr.toBorrow(vn as *vnode).uid;
     if ((uid != VFS_ID_KEEP && !admin && !(owner && uid == Ptr.toBorrow(vn as *vnode).uid)) ||
-        (gid != VFS_ID_KEEP && !admin && !(owner && (gid == Ptr.toBorrow(vn as *vnode).gid || cred_in_group(c, gid))))) {
+        (gid != VFS_ID_KEEP && !admin && !(owner && (gid == Ptr.toBorrow(
+            vn as *vnode,
+        ).gid || cred_in_group(c, gid))))) {
         mutex_unlock(lockOf(vn));
         return -EPERM;
     }
@@ -614,8 +618,10 @@ unsafe fn withinRoot(dir: *mut vnode, root: *mut vnode) -> bool {
 /// caller's because the path may live in the walk's own scratch and not outlive it.
 /// Safety: `start` null or a directory the caller holds; `path` null or NUL-terminated; the out-pointers writable,
 /// `trailingSlash` null or writable; no vnode lock held.
-unsafe fn walkParent(start: *mut vnode, pathIn: *u8, w: borrow mut Walk, namebuf: *mut u8, parent: *mut *mut vnode,
-    lastLen: *mut usize, trailingSlash: *mut bool) -> i32 {
+unsafe fn walkParent(
+    start: *mut vnode, pathIn: *u8, w: borrow mut Walk, namebuf: *mut u8, parent: *mut *mut vnode,
+    lastLen: *mut usize, trailingSlash: *mut bool,
+) -> i32 {
     if (pathIn.isNull() || strnlen(pathIn as *CChar, VFS_PATH_MAX) >= VFS_PATH_MAX) {
         return -ENAMETOOLONG;
     }
@@ -755,8 +761,10 @@ unsafe fn walkParent(start: *mut vnode, pathIn: *u8, w: borrow mut Walk, namebuf
 /// A walk to the parent of `path`'s last component, with a walk of its own: what a mutation and a link walk.
 /// Safety: as walkParent.
 @export("vfs_walk_parent")
-unsafe fn walkParentPlain(start: *mut vnode, path: *CChar, namebuf: *mut CChar, parent: *mut *mut vnode,
-    lastLen: *mut usize, trailingSlash: *mut bool) -> i32 {
+unsafe fn walkParentPlain(
+    start: *mut vnode, path: *CChar, namebuf: *mut CChar, parent: *mut *mut vnode,
+    lastLen: *mut usize, trailingSlash: *mut bool,
+) -> i32 {
     var w = walkNew();
     let rc = walkParent(start, path as *u8, mut w, namebuf as *mut u8, parent, lastLen, trailingSlash);
     walkFini(mut w);
@@ -789,15 +797,17 @@ const RESOLVE_FOLLOW: u32 = 1; // follow a link named by the last component
 unsafe fn resolve(start: *mut vnode, pathIn: *u8, w: borrow mut Walk, flags: u32, out: *mut *mut vnode) -> i32 {
     var name: [u8; 256] = [0; 256];
     let namePtr = borrow mut name as *mut [u8; 256] as *mut u8;
-    var base = start; // borrowed from the caller ...
+    var base = start;  // borrowed from the caller ...
     var owned = false; // ... until an expansion makes it ours
     var path = pathIn;
     loop {
         var parent = 0 as *mut vnode;
         var len: usize = 0;
         var trailing = false;
-        var rc = walkParent(base, path, mut w, namePtr, borrow mut parent as *mut *mut vnode,
-            borrow mut len as *mut usize, borrow mut trailing as *mut bool);
+        var rc = walkParent(
+            base, path, mut w, namePtr, borrow mut parent as *mut *mut vnode,
+            borrow mut len as *mut usize, borrow mut trailing as *mut bool,
+        );
         if (owned) {
             vnode_put(base); // walk_parent took its own reference
             base = 0 as *mut vnode;
@@ -870,8 +880,10 @@ unsafe fn lookup(start: *mut vnode, path: *CChar, out: *mut *mut vnode) -> i32 =
 
 /// Safety: as vfs_lookup; `startname` null or NUL-terminated; `name` holds `n` bytes.
 @export("vfs_lookup_named")
-unsafe fn lookupNamed(start: *mut vnode, startname: *CChar, path: *CChar, out: *mut *mut vnode, name: *mut CChar,
-    n: usize) -> i32 {
+unsafe fn lookupNamed(
+    start: *mut vnode, startname: *CChar, path: *CChar, out: *mut *mut vnode, name: *mut CChar,
+    n: usize,
+) -> i32 {
     if (name.isNull() || n < 2) {
         return -EINVAL;
     }
@@ -919,8 +931,14 @@ unsafe fn lookupNofollow(start: *mut vnode, path: *CChar, out: *mut *mut vnode) 
 
 /// vfs_open's walk, which keeps the traversed name when `w` asks for one.
 /// Safety: as walkParent; `out` writable.
-unsafe fn openWalk(start: *mut vnode, pathIn: *u8, flagsIn: u32, mode: u32, out: *mut *mut file, w: borrow mut Walk)
-    -> i32 {
+unsafe fn openWalk(
+    start: *mut vnode,
+    pathIn: *u8,
+    flagsIn: u32,
+    mode: u32,
+    out: *mut *mut file,
+    w: borrow mut Walk,
+) -> i32 {
     var flags = flagsIn;
     let acc = flags & COSMO_O_ACCMODE;
     if (acc == COSMO_O_ACCMODE) {
@@ -931,7 +949,7 @@ unsafe fn openWalk(start: *mut vnode, pathIn: *u8, flagsIn: u32, mode: u32, out:
     // path: O_CREAT then creates the target of a dangling link, O_TRUNC truncates the target, and the permission
     // checks are the target's -- which is what every one of those flags means. The walk carries the budget across
     // rounds, so a chain ending in a link cannot outrun it, and every exit runs one cleanup.
-    var base = start; // borrowed from the caller ...
+    var base = start;      // borrowed from the caller ...
     var baseOwned = false; // ... until an expansion makes it ours
     var vn = 0 as *mut vnode;
     var created = false;
@@ -944,8 +962,10 @@ unsafe fn openWalk(start: *mut vnode, pathIn: *u8, flagsIn: u32, mode: u32, out:
         var parent = 0 as *mut vnode;
         var len: usize = 0;
         var trailing = false;
-        rc = walkParent(base, path, mut w, lastPtr, borrow mut parent as *mut *mut vnode, borrow mut len as *mut usize,
-            borrow mut trailing as *mut bool);
+        rc = walkParent(
+            base, path, mut w, lastPtr, borrow mut parent as *mut *mut vnode, borrow mut len as *mut usize,
+            borrow mut trailing as *mut bool,
+        );
         if (baseOwned) {
             vnode_put(base); // walk_parent took its own reference
             base = 0 as *mut vnode;
@@ -993,8 +1013,10 @@ unsafe fn openWalk(start: *mut vnode, pathIn: *u8, flagsIn: u32, mode: u32, out:
             } else if (permission(parent as *vnode, VFS_MAY_WRITE) != 0) {
                 rc = -EACCES; // creating an entry writes the directory
             } else {
-                rc = Ptr.toBorrow(ops).create(parent, lastPtr as *CChar, len, mode & 0o7777,
-                    borrow mut vn as *mut *mut vnode);
+                rc = Ptr.toBorrow(ops).create(
+                    parent, lastPtr as *CChar, len, mode & 0o7777,
+                    borrow mut vn as *mut *mut vnode,
+                );
                 created = rc == 0;
             }
         } else if (rc == 0 && (flags & COSMO_O_CREAT) != 0 && (flags & COSMO_O_EXCL) != 0) {
@@ -1123,8 +1145,10 @@ unsafe fn open(start: *mut vnode, path: *CChar, flags: u32, mode: u32, out: *mut
 /// name's sake: a relative path from a start with no name, or a name that does not fit, leaves `name` empty.
 /// Safety: as openWalk; `startname` null or NUL-terminated; `name` holds `n` bytes, n >= 1.
 @export("vfs_open_named")
-unsafe fn openNamed(start: *mut vnode, startname: *CChar, path: *CChar, flags: u32, mode: u32, out: *mut *mut file,
-    name: *mut CChar, n: usize) -> i32 {
+unsafe fn openNamed(
+    start: *mut vnode, startname: *CChar, path: *CChar, flags: u32, mode: u32, out: *mut *mut file,
+    name: *mut CChar, n: usize,
+) -> i32 {
     var w = walkNew();
     {
         let p0 = Ptr.toBorrowMut(name as *mut u8);

@@ -96,7 +96,7 @@ struct Entry {
     updatedNs: u64;
     pending: usize; // an mbuf the entry owns, parked until the neighbour answers; 0 for none
     tries: u32;
-    nif: usize;     // the interface, whose flush removes the entry before the interface goes
+    nif: usize; // the interface, whose flush removes the entry before the interface goes
 }
 
 @constant
@@ -106,7 +106,10 @@ struct Table {
     entries: [Entry; 32];
 }
 
-static TABLE: IrqSpinLock<Table> = IrqSpinLock<Table>.constant("nd\0".ptr as *CChar, Table { entries: [freeEntry(); 32] });
+static TABLE: IrqSpinLock<Table> = IrqSpinLock<Table>.constant(
+    "nd\0".ptr as *CChar,
+    Table { entries: [freeEntry(); 32] },
+);
 /// ip_stats.nd_pending_dropped: packets dropped while their neighbour was being resolved.
 static PENDING_DROPPED: AtomicU64 = AtomicU64.constant(0);
 
@@ -186,7 +189,8 @@ unsafe fn allocate(t: borrow mut Table, ip: borrow [u8; 16], nif: usize, evict: 
 // ---- Messages ----
 
 /// The solicited-node multicast address of `ip` (ff02::1:ffXX:XXXX).
-fn solicitedGroup(ip: borrow [u8; 16]) -> [u8; 16] => [0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0xff, ip[13], ip[14], ip[15]];
+fn solicitedGroup(ip: borrow [u8; 16]) -> [u8; 16] =>
+    [0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0xff, ip[13], ip[14], ip[15]];
 
 /// That group's MAC (33:33:ff:XX:XX:XX).
 fn solicitedMac(ip: borrow [u8; 16]) -> [u8; 6] => [0x33, 0x33, 0xff, ip[13], ip[14], ip[15]];
@@ -265,7 +269,13 @@ unsafe fn solicit(nif: *mut netif, ip: borrow [u8; 16]) {
     var target = in6Bytes(ip);
     var group = solicitedGroup(ip);
     var mac = solicitedMac(ip);
-    send(nif, ICMPV6_NS, borrow target as *[u8; 16] as *in6_addr, borrow group as *[u8; 16] as *in6_addr, borrow mac as *[u8; 6] as *u8);
+    send(
+        nif,
+        ICMPV6_NS,
+        borrow target as *[u8; 16] as *in6_addr,
+        borrow group as *[u8; 16] as *in6_addr,
+        borrow mac as *[u8; 6] as *u8,
+    );
 }
 
 /// An address's bytes, as a value to take the address of (an in6_addr is its 16 bytes).
@@ -428,8 +438,10 @@ unsafe fn inputSolicitation(nif: *mut netif, received: *mut mbuf, ip6: *ipv6_hdr
         }
     }
     var asker = in6Bytes(borrow src);
-    send(nif, ICMPV6_NA, borrow Ptr.toBorrow(nif).ip6_ll as *in6_addr, borrow asker as *[u8; 16] as *in6_addr,
-        borrow d.mac as *[u8; 6] as *u8);
+    send(
+        nif, ICMPV6_NA, borrow Ptr.toBorrow(nif).ip6_ll as *in6_addr, borrow asker as *[u8; 16] as *in6_addr,
+        borrow d.mac as *[u8; 6] as *u8,
+    );
     if (pending != 0) {
         ether_output(nif, pending as *mut mbuf, borrow d.mac as *[u8; 6] as *u8, ETH_P_IPV6);
     }

@@ -15,8 +15,10 @@
 // the C compiler lays it out (a C-laid-out struct, type-system.md §33.1); the operation table is C data this file
 // defines (ADR 0080 §3.2).
 
-@header("kernel/blk.h", "kernel/bootinfo.h", "kernel/cred.h", "kernel/errno.h", "kernel/kmalloc.h", "kernel/log.h",
-    "kernel/mutex.h", "kernel/part.h", "kernel/string.h", "kernel/vfs.h", "uapi/cosmo/blkctl.h")
+@header(
+    "kernel/blk.h", "kernel/bootinfo.h", "kernel/cred.h", "kernel/errno.h", "kernel/kmalloc.h", "kernel/log.h",
+    "kernel/mutex.h", "kernel/part.h", "kernel/string.h", "kernel/vfs.h", "uapi/cosmo/blkctl.h",
+)
 extern "C" {
     struct blkdev {
         name: [u8; 16];
@@ -103,7 +105,6 @@ extern "C" {
     ) -> i32;
     fn ramfs_mkchr(path: *CChar, mode: u32, ops: *chrdev_ops, priv: *mut void, out: *mut *mut vnode) -> i32;
 
-
     // The values and layout the C compiler checks (ADR 0080 §3.1), which the floor asserted.
     const EPERM: i64 = 1;
     const ENOMEM: i64 = 12;
@@ -114,10 +115,14 @@ extern "C" {
     const KMEM_ZERO: u32 = 1;
     const PRIV_SYS_ADMIN: u32 = 2;
     /// blkctl.cee's blkctl.h values
-    @cvalue("COSMO_BLKCTL_VERSION == 1 && COSMO_BLKCTL_LIST == 1 && COSMO_BLKCTL_READ == 2 && COSMO_BLKCTL_WRITE == 3 && COSMO_BLKCTL_FLUSH == 4 && COSMO_BLKCTL_RESCAN == 5 && COSMO_BLKCTL_FORMAT == 6 && COSMO_BLKCTL_FORMAT_MIRROR == 7 && COSMO_BLKCTL_FORMAT_KEYED == 8 && COSMO_BLKCTL_IO_MAX == 32768 && COSMO_BLKCTL_NAME == 16 && COSMO_BLKCTL_LABEL == 16 && COSMO_BLKCTL_PART == 1 && COSMO_BLKCTL_RDONLY == 2 && COSMO_BLKCTL_BOOT == 4 && COSMO_BLKCTL_MOUNTED == 8 && COSMO_BLKCTL_TEST == 16 && BLKDEV_NAME_MAX == 16")
+    @cvalue(
+        "COSMO_BLKCTL_VERSION == 1 && COSMO_BLKCTL_LIST == 1 && COSMO_BLKCTL_READ == 2 && COSMO_BLKCTL_WRITE == 3 && COSMO_BLKCTL_FLUSH == 4 && COSMO_BLKCTL_RESCAN == 5 && COSMO_BLKCTL_FORMAT == 6 && COSMO_BLKCTL_FORMAT_MIRROR == 7 && COSMO_BLKCTL_FORMAT_KEYED == 8 && COSMO_BLKCTL_IO_MAX == 32768 && COSMO_BLKCTL_NAME == 16 && COSMO_BLKCTL_LABEL == 16 && COSMO_BLKCTL_PART == 1 && COSMO_BLKCTL_RDONLY == 2 && COSMO_BLKCTL_BOOT == 4 && COSMO_BLKCTL_MOUNTED == 8 && COSMO_BLKCTL_TEST == 16 && BLKDEV_NAME_MAX == 16",
+    )
     const BLKCTL_FACT_0: bool = true;
     /// blkctl.cee's struct sizes and slots
-    @cvalue("sizeof(struct cosmo_blkctl) == 48 && sizeof(struct cosmo_blkctl_keyed) == 848 && offsetof(struct cosmo_blkctl_keyed, slot) == 80 && sizeof(struct cosmo_blkctl_dev) == 96 && sizeof(struct cosmo_blkctl_list) == 8 && sizeof(struct cosmo_blkctl_rescan) == 8 && sizeof(struct blk_part_info) <= 8 * 8")
+    @cvalue(
+        "sizeof(struct cosmo_blkctl) == 48 && sizeof(struct cosmo_blkctl_keyed) == 848 && offsetof(struct cosmo_blkctl_keyed, slot) == 80 && sizeof(struct cosmo_blkctl_dev) == 96 && sizeof(struct cosmo_blkctl_list) == 8 && sizeof(struct cosmo_blkctl_rescan) == 8 && sizeof(struct blk_part_info) <= 8 * 8",
+    )
     const BLKCTL_FACT_1: bool = true;
 }
 
@@ -565,10 +570,8 @@ unsafe fn command(o: *mut void, buf: *u8, len: usize) -> i64 {
         if (two[1].isNull()) {
             rc = -ENODEV;
         } else {
-            rc = if (blk_part_any(two[0] as *blkdev) || blk_part_any(two[1] as *blkdev))
-                -EBUSY
-            else
-                vfs_format_mirror(
+            rc = if (blk_part_any(two[0] as *blkdev) || blk_part_any(two[1] as *blkdev)) -EBUSY
+                else vfs_format_mirror(
                     fstypeOf(cmd), borrow mut two as *mut [*mut blkdev; 2] as *mut *mut blkdev, 2,
                     label[..].ptr as *CChar,
                 ) as i64;
@@ -628,8 +631,10 @@ unsafe fn readFile(vn: *mut vnode, f: *mut file, off: u64, buf: *mut void, len: 
 /// Safety: called once the ramfs root exists.
 @export("blkctl_dev_init")
 unsafe fn devInit() {
-    let rc = ramfs_mkchr("/dev/blkctl\0".ptr as *CChar, MODE, borrow mut BLKCTL_OPS as *mut chrdev_ops as *chrdev_ops, 0 as *mut void,
-        borrow mut NODE as *mut *mut vnode);
+    let rc = ramfs_mkchr(
+        "/dev/blkctl\0".ptr as *CChar, MODE, borrow mut BLKCTL_OPS as *mut chrdev_ops as *chrdev_ops, 0 as *mut void,
+        borrow mut NODE as *mut *mut vnode,
+    );
     if (rc != 0) {
         var buffer: [u8; 64] = [0; 64];
         var line = TextWriter.create(mut buffer[..]);

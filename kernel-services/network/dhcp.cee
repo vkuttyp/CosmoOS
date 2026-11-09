@@ -18,7 +18,18 @@
 // slots, their timers, work items and locks are C objects in a static table, reached through pointers under the locks
 // the C used (CeeSafe's ADR 0042). Addresses are u32s in network order, as they lie in memory; messages are bytes.
 
-@header("kernel/net/dhcp.h", "kernel/net/ether.h", "kernel/net/ip.h", "kernel/net/udp.h", "kernel/net/cksum.h", "kernel/net/netparse_types.h", "kernel/netif.h", "kernel/random.h", "kernel/timer.h", "kernel/wait.h")
+@header(
+    "kernel/net/dhcp.h",
+    "kernel/net/ether.h",
+    "kernel/net/ip.h",
+    "kernel/net/udp.h",
+    "kernel/net/cksum.h",
+    "kernel/net/netparse_types.h",
+    "kernel/netif.h",
+    "kernel/random.h",
+    "kernel/timer.h",
+    "kernel/wait.h",
+)
 extern "C" {
     struct mbuf_pkt {
         len: u32;

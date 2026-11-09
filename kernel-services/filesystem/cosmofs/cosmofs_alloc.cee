@@ -389,8 +389,14 @@ unsafe fn ptrAt(b: *mut cfs_buf, i: u64) -> *mut u64 =>
 /// `imapRoot` is the live tree's, except for a read of a snapshot's inode, which passes that snapshot's root instead:
 /// its trees are ordinary trees, so nothing else in the walk changes (design.md, "Reading a snapshot").
 /// Safety: as allocRun; `out` writable.
-unsafe fn inodeBlockAt(fs: *mut cfs, imapRoot: u64, ino: u64, writable: bool, create: bool, out: *mut *mut cfs_buf)
-    -> i32 {
+unsafe fn inodeBlockAt(
+    fs: *mut cfs,
+    imapRoot: u64,
+    ino: u64,
+    writable: bool,
+    create: bool,
+    out: *mut *mut cfs_buf,
+) -> i32 {
     if (ino == 0 || ino >= CFS_MAX_INODES) {
         return -EIO;
     }
@@ -467,8 +473,9 @@ unsafe fn inodeBlockAt(fs: *mut cfs, imapRoot: u64, ino: u64, writable: bool, cr
 /// Inode `ino`'s slot in its block.
 /// Safety: `ib` is a held inode block.
 unsafe fn inodeSlot(ib: *mut cfs_buf, ino: u64) -> *mut cfs_inode =>
-    Ptr.toBorrow(ib as *cfs_buf).data.add(CFS_MHDR_SIZE + (ino % CFS_INODES_PER_BLOCK) as usize * CFS_INODE_SIZE)
-        as *mut cfs_inode;
+    Ptr.toBorrow(ib as *cfs_buf).data.add(
+        CFS_MHDR_SIZE + (ino % CFS_INODES_PER_BLOCK) as usize * CFS_INODE_SIZE,
+    ) as *mut cfs_inode;
 
 /// Safety: as inodeBlockAt.
 unsafe fn inodeBlock(fs: *mut cfs, ino: u64, writable: bool, create: bool, out: *mut *mut cfs_buf) -> i32 =>

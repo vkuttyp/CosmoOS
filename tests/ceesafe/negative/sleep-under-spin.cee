@@ -23,7 +23,10 @@ struct Table {
 }
 
 static SPIN: SpinLock<Table> = SpinLock<Table>.constant("ceesafe-negative.spin\0".ptr as *CChar, Table { count: 0 });
-static IRQSPIN: IrqSpinLock<Table> = IrqSpinLock<Table>.constant("ceesafe-negative.irqspin\0".ptr as *CChar, Table { count: 0 });
+static IRQSPIN: IrqSpinLock<Table> = IrqSpinLock<Table>.constant(
+    "ceesafe-negative.irqspin\0".ptr as *CChar,
+    Table { count: 0 },
+);
 static MUTEX: Mutex<Table> = Mutex<Table>.constant("ceesafe-negative.mutex\0".ptr as *CChar, Table { count: 0 });
 
 // --- refused -----------------------------------------------------------------------------------------------------------

@@ -4,7 +4,15 @@
 // `*reason` as the C's CHECK did. A C struct no CeeSafe local holds (a queue, the counters) is built in a zeroed,
 // aligned scratch of this file's.
 
-@header("kernel/mbuf.h", "kernel/net/cksum.h", "kernel/net/ether.h", "kernel/net/inet.h", "kernel/netif.h", "kernel/selftest.h", "kernel/wait.h")
+@header(
+    "kernel/mbuf.h",
+    "kernel/net/cksum.h",
+    "kernel/net/ether.h",
+    "kernel/net/inet.h",
+    "kernel/netif.h",
+    "kernel/selftest.h",
+    "kernel/wait.h",
+)
 extern "C" {
     struct mbuf_pkt {
         len: u32;
@@ -374,8 +382,7 @@ unsafe fn cksumTest(reason: *mut *CChar) -> bool {
     let c: u16 = in_cksum(borrow buf as *[u8; 11] as *void, 9);
     if (cksum_fold(
         cksum_partial(borrow c as *u16 as *void, 2, cksum_partial(borrow buf as *[u8; 11] as *void, 9, 0)),
-    ) !=
-        0) {
+    ) != 0) {
         return failed(reason, "check failed: an odd length with its checksum folds to zero\0");
     }
     // The chain sum equals the flat sum across odd buffer boundaries.

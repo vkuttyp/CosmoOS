@@ -8,7 +8,19 @@
 // build's constant macro). The parked retry's deadline and its done flag (the C's struct retry_park, in the test's
 // frame) are static, so no thread outlives what it reads.
 
-@header("nettest.h", "kernel/net/inet.h", "kernel/net/ip.h", "kernel/net/ether.h", "kernel/netif.h", "kernel/mbuf.h", "kernel/object.h", "kernel/selftest.h", "kernel/thread.h", "kernel/sched.h", "kernel/timer.h")
+@header(
+    "nettest.h",
+    "kernel/net/inet.h",
+    "kernel/net/ip.h",
+    "kernel/net/ether.h",
+    "kernel/netif.h",
+    "kernel/mbuf.h",
+    "kernel/object.h",
+    "kernel/selftest.h",
+    "kernel/thread.h",
+    "kernel/sched.h",
+    "kernel/timer.h",
+)
 extern "C" {
     struct thread;
     struct in6_addr {

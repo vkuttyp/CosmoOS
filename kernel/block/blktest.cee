@@ -9,9 +9,11 @@
 // cannot hold C state (CeeSafe's type-system.md §33.1). The one stack buffer left is the C's: blk-segments' refusal of
 // a buffer outside the direct map.
 
-@header("kernel/blk.h", "kernel/compiler.h", "kernel/dma.h", "kernel/ramblk.h", "kernel/selftest.h", "kernel/string.h",
+@header(
+    "kernel/blk.h", "kernel/compiler.h", "kernel/dma.h", "kernel/ramblk.h", "kernel/selftest.h", "kernel/string.h",
     "kernel/timer.h", "kernel/wait.h", "kernel/errno.h", "kernel/kmalloc.h",
-    "kernel/page.h")
+    "kernel/page.h",
+)
 extern "C" {
     struct device;
     struct blkdev {

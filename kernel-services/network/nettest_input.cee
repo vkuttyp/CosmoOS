@@ -4,7 +4,18 @@
 // nettest_fwt_recv_echo_reply (nettest.h) for the host-chain and host-state tests. A verdict is taken on the network
 // worker after file_write returns, so a counter is awaited, not read at once (rises, the C's FWT_RISES).
 
-@header("nettest.h", "kernel/net/inet.h", "kernel/net/ip.h", "kernel/net/ether.h", "kernel/net/nat.h", "kernel/net/fw.h", "uapi/cosmo/netctl.h", "kernel/netif.h", "kernel/vfs.h", "kernel/selftest.h")
+@header(
+    "nettest.h",
+    "kernel/net/inet.h",
+    "kernel/net/ip.h",
+    "kernel/net/ether.h",
+    "kernel/net/nat.h",
+    "kernel/net/fw.h",
+    "uapi/cosmo/netctl.h",
+    "kernel/netif.h",
+    "kernel/vfs.h",
+    "kernel/selftest.h",
+)
 extern "C" {
     struct netif;
     struct file;

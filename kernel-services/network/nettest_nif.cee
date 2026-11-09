@@ -6,7 +6,20 @@
 // reason. Registration, the creator's reference and the kept packet go through nettest_frame.cee's release framework
 // (nettest.h), so a failed check leaves nothing registered.
 
-@header("nettest.h", "kernel/net/inet.h", "kernel/net/ip.h", "kernel/net/ether.h", "kernel/net/cksum.h", "kernel/net/tcp.h", "kernel/netif.h", "kernel/mbuf.h", "kernel/percpu.h", "kernel/selftest.h", "kernel/thread.h", "kernel/wait.h")
+@header(
+    "nettest.h",
+    "kernel/net/inet.h",
+    "kernel/net/ip.h",
+    "kernel/net/ether.h",
+    "kernel/net/cksum.h",
+    "kernel/net/tcp.h",
+    "kernel/netif.h",
+    "kernel/mbuf.h",
+    "kernel/percpu.h",
+    "kernel/selftest.h",
+    "kernel/thread.h",
+    "kernel/wait.h",
+)
 extern "C" {
     struct mbuf_pkt {
         len: u32;

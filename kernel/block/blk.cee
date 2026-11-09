@@ -9,7 +9,22 @@
 // synchronous helpers keep their bio and its completion on the stack, as the C did, in a zeroed slot of words: a
 // CeeSafe local cannot hold C state (CeeSafe's type-system.md §33.1). blk_floor.c keeps the module exports.
 
-@header("kernel/blk.h", "kernel/completion.h", "kernel/compiler.h", "kernel/dma.h", "kernel/faultinject.h", "kernel/page.h", "kernel/part.h", "kernel/percpu.h", "kernel/printf.h", "kernel/sched.h", "kernel/string.h", "kernel/thread.h", "kernel/timer.h", "kernel/wait.h")
+@header(
+    "kernel/blk.h",
+    "kernel/completion.h",
+    "kernel/compiler.h",
+    "kernel/dma.h",
+    "kernel/faultinject.h",
+    "kernel/page.h",
+    "kernel/part.h",
+    "kernel/percpu.h",
+    "kernel/printf.h",
+    "kernel/sched.h",
+    "kernel/string.h",
+    "kernel/thread.h",
+    "kernel/timer.h",
+    "kernel/wait.h",
+)
 extern "C" {
     struct device;
     struct thread;

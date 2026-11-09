@@ -12,7 +12,14 @@
 //
 // It was first drafted by Nova's c2nova (docs/tooling.md §9.4), then written over by hand.
 
-@header("kernel/kmalloc.h", "kernel/pipe.h", "kernel/spinlock.h", "kernel/vfs.h", "kernel/wait.h", "uapi/cosmo/syscall.h")
+@header(
+    "kernel/kmalloc.h",
+    "kernel/pipe.h",
+    "kernel/spinlock.h",
+    "kernel/vfs.h",
+    "kernel/wait.h",
+    "uapi/cosmo/syscall.h",
+)
 extern "C" {
     @ctype("spinlock_t")
     struct spinlock_t;
@@ -67,8 +74,8 @@ const FIFO_WR: u32 = 2;
 
 @repr(C)
 struct fifo {
-    lock: spinlock_t; // the ring pointer and the generations; taken outside the ring's lock
-    ring: *mut pipe; // null while nobody has the FIFO open
+    lock: spinlock_t;   // the ring pointer and the generations; taken outside the ring's lock
+    ring: *mut pipe;    // null while nobody has the FIFO open
     openers: waitqueue; // an open waiting for the other side
     // Opens ever, per side. A blocking open waits for the OTHER side's generation to move past what it was when this
     // open joined, not for the other side's count to be nonzero: a writer that opens, writes and closes before the woken
@@ -83,8 +90,8 @@ struct fifo {
 @repr(C)
 struct fifo_open {
     ring: *mut pipe; // held alive by this open's count
-    side: u32; // FIFO_RD, FIFO_WR or both
-    nonblock: u32; // this open's mode (POSIX: per open); accessed atomically (a bool in the C)
+    side: u32;       // FIFO_RD, FIFO_WR or both
+    nonblock: u32;   // this open's mode (POSIX: per open); accessed atomically (a bool in the C)
 }
 
 static mut g_rings: u32 = 0; // live rings held by fifos; atomic, since each fifo has its own lock

@@ -3,9 +3,11 @@
 // condition that did not hold and its line here. The C compiler checks the values this file shares with the C
 // headers (ADR 0080 §3.1).
 
-@header("kernel/kmalloc.h", "kernel/log.h", "kernel/mutex.h", "kernel/string.h", "kernel/thread.h", "kernel/timer.h",
+@header(
+    "kernel/kmalloc.h", "kernel/log.h", "kernel/mutex.h", "kernel/string.h", "kernel/thread.h", "kernel/timer.h",
     "kernel/vfs.h", "kernel/wait.h", "kernel/completion.h", "kernel/errno.h", "kernel/faultinject.h", "kernel/handle.h",
-    "kernel/pagecache.h", "kernel/syscall.h", "kernel/types.h", "kernel/utsns.h", "kernel/page.h", "uapi/cosmo/fsctl.h")
+    "kernel/pagecache.h", "kernel/syscall.h", "kernel/types.h", "kernel/utsns.h", "kernel/page.h", "uapi/cosmo/fsctl.h",
+)
 extern "C" {
     struct vnode {
         obj: kobject;
@@ -28,8 +30,10 @@ extern "C" {
     fn strcmp(a: *CChar, b: *CChar) -> i32;
     fn vfs_open(start: *mut vnode, path: *CChar, flags: u32, mode: u32, out: *mut *mut file) -> i32;
     fn vfs_lookup(start: *mut vnode, path: *CChar, out: *mut *mut vnode) -> i32;
-    fn vfs_lookup_named(start: *mut vnode, startname: *CChar, path: *CChar, out: *mut *mut vnode, name: *mut CChar,
-        n: usize) -> i32;
+    fn vfs_lookup_named(
+        start: *mut vnode, startname: *CChar, path: *CChar, out: *mut *mut vnode, name: *mut CChar,
+        n: usize,
+    ) -> i32;
     fn vfs_mkdir(start: *mut vnode, path: *CChar, mode: u32) -> i32;
     fn vfs_symlink(start: *mut vnode, path: *CChar, target: *CChar) -> i32;
     fn vfs_unlink(start: *mut vnode, path: *CChar) -> i32;
@@ -61,7 +65,7 @@ extern "C" {
 }
 
 // errno.h, syscall.h, vfs.h and thread.h, which the C compiler checks.
-const MODE_DIR: u32 = 0x1ED; // 0755
+const MODE_DIR: u32 = 0x1ED;  // 0755
 const MODE_FILE: u32 = 0x1A4; // 0644
 const MS: u64 = 1000000;
 
@@ -117,8 +121,14 @@ unsafe fn selftestVfsRename2(reason: *mut *CChar) -> bool {
     if (!(mkdir("/tmp/rn2b\0") == 0)) {
         return failed(reason, "check failed: vfs_mkdir(NULL, \"/tmp/rn2b\", 0755) == 0 at line 113\0");
     }
-    if (!(vfs_open(0 as *mut vnode, c("/tmp/rn2a/f\0"), O_WRONLY | O_CREAT, MODE_FILE, borrow mut f as *mut *mut file)
-        == 0)) {
+    if (!(vfs_open(
+        0 as *mut vnode,
+        c("/tmp/rn2a/f\0"),
+        O_WRONLY | O_CREAT,
+        MODE_FILE,
+        borrow mut f as *mut *mut file,
+    ) ==
+        0)) {
         return failed(reason, "check failed: vfs_open(NULL, \"/tmp/rn2a/f\", ..., 0644, &f) == 0 at line 117\0");
     }
     kobject_put(f as *mut kobject);
@@ -157,8 +167,10 @@ unsafe fn selftestVfsRename2(reason: *mut *CChar) -> bool {
     if (!(rcWrong == -ENOENT)) { // and not beside the first
         return failed(reason, "check failed: rc_wrong == -ENOENT at line 153\0");
     }
-    KernelLog.write(LogLevel.Info,
-        "selftest: vfs-rename2: a rename between two directories reached from two starts lands in the second");
+    KernelLog.write(
+        LogLevel.Info,
+        "selftest: vfs-rename2: a rename between two directories reached from two starts lands in the second",
+    );
     return true;
 }
 
@@ -171,14 +183,14 @@ fn casePath(i: u32) -> StringView => match (i) {
     2 => "a/b/..\0",
     3 => "/..\0",
     4 => "../../..\0",
-    5 => "abs\0", // an absolute link, last
+    5 => "abs\0",    // an absolute link, last
     6 => "abs/..\0", // ... mid-path: the target's parent, not /tmp/ln
-    7 => "rel\0", // a relative link, last: its name must not stay in
+    7 => "rel\0",    // a relative link, last: its name must not stay in
     8 => "rel/..\0", // ... mid-path
-    9 => "chain\0", // two links
-    10 => "a/up\0", // a relative link into a mount
+    9 => "chain\0",  // two links
+    10 => "a/up\0",  // a relative link into a mount
     11 => "m/in/..\0",
-    12 => "m/..\0", // `..` from a mount root leaves through the mountpoint
+    12 => "m/..\0",  // `..` from a mount root leaves through the mountpoint
     13 => "m/out\0", // a link inside the mount, out through its root
     _ => "a/b/\0",
 };
@@ -271,8 +283,10 @@ unsafe fn selftestVfsLookupNamed(reason: *mut *CChar) -> bool {
         var vn = 0 as *mut vnode;
         var again = 0 as *mut vnode;
         let start = if (caseFromLn(i)) ln else 0 as *mut vnode;
-        let rc = vfs_lookup_named(start, c("/tmp/ln\0"), c(casePath(i)), borrow mut vn as *mut *mut vnode, name,
-            VFS_PATH_MAX);
+        let rc = vfs_lookup_named(
+            start, c("/tmp/ln\0"), c(casePath(i)), borrow mut vn as *mut *mut vnode, name,
+            VFS_PATH_MAX,
+        );
         if (rc != 0 || strcmp(name as *CChar, c(caseWant(i))) != 0) {
             var buffer: [u8; 256] = [0; 256];
             var line = TextWriter.create(mut buffer[..]);
@@ -313,8 +327,10 @@ unsafe fn selftestVfsLookupNamed(reason: *mut *CChar) -> bool {
         vnode_put(vn);
     }
     vn = 0 as *mut vnode;
-    let rcLong = vfs_lookup_named(0 as *mut vnode, 0 as *CChar, c("/tmp/ln/a/b\0"), borrow mut vn as *mut *mut vnode,
-        name, 8);
+    let rcLong = vfs_lookup_named(
+        0 as *mut vnode, 0 as *CChar, c("/tmp/ln/a/b\0"), borrow mut vn as *mut *mut vnode,
+        name, 8,
+    );
     if (!vn.isNull()) {
         vnode_put(vn);
     }
@@ -447,8 +463,10 @@ unsafe fn selftestVfsUmountOnce(reason: *mut *CChar) -> bool {
 
     // The first unmount, by absolute path: it sets `unmounting` and drains.
     var first = UmountOnce { start: 0 as *mut vnode, path: c("/tmp/um\0"), rc: 0, done: AtomicU32.create(0) };
-    let ta = thread_create(umountOnceMain, borrow mut first as *mut UmountOnce as *mut void, c("umount-first\0"),
-        SCHED_PRIO_DEFAULT);
+    let ta = thread_create(
+        umountOnceMain, borrow mut first as *mut UmountOnce as *mut void, c("umount-first\0"),
+        SCHED_PRIO_DEFAULT,
+    );
     if (!(!ta.isNull())) {
         return failed(reason, "check failed: ta != NULL at line 448\0");
     }
@@ -472,8 +490,10 @@ unsafe fn selftestVfsUmountOnce(reason: *mut *CChar) -> bool {
     var tb = 0 as *mut thread;
     if (seen) {
         kobject_get(borrow mut Ptr.toBorrowMut(root).obj as *mut kobject); // the thread's own, put when it returns
-        tb = thread_create(umountOnceMain, borrow mut second as *mut UmountOnce as *mut void, c("umount-second\0"),
-            SCHED_PRIO_DEFAULT);
+        tb = thread_create(
+            umountOnceMain, borrow mut second as *mut UmountOnce as *mut void, c("umount-second\0"),
+            SCHED_PRIO_DEFAULT,
+        );
         if (tb.isNull()) {
             vnode_put(root);
         }
@@ -490,7 +510,7 @@ unsafe fn selftestVfsUmountOnce(reason: *mut *CChar) -> bool {
     if (!tb.isNull()) {
         let _ = thread_join(tb);
     }
-    let _ = rmdir("/tmp/um/d\0"); // only if the first failed: its mount is gone otherwise
+    let _ = rmdir("/tmp/um/d\0");           // only if the first failed: its mount is gone otherwise
     let _ = vfs_umount2(c("/tmp/um\0"), 0); // likewise
     let _ = rmdir("/tmp/um\0");
 
@@ -512,7 +532,9 @@ unsafe fn selftestVfsUmountOnce(reason: *mut *CChar) -> bool {
     if (!(vfs_mount_count() == mounts0)) {
         return failed(reason, "check failed: vfs_mount_count() == mounts0 at line 508\0");
     }
-    KernelLog.write(LogLevel.Info,
-        "selftest: vfs-umount-once: a second unmount from inside the mount was refused while the first drained");
+    KernelLog.write(
+        LogLevel.Info,
+        "selftest: vfs-umount-once: a second unmount from inside the mount was refused while the first drained",
+    );
     return true;
 }

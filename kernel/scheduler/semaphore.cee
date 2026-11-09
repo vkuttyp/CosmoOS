@@ -38,7 +38,8 @@ unsafe fn lockOf(s: *mut semaphore) -> *mut spinlock_t => borrow mut Ptr.toBorro
 /// wait_event's condition: a unit is free.
 /// Safety: `arg` is a live semaphore.
 @callback
-unsafe fn available(arg: *mut void) -> bool => truncate<i32>(countOf(arg as *mut semaphore).loadWith(LoadOrdering.Acquire)) > 0;
+unsafe fn available(arg: *mut void) -> bool =>
+    truncate<i32>(countOf(arg as *mut semaphore).loadWith(LoadOrdering.Acquire)) > 0;
 
 /// Safety: `s` points to storage for a semaphore nothing uses yet; `name` outlives it.
 @export("semaphore_init")

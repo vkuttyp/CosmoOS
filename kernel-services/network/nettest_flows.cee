@@ -9,7 +9,25 @@
 // zeroed what it did not name. An address is a [u32; 5], struct netaddr's size and alignment (asserted in
 // nettest_floor.c).
 
-@header("nettest.h", "kernel/net/inet.h", "kernel/net/ip.h", "kernel/net/ether.h", "kernel/net/tcp.h", "kernel/net/udp.h", "kernel/net/nat.h", "kernel/net/fw.h", "kernel/net/tap.h", "uapi/cosmo/netctl.h", "kernel/netif.h", "kernel/mbuf.h", "kernel/socket.h", "kernel/vfs.h", "kernel/selftest.h", "kernel/thread.h", "kernel/timer.h")
+@header(
+    "nettest.h",
+    "kernel/net/inet.h",
+    "kernel/net/ip.h",
+    "kernel/net/ether.h",
+    "kernel/net/tcp.h",
+    "kernel/net/udp.h",
+    "kernel/net/nat.h",
+    "kernel/net/fw.h",
+    "kernel/net/tap.h",
+    "uapi/cosmo/netctl.h",
+    "kernel/netif.h",
+    "kernel/mbuf.h",
+    "kernel/socket.h",
+    "kernel/vfs.h",
+    "kernel/selftest.h",
+    "kernel/thread.h",
+    "kernel/timer.h",
+)
 extern "C" {
     struct netaddr;
     struct file;
@@ -655,8 +673,9 @@ unsafe fn flowsNat(reason: *mut *CChar) -> bool {
         while (w < 500 && !decided) { // returns as soon as all are decided
             drain(u);
             let ns = natNow();
-            decided = (ns.created - nx0.created) + (ns.share - nx0.share) + (ns.table - nx0.table) >=
-                ((k as u64) + 1) * (NAT_QUOTA_PER_GUEST as u64);
+            decided =
+                (ns.created - nx0.created) + (ns.share - nx0.share) + (ns.table - nx0.table) >=
+                    ((k as u64) + 1) * (NAT_QUOTA_PER_GUEST as u64);
             if (!decided) {
                 sleepMs(10);
             }

@@ -3,11 +3,13 @@
 // exported function the selftest table names, failing with the condition that did not hold and its line here.
 // The C compiler checks the values this file shares with the C headers (ADR 0080 §3.1).
 
-@header("kernel/cosmofs.h", "kernel/kmalloc.h", "kernel/log.h", "kernel/mountns.h", "kernel/pagecache.h",
+@header(
+    "kernel/cosmofs.h", "kernel/kmalloc.h", "kernel/log.h", "kernel/mountns.h", "kernel/pagecache.h",
     "kernel/percpu.h", "kernel/ramblk.h", "kernel/sched.h", "kernel/string.h", "kernel/thread.h", "kernel/timer.h",
     "kernel/vfs.h", "kernel/wait.h", "uapi/cosmo/syscall.h", "kernel/completion.h", "kernel/errno.h",
     "kernel/faultinject.h", "kernel/handle.h", "kernel/syscall.h", "kernel/types.h", "kernel/utsns.h", "kernel/page.h",
-    "uapi/cosmo/fsctl.h")
+    "uapi/cosmo/fsctl.h",
+)
 extern "C" {
     struct vnode_ops;
     struct mount {
@@ -65,8 +67,13 @@ extern "C" {
     fn clock_now_ns() -> u64;
     fn sched_yield();
     fn thread_create(entry: extern "C" fn(*mut void), arg: *mut void, name: *CChar, priority: i32) -> *mut thread;
-    fn thread_create_on(entry: extern "C" fn(*mut void), arg: *mut void, name: *CChar, priority: i32, affinity: u64)
-        -> *mut thread;
+    fn thread_create_on(
+        entry: extern "C" fn(*mut void),
+        arg: *mut void,
+        name: *CChar,
+        priority: i32,
+        affinity: u64,
+    ) -> *mut thread;
     fn thread_join(t: *mut thread) -> i32;
     fn thread_sleep_ns(ns: u64);
 
@@ -92,7 +99,7 @@ extern "C" {
 // errno.h, syscall.h, vfs.h and thread.h, which the C compiler checks.
 const PAGE_I: i64 = 4096;
 const PAGE_U: u64 = 4096;
-const MODE_DIR: u32 = 0x1ED; // 0755
+const MODE_DIR: u32 = 0x1ED;  // 0755
 const MODE_FILE: u32 = 0x1A4; // 0644
 const MS: u64 = 1000000;
 
@@ -178,8 +185,8 @@ unsafe fn budgetWriter(arg: *mut void) {
     let page = borrow BUDGET_PAGE as *[u8; 4096] as *void;
     for (round in 0..40) {
         var f = 0 as *mut file;
-        if (vfs_open(0 as *mut vnode, st.path, O_RDWR | O_CREAT | O_TRUNC, MODE_FILE, borrow mut f as *mut *mut file)
-            != 0) {
+        if (vfs_open(0 as *mut vnode, st.path, O_RDWR | O_CREAT | O_TRUNC, MODE_FILE, borrow mut f as *mut *mut file) !=
+            0) {
             continue;
         }
         for (i in 0..6) {
@@ -230,10 +237,14 @@ unsafe fn selftestCacheBudgetRace(reason: *mut *CChar) -> bool {
     var a = BudgetStress { path: c("/mnt/rrace/a\0"), enospc: 0, pages: 0 };
     var b = BudgetStress { path: c("/mnt/rrace/b\0"), enospc: 0, pages: 0 };
     let sampler = thread_create(budgetSampler, 0 as *mut void, c("budget-sampler\0"), SCHED_PRIO_DEFAULT);
-    let ta = thread_create(budgetWriter, borrow mut a as *mut BudgetStress as *mut void, c("budget-a\0"),
-        SCHED_PRIO_DEFAULT);
-    let tb = thread_create(budgetWriter, borrow mut b as *mut BudgetStress as *mut void, c("budget-b\0"),
-        SCHED_PRIO_DEFAULT);
+    let ta = thread_create(
+        budgetWriter, borrow mut a as *mut BudgetStress as *mut void, c("budget-a\0"),
+        SCHED_PRIO_DEFAULT,
+    );
+    let tb = thread_create(
+        budgetWriter, borrow mut b as *mut BudgetStress as *mut void, c("budget-b\0"),
+        SCHED_PRIO_DEFAULT,
+    );
     if (!(!sampler.isNull() && !ta.isNull() && !tb.isNull())) {
         return failed(reason, "check failed: sampler && ta && tb at line 230\0");
     }
@@ -300,15 +311,19 @@ unsafe fn selftestCacheLimits(reason: *mut *CChar) -> bool {
     }
     let rm = mountAt("/mnt/rcap\0");
     if (!(!rm.isNull() && (mnt(rm).flags & MOUNT_CACHE_IS_STORE) != 0 && mnt(rm).cache_limit_pages == 16384)) {
-        return failed2(reason, "check failed: rm != NULL && (rm->flags & MOUNT_CACHE_IS_STORE) && ",
-            "rm->cache_limit_pages == 16384 at line 296\0");
+        return failed2(
+            reason, "check failed: rm != NULL && (rm->flags & MOUNT_CACHE_IS_STORE) && ",
+            "rm->cache_limit_pages == 16384 at line 296\0",
+        );
     }
     let capped = mnt(rm);
     capped.cache_limit_pages = 4;
     var f = 0 as *mut file;
     if (!(vfs_open(none, c("/mnt/rcap/a\0"), O_RDWR | O_CREAT, MODE_FILE, borrow mut f as *mut *mut file) == 0)) {
-        return failed2(reason, "check failed: vfs_open(NULL, \"/mnt/rcap/a\", COSMO_O_RDWR | COSMO_O_CREAT, 0644, &f) ",
-            "== 0 at line 303\0");
+        return failed2(
+            reason, "check failed: vfs_open(NULL, \"/mnt/rcap/a\", COSMO_O_RDWR | COSMO_O_CREAT, 0644, &f) ",
+            "== 0 at line 303\0",
+        );
     }
     let _ = memset(buf, 0x5a, PAGE);
     for (i in 0..4) {
@@ -334,8 +349,10 @@ unsafe fn selftestCacheLimits(reason: *mut *CChar) -> bool {
     filePut(f);
     var g = 0 as *mut file;
     if (!(vfs_open(none, c("/mnt/rcap/b\0"), O_RDWR | O_CREAT, MODE_FILE, borrow mut g as *mut *mut file) == 0)) {
-        return failed2(reason, "check failed: vfs_open(NULL, \"/mnt/rcap/b\", COSMO_O_RDWR | COSMO_O_CREAT, 0644, &g) ",
-            "== 0 at line 330\0");
+        return failed2(
+            reason, "check failed: vfs_open(NULL, \"/mnt/rcap/b\", COSMO_O_RDWR | COSMO_O_CREAT, 0644, &g) ",
+            "== 0 at line 330\0",
+        );
     }
     if (!(file_write(g, buf as *void, PAGE) == -ENOSPC as i64)) { // the budget is the mount's, not the file's
         return failed(reason, "check failed: file_write(g, buf, PAGE_SIZE) == -ENOSPC at line 333\0");
@@ -379,8 +396,10 @@ unsafe fn selftestCacheLimits(reason: *mut *CChar) -> bool {
     let rootMnt = mountAt("/\0");
     let rootPages0 = mnt(rootMnt).cache_pages.load();
     if (!(vfs_open(none, c("/mnt/rcl/big\0"), O_RDWR | O_CREAT, MODE_FILE, borrow mut f as *mut *mut file) == 0)) {
-        return failed2(reason, "check failed: vfs_open(NULL, \"/mnt/rcl/big\", COSMO_O_RDWR | COSMO_O_CREAT, 0644, ",
-            "&f) == 0 at line 375\0");
+        return failed2(
+            reason, "check failed: vfs_open(NULL, \"/mnt/rcl/big\", COSMO_O_RDWR | COSMO_O_CREAT, 0644, ",
+            "&f) == 0 at line 375\0",
+        );
     }
     let npages: u32 = 512;
     for (i in 0..npages) {
@@ -413,13 +432,17 @@ unsafe fn selftestCacheLimits(reason: *mut *CChar) -> bool {
     pagecache_set_limit(st0.pages - (npages / 2) as u64); // below what is cached: reads must evict
     for (i in 0..npages) {
         if (!(file_pread(f, buf, PAGE, i as u64 * PAGE_U) == PAGE_I)) {
-            return failed2(reason, "check failed: file_pread(f, buf, PAGE_SIZE, (uint64_t)i * PAGE_SIZE) == PAGE_SIZE ",
-                "at line 409\0");
+            return failed2(
+                reason, "check failed: file_pread(f, buf, PAGE_SIZE, (uint64_t)i * PAGE_SIZE) == PAGE_SIZE ",
+                "at line 409\0",
+            );
         }
         let v = truncate<u8>(i & 0xff);
         if (!(at(bp, 0) == v && at(bp, PAGE - 1) == v)) {
-            return failed2(reason, "check failed: buf[0] == (uint8_t)(i & 0xff) && buf[PAGE_SIZE - 1] == (uint8_t)(i ",
-                "& 0xff) at line 414\0");
+            return failed2(
+                reason, "check failed: buf[0] == (uint8_t)(i & 0xff) && buf[PAGE_SIZE - 1] == (uint8_t)(i ",
+                "& 0xff) at line 414\0",
+            );
         }
     }
     pagecache_get_stats(p1);
@@ -444,8 +467,10 @@ unsafe fn selftestCacheLimits(reason: *mut *CChar) -> bool {
         return failed(reason, "check failed: file_pwrite(f, buf, PAGE_SIZE, 0) == PAGE_SIZE at line 436\0");
     }
     if (!(file_pread(f, buf, PAGE, 0) == PAGE_I && at(bp, 10) == 0x77)) {
-        return failed2(reason, "check failed: file_pread(f, buf, PAGE_SIZE, 0) == PAGE_SIZE && buf[10] == 0x77 at ",
-            "line 419\0");
+        return failed2(
+            reason, "check failed: file_pread(f, buf, PAGE_SIZE, 0) == PAGE_SIZE && buf[10] == 0x77 at ",
+            "line 419\0",
+        );
     }
     pagecache_set_limit(saved);
     filePut(f);
@@ -485,9 +510,9 @@ unsafe fn selftestCacheLimits(reason: *mut *CChar) -> bool {
 
 /// The racers' shared state.
 struct PutRacer {
-    vn: AtomicUSize; // the vnode to drop; published before `generation`
+    vn: AtomicUSize;       // the vnode to drop; published before `generation`
     generation: AtomicU32; // bumped (release) by the driver for each round
-    acks: AtomicU32; // racers that have dropped this round
+    acks: AtomicU32;       // racers that have dropped this round
     stop: AtomicU32;
 }
 
@@ -543,8 +568,13 @@ unsafe fn selftestVfsPutRace(reason: *mut *CChar) -> bool {
     let rp = borrow mut r as *mut PutRacer as *mut void;
     var t: [usize; 8] = [0; 8];
     for (i in 0..racers) {
-        t[i as usize] = thread_create_on(putRacerMain, rp, c("put-racer\0"), SCHED_PRIO_DEFAULT, (1 as u64) << (i + 1))
-            as usize;
+        t[i as usize] = thread_create_on(
+            putRacerMain,
+            rp,
+            c("put-racer\0"),
+            SCHED_PRIO_DEFAULT,
+            (1 as u64) << (i + 1),
+        ) as usize;
     }
 
     // Bounded by time as well as count, so a slow host runs fewer rounds rather than a long test.

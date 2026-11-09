@@ -6,7 +6,23 @@
 // reads one field, or a monotone sum of monotonic ones, and the multi-field assertion stays after the wait. A C
 // counter struct is read into a room and copied out into this file's snapshot (Tcp, Ip, Raw), so no frame holds two.
 
-@header("nettest.h", "kernel/net/inet.h", "kernel/net/ip.h", "kernel/net/ether.h", "kernel/net/cksum.h", "kernel/net/tcp.h", "kernel/net/raw.h", "kernel/netif.h", "kernel/mbuf.h", "kernel/object.h", "kernel/pipe.h", "kernel/socket.h", "kernel/selftest.h", "kernel/thread.h", "kernel/wait.h")
+@header(
+    "nettest.h",
+    "kernel/net/inet.h",
+    "kernel/net/ip.h",
+    "kernel/net/ether.h",
+    "kernel/net/cksum.h",
+    "kernel/net/tcp.h",
+    "kernel/net/raw.h",
+    "kernel/netif.h",
+    "kernel/mbuf.h",
+    "kernel/object.h",
+    "kernel/pipe.h",
+    "kernel/socket.h",
+    "kernel/selftest.h",
+    "kernel/thread.h",
+    "kernel/wait.h",
+)
 extern "C" {
     struct netaddr {
         family: u16;

@@ -11,8 +11,10 @@
 // exports (ADR 0080 §3.2); the lockdep assertion is a `cfg` block (§3.3), and the values this file writes as its own
 // constants are the headers', which C checks.
 
-@header("kernel/errno.h", "kernel/kmalloc.h", "kernel/lockdep.h", "kernel/mutex.h", "kernel/object.h",
-    "kernel/pagecache.h", "kernel/string.h", "kernel/vfs.h")
+@header(
+    "kernel/errno.h", "kernel/kmalloc.h", "kernel/lockdep.h", "kernel/mutex.h", "kernel/object.h",
+    "kernel/pagecache.h", "kernel/string.h", "kernel/vfs.h",
+)
 extern "C" {
     enum vnode_type: u32;
     struct waitqueue;
@@ -97,8 +99,7 @@ extern "C" {
         set_nonblock: extern "C" fn(*mut kobject, i32) -> i32;
         flush: extern "C" fn(*mut kobject) -> i32;
         poll_wq: extern "C" fn(*mut kobject, u32) -> *mut waitqueue;
-        read_filled: extern "C" fn(*mut kobject, *mut void, usize, usize, extern "C" fn(*mut void, *void, usize) -> i32,
-            *mut void) -> i64;
+        read_filled: extern "C" fn(*mut kobject, *mut void, usize, usize, extern "C" fn(*mut void, *void, usize) -> i32, *mut void) -> i64;
     }
     const KOBJECT_TYPE_IO: u32 = 1;
     /// A kobject's type is its first member (object.h).
@@ -233,7 +234,9 @@ unsafe fn release(obj: *mut kobject) {
     if (Ptr.toBorrow(f as *file).dev_open && !Ptr.toBorrow(ops).release.isNull()) {
         Ptr.toBorrow(ops).release(vn, f); // once, on the last reference
     }
-    if (kindOf(vn) == VNODE_REG && Ptr.toBorrow(vn as *vnode).pc.nr_dirty != 0 && !Ptr.toBorrow(ops).writepage.isNull()) {
+    if (kindOf(vn) == VNODE_REG && Ptr.toBorrow(
+        vn as *vnode,
+    ).pc.nr_dirty != 0 && !Ptr.toBorrow(ops).writepage.isNull()) {
         mutex_lock(lockOf(vn));
         let _ = pagecache_sync(vn);
         mutex_unlock(lockOf(vn));
@@ -319,8 +322,10 @@ unsafe fn objSetNonblock(obj: *mut kobject, on: i32) -> i32 {
 /// Linux does, and the next read starts after them. A device has no position and no lock (file_read).
 /// Safety: `obj` is a file's object; `buf` holds `cap` bytes; `put` copies a piece out.
 @export("vfs_file_obj_read_filled")
-unsafe fn objReadFilled(obj: *mut kobject, buf: *mut void, cap: usize, len: usize,
-    put: extern "C" fn(*mut void, *void, usize) -> i32, ctx: *mut void) -> i64 {
+unsafe fn objReadFilled(
+    obj: *mut kobject, buf: *mut void, cap: usize, len: usize,
+    put: extern "C" fn(*mut void, *void, usize) -> i32, ctx: *mut void,
+) -> i64 {
     let f = obj as *mut file;
     let vn = vnOf(f);
     let reg = kindOf(vn) == VNODE_REG;
@@ -658,8 +663,10 @@ unsafe fn stat(f: *mut file, st: *mut cosmo_stat) -> i32 {
 unsafe fn reportOnce(f: *mut file, rcIn: i32) -> i32 {
     var err: i32 = 0;
     var now: u32 = 0;
-    let newer = pagecache_error_since(pcOf(vnOf(f)), Ptr.toBorrow(f as *file).wb_seq_seen, borrow mut err as *mut i32,
-        borrow mut now as *mut u32);
+    let newer = pagecache_error_since(
+        pcOf(vnOf(f)), Ptr.toBorrow(f as *file).wb_seq_seen, borrow mut err as *mut i32,
+        borrow mut now as *mut u32,
+    );
     {
         let x = Ptr.toBorrowMut(f);
         x.wb_seq_seen = now;
@@ -767,7 +774,12 @@ unsafe fn readdir(f: *mut file, buf: *mut void, len: usize) -> i64 {
     mutex_lock(fileLock(f));
     mutex_lock(lockOf(vn));
     var pos = posOf(f);
-    let rc = Ptr.toBorrow(ops).readdir(vn, borrow mut pos as *mut u64, emit, borrow mut c as *mut ReaddirCtx as *mut void);
+    let rc = Ptr.toBorrow(ops).readdir(
+        vn,
+        borrow mut pos as *mut u64,
+        emit,
+        borrow mut c as *mut ReaddirCtx as *mut void,
+    );
     mutex_unlock(lockOf(vn));
     if (rc == 0) {
         setPos(f, pos);

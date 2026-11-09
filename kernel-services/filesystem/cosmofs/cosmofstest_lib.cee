@@ -6,9 +6,11 @@
 // (cosmofstest.h). The fault-injection seams of the engine mount, which only a build with CONFIG_SELFTEST and
 // CONFIG_FAULTINJECT has, and the self-test of those seams are `cfg` blocks (ADR 0080 §3.3).
 
-@header("kernel/blk.h", "kernel/vfs.h", "kernel/kmalloc.h", "kernel/ramblk.h", "kernel/string.h", "kernel/storage.h",
+@header(
+    "kernel/blk.h", "kernel/vfs.h", "kernel/kmalloc.h", "kernel/ramblk.h", "kernel/string.h", "kernel/storage.h",
     "kernel/crc32c.h", "kernel/cosmofs.h", "uapi/cosmo/syscall.h", "kernel/faultinject.h", "kernel/thread.h",
-    "kernel/errno.h", "kernel/log.h", "kernel/selftest.h", "cosmofs_format.h", "cosmofstest.h")
+    "kernel/errno.h", "kernel/log.h", "kernel/selftest.h", "cosmofs_format.h", "cosmofstest.h",
+)
 extern "C" {
     struct blkdev {
         gone: AtomicU32; // unregistered (blk.h), set atomically
@@ -106,10 +108,14 @@ extern "C" {
     const EEXIST: i32 = 17;
     const CFS_BLOCK: usize = 4096;
     /// cosmofstest_lib.cee's syscall.h, vfs.h, errno.h and cosmofs_format.h values
-    @cvalue("COSMO_O_RDONLY == 0 && COSMO_O_WRONLY == 1 && COSMO_O_CREAT == 0x40 && COSMO_O_TRUNC == 0x200 && offsetof(struct cfs_mhdr, crc) == 24 && CFS_DVA(0, 12345) == 12345")
+    @cvalue(
+        "COSMO_O_RDONLY == 0 && COSMO_O_WRONLY == 1 && COSMO_O_CREAT == 0x40 && COSMO_O_TRUNC == 0x200 && offsetof(struct cfs_mhdr, crc) == 24 && CFS_DVA(0, 12345) == 12345",
+    )
     const COSMOFSTEST_LIB_FACT_0: bool = true;
     /// cosmofstest_lib.cee's cosmofs.h and syscall.h sizes
-    @cvalue("sizeof(struct cosmofs_snap_info) == 104 && sizeof(struct cosmofs_snap_req) <= 96 && COSMOFS_SNAP_NAME_MAX + 1 == 32 && sizeof(struct cosmo_stat) <= 64")
+    @cvalue(
+        "sizeof(struct cosmofs_snap_info) == 104 && sizeof(struct cosmofs_snap_req) <= 96 && COSMOFS_SNAP_NAME_MAX + 1 == 32 && sizeof(struct cosmo_stat) <= 64",
+    )
     const COSMOFSTEST_LIB_FACT_1: bool = true;
 }
 

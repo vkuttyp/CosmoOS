@@ -86,10 +86,11 @@ extern "C" {
     fn cfs_dir_read_block(fs: *mut cfs, dir: *mut vnode, lblk: u64, buf: *mut u8) -> i32;
     fn cfs_dir_write_block(fs: *mut cfs, dir: *mut vnode, lblk: u64, buf: *u8) -> i32;
     fn cfs_dir_blocks(dir: *vnode) -> u64;
-    fn cfs_dir_find(fs: *mut cfs, dir: *mut vnode, name: *CChar, len: usize, block: *mut u8, lblkOut: *mut u64,
-        slotOut: *mut u32) -> i32;
-    fn cfs_dir_add(fs: *mut cfs, dir: *mut vnode, name: *CChar, len: usize, ino: u64, kind: u32, block: *mut u8)
-        -> i32;
+    fn cfs_dir_find(
+        fs: *mut cfs, dir: *mut vnode, name: *CChar, len: usize, block: *mut u8, lblkOut: *mut u64,
+        slotOut: *mut u32,
+    ) -> i32;
+    fn cfs_dir_add(fs: *mut cfs, dir: *mut vnode, name: *CChar, len: usize, ino: u64, kind: u32, block: *mut u8) -> i32;
     fn cfs_dir_remove_slot(fs: *mut cfs, dir: *mut vnode, lblk: u64, slot: u32, block: *mut u8) -> i32;
     fn cfs_dir_is_empty(fs: *mut cfs, dir: *mut vnode, block: *mut u8) -> bool;
     fn cfs_is_snapdir(vn: *mut vnode) -> bool;
@@ -243,8 +244,7 @@ unsafe fn snapOf(vn: *mut vnode, slot: *mut cfs_snapshot) {
 
 /// The entry `name` of `dir` and the vnode it names: by `tag`'s map when `snap`, else the live (or entered) tree's.
 /// Safety: `fs` is a mounted filesystem's state, its lock held; `dir` a directory vnode of it; `out` writable.
-unsafe fn lookupEntry(fs: *mut cfs, dir: *mut vnode, name: *CChar, len: usize, tag: u32, out: *mut *mut vnode)
-    -> i32 {
+unsafe fn lookupEntry(fs: *mut cfs, dir: *mut vnode, name: *CChar, len: usize, tag: u32, out: *mut *mut vnode) -> i32 {
     let block = kmalloc(CFS_BLOCK, 0) as *mut u8;
     if (block.isNull()) {
         return -ENOMEM;
@@ -343,8 +343,10 @@ unsafe fn lookup(dir: *mut vnode, name: *CChar, len: usize, out: *mut *mut vnode
                 var sslot = [0u64; 16];
                 let s = borrow mut sslot as *mut [u64; 16] as *mut cfs_snapshot;
                 snapOf(dir, s);
-                rc = cfs_vnode_get_tagged(fs, Ptr.toBorrow(inodeOf(dir) as *cfs_inode).parent, tag,
-                    s as *cfs_snapshot, out);
+                rc = cfs_vnode_get_tagged(
+                    fs, Ptr.toBorrow(inodeOf(dir) as *cfs_inode).parent, tag,
+                    s as *cfs_snapshot, out,
+                );
             }
         } else {
             rc = cfs_vnode_get(fs, Ptr.toBorrow(inodeOf(dir) as *cfs_inode).parent, out);
@@ -418,8 +420,7 @@ unsafe fn newInode(fs: *mut cfs, slot: *mut cfs_inode, inum: u64, kind: u32, per
 
 /// A file or a directory named `name` in `dir`.
 /// Safety: `dir` is a directory vnode of this filesystem; `name` `len` bytes; `out` writable.
-unsafe fn createCommon(dir: *mut vnode, name: *CChar, len: usize, mode: u32, kind: u32, out: *mut *mut vnode)
-    -> i32 {
+unsafe fn createCommon(dir: *mut vnode, name: *CChar, len: usize, mode: u32, kind: u32, out: *mut *mut vnode) -> i32 {
     let fs = fsOf(dir);
     if (unusable(fs)) {
         return -EIO; // unmounted, or the transaction was abandoned
@@ -635,9 +636,14 @@ unsafe fn mkdir(dir: *mut vnode, name: *CChar, len: usize, mode: u32, out: *mut 
             var sslot = [0u64; 16];
             let s = borrow mut sslot as *mut [u64; 16] as *mut cfs_snapshot;
             var tag: u32 = 0;
-            rc = if (cfs_snap_by_name(fs, name, len, s, borrow mut tag as *mut u32) == 0)
-                cfs_vnode_get_tagged(fs, CFS_ROOT_INO, tag, s as *cfs_snapshot, out)
-            else -EIO;
+            rc = if (cfs_snap_by_name(
+                fs,
+                name,
+                len,
+                s,
+                borrow mut tag as *mut u32,
+            ) == 0) cfs_vnode_get_tagged(fs, CFS_ROOT_INO, tag, s as *cfs_snapshot, out)
+                else -EIO;
         }
         mutex_unlock(lockOf(fs));
         if (rc == 0) {
@@ -901,8 +907,10 @@ unsafe fn repoint(block: *mut u8, slot: u32, inum: u64, kind: u32) {
 /// Safety: `odir` and `ndir` are directory vnodes of this filesystem, `victim` a vnode of it, `replaced` null or one;
 /// the names their lengths in bytes.
 @export("cfs_rename")
-unsafe fn rename(odir: *mut vnode, oname: *CChar, olen: usize, victim: *mut vnode, ndir: *mut vnode, nname: *CChar,
-    nlen: usize, replaced: *mut vnode) -> i32 {
+unsafe fn rename(
+    odir: *mut vnode, oname: *CChar, olen: usize, victim: *mut vnode, ndir: *mut vnode, nname: *CChar,
+    nlen: usize, replaced: *mut vnode,
+) -> i32 {
     let fs = fsOf(odir);
     if (unusable(fs)) {
         return -EIO; // unmounted, or the transaction was abandoned
@@ -949,8 +957,10 @@ unsafe fn rename(odir: *mut vnode, oname: *CChar, olen: usize, victim: *mut vnod
 
 /// rename's body, under the tree lock with every inode prepared.
 /// Safety: as rename; `block` CFS_BLOCK writable bytes.
-unsafe fn renameLocked(fs: *mut cfs, odir: *mut vnode, oname: *CChar, olen: usize, victim: *mut vnode,
-    ndir: *mut vnode, nname: *CChar, nlen: usize, replaced: *mut vnode, block: *mut u8) -> i32 {
+unsafe fn renameLocked(
+    fs: *mut cfs, odir: *mut vnode, oname: *CChar, olen: usize, victim: *mut vnode,
+    ndir: *mut vnode, nname: *CChar, nlen: usize, replaced: *mut vnode, block: *mut u8,
+) -> i32 {
     var lblk: u64 = 0;
     var slot: u32 = 0;
     var rc = cfs_dir_find(fs, odir, oname, olen, block, borrow mut lblk as *mut u64, borrow mut slot as *mut u32);
@@ -1077,14 +1087,26 @@ unsafe fn renameLocked(fs: *mut cfs, odir: *mut vnode, oname: *CChar, olen: usiz
 
 /// One entry to readdir's reader: nonzero when it wants no more.
 /// Safety: `arg` is `cb`'s argument; `name` holds `len` bytes.
-unsafe fn emit(cb: extern "C" fn(*mut void, *CChar, usize, u64, vnode_type) -> i32, arg: *mut void, name: *CChar, len: usize, ino: u64, kind: u32) -> i32 =>
+unsafe fn emit(
+    cb: extern "C" fn(*mut void, *CChar, usize, u64, vnode_type) -> i32,
+    arg: *mut void,
+    name: *CChar,
+    len: usize,
+    ino: u64,
+    kind: u32,
+) -> i32 =>
     cb(arg, name, len, ino, kind as vnode_type);
 
 /// The walk of readdir from `*pos`: "." and ".." first, then every entry, a long name's continuations stepped over;
 /// `*pos` left where the next call goes on, each entry given to `cb` with `arg`.
 /// Safety: `dir` is a directory vnode of this filesystem; `pos` writable; `cb` a vfs_dirent_cb.
 @export("cfs_readdir")
-unsafe fn readdir(dir: *mut vnode, pos: *mut u64, cb: extern "C" fn(*mut void, *CChar, usize, u64, vnode_type) -> i32, arg: *mut void) -> i32 {
+unsafe fn readdir(
+    dir: *mut vnode,
+    pos: *mut u64,
+    cb: extern "C" fn(*mut void, *CChar, usize, u64, vnode_type) -> i32,
+    arg: *mut void,
+) -> i32 {
     let fs = fsOf(dir);
     if (unusable(fs)) {
         return -EIO; // unmounted, or the transaction was abandoned
