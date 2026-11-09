@@ -131,7 +131,9 @@ jobs:
           CEESAFEC_SHA256: 011e1f0ca7983ec943d3c0bf7bcf8b75a076cd9b9ddaac71fa552fbc22166629   # ceesafec-linux-x64.tar.gz of the pinned release
         run: |
           v=$(python3 scripts/cee-gen.py --pinned)
-          curl -fsSL -o ceesafec.tar.gz "https://github.com/CeeSafe/CeeSafe/releases/download/v$v/ceesafec-linux-x64.tar.gz"
+          # Retried: GitHub's release-asset download answers 504 for minutes at a time (run 42572157976); eight
+          # tries 30 s apart stay inside the job's 10 minutes.
+          curl -fsSL --retry 8 --retry-delay 30 --retry-all-errors -o ceesafec.tar.gz "https://github.com/CeeSafe/CeeSafe/releases/download/v$v/ceesafec-linux-x64.tar.gz"
           echo "$CEESAFEC_SHA256  ceesafec.tar.gz" | sha256sum -c -
           mkdir -p "$RUNNER_TEMP/ceesafec" && tar -xzf ceesafec.tar.gz -C "$RUNNER_TEMP/ceesafec" && rm ceesafec.tar.gz
           echo "CEESAFEC=$RUNNER_TEMP/ceesafec/ceesafec" >> "$GITHUB_ENV"

@@ -30,7 +30,12 @@ RUN apt-get update \
 # the image is rebuilt.
 ARG CEESAFEC_VERSION=0.24.2
 ARG CEESAFEC_SHA256=011e1f0ca7983ec943d3c0bf7bcf8b75a076cd9b9ddaac71fa552fbc22166629
-RUN python3 -c "import urllib.request; urllib.request.urlretrieve('https://github.com/CeeSafe/CeeSafe/releases/download/v${CEESAFEC_VERSION}/ceesafec-linux-x64.tar.gz', '/tmp/ceesafec.tar.gz')" \
+# The download is retried: GitHub's release-asset URL answers 504 for minutes at a time.
+RUN for try in 1 2 3 4 5 6 7 8 9; do \
+        python3 -c "import urllib.request; urllib.request.urlretrieve('https://github.com/CeeSafe/CeeSafe/releases/download/v${CEESAFEC_VERSION}/ceesafec-linux-x64.tar.gz', '/tmp/ceesafec.tar.gz')" \
+            && break; \
+        [ "$try" = 9 ] && exit 1; echo "ceesafec download failed (try $try), retrying in 30 s"; sleep 30; \
+    done \
  && echo "${CEESAFEC_SHA256}  /tmp/ceesafec.tar.gz" | sha256sum -c - \
  && mkdir -p /opt/ceesafec && tar -xzf /tmp/ceesafec.tar.gz -C /opt/ceesafec && rm /tmp/ceesafec.tar.gz \
  && ln -s /opt/ceesafec/ceesafec /usr/local/bin/ceesafec \
