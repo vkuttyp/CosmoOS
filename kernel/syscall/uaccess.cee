@@ -1,0 +1,143 @@
+// uaccess.cee - Kernel access to user memory (docs/kernel/memory/design.md §6.1), in CeeSafe (roadmap 2.0 SA8).
+//
+// The range is checked against the user window; the copy itself is the architecture primitive whose faulting
+// instructions carry exception fixups. A page that is unmapped, PROT_NONE, or lacks the permission, or a demand-zero
+// fault that finds no memory, ends the copy with -EFAULT instead of a kernel fault. There is no walk of the region list
+// and therefore no check-then-copy window: a concurrent munmap makes the copy fail, never the kernel.
+
+@header("arch/user.h", "kernel/errno.h", "kernel/lockdep.h", "kernel/percpu.h", "kernel/process.h", "kernel/uaccess.h")
+extern "C" {
+    struct percpu {
+        preempt_count: i32;
+        irq_depth: u32;
+    }
+    // process.h's user window (vmm.h's VM_USER_LO and VM_USER_HI), and errno.h's.
+    const USER_LO: u64 = 0x400000;
+    const USER_HI: u64 = 0x7FFFFFFFF000;
+    const EFAULT: i32 = 14;
+    const EINVAL: i32 = 22;
+    const ENAMETOOLONG: i32 = 36;
+    fn raw_this_cpu() -> *mut percpu;
+    fn lockdep_might_sleep(ip: usize);
+    fn arch_user_access_begin();
+    fn arch_user_access_end();
+    fn arch_copy_user_raw(dst: *mut void, src: *void, n: usize) -> usize;
+}
+
+/// The size of a page, which a string is copied in pieces of.
+const PAGE: u64 = 4096;
+
+/// might_sleep() (lockdep.h) for the call that returns to `ip`: a demand fault allocates, so never under a spinlock or
+/// in an interrupt.
+/// Safety: raw_this_cpu() is this CPU's record, whose two counts are zero wherever a sleeper may run.
+fn mightSleep(ip: usize) {
+    unsafe {
+        let pc = Ptr.toBorrow(raw_this_cpu() as *percpu); // identity: zero wherever a sleeper may run
+        if (pc.preempt_count != 0 || pc.irq_depth != 0) {
+            if (cfg("CONFIG_LOCKDEP")) {
+                lockdep_might_sleep(ip);
+            } else {
+                var buffer: [u8; 96] = [0; 96];
+                var line = TextWriter.create(mut buffer[..]);
+                line.text("sleeping call with preemption disabled (count ");
+                line.signed(pc.preempt_count as i64);
+                line.text(") or in interrupt (depth ");
+                line.decimal(pc.irq_depth as u64);
+                line.text(")");
+                KernelLog.panic(line);
+            }
+        }
+    }
+}
+
+/// Whether [addr, addr + len) lies in the user window; an empty range at its end is in it.
+@export("user_range_ok")
+fn userRangeOk(addr: u64, len: usize) -> bool {
+    if (len == 0) {
+        return addr >= USER_LO && addr <= USER_HI;
+    }
+    if (addr < USER_LO || addr >= USER_HI) {
+        return false;
+    }
+    return len as u64 <= USER_HI - addr; // addr + len <= USER_HI, which cannot wrap
+}
+
+/// One access window around the raw copy; the result is bytes not copied.
+/// Safety: `dst` and `src` are `len` bytes, one of them in the user window userRangeOk accepted.
+unsafe fn rawCopy(dst: *mut void, src: *void, len: usize) -> usize {
+    arch_user_access_begin();
+    let left = arch_copy_user_raw(dst, src, len);
+    arch_user_access_end();
+    return left;
+}
+
+/// Copies `len` bytes from the user's `userSrc`: 0, or -EFAULT for a range outside the window or a page the copy
+/// faulted on.
+/// Safety: `dst` is `len` writable kernel bytes; thread context.
+@export("copy_from_user")
+unsafe fn copyFromUser(dst: *mut void, userSrc: u64, len: usize) -> i32 {
+    mightSleep(callerAddress());
+    if (len == 0) {
+        return 0;
+    }
+    if (!userRangeOk(userSrc, len)) {
+        return -EFAULT;
+    }
+    return if (rawCopy(dst, userSrc as usize as *void, len) != 0) -EFAULT else 0;
+}
+
+/// Copies `len` bytes to the user's `userDst`: 0, or -EFAULT as copy_from_user.
+/// Safety: `src` is `len` readable kernel bytes; thread context.
+@export("copy_to_user")
+unsafe fn copyToUser(userDst: u64, src: *void, len: usize) -> i32 {
+    mightSleep(callerAddress());
+    if (len == 0) {
+        return 0;
+    }
+    if (!userRangeOk(userDst, len)) {
+        return -EFAULT;
+    }
+    return if (rawCopy(userDst as usize as *mut void, src, len) != 0) -EFAULT else 0;
+}
+
+/// Copies the user's string at `userSrc` into `dst` (at most `max` bytes with its NUL): its length, -EFAULT when it
+/// runs into an inaccessible page or out of the window, -ENAMETOOLONG when it does not fit, -EINVAL for `max` 0. `dst`
+/// is terminated in every case but the last.
+/// Safety: `dst` is `max` writable kernel bytes; thread context.
+@export("strncpy_from_user")
+unsafe fn strncpyFromUser(dst: *mut CChar, userSrc: u64, max: usize) -> i32 {
+    mightSleep(callerAddress());
+    if (max == 0) {
+        return -EINVAL;
+    }
+    let out = dst as *mut u8;
+    // Copy in page-bounded pieces so a string that ends before an unmapped page is accepted while one that runs into
+    // it is not.
+    var done: usize = 0;
+    while (done + 1 < max) {
+        let addr = userSrc + done as u64;
+        let inPage = (PAGE - (addr & (PAGE - 1))) as usize;
+        var want = max - 1 - done;
+        if (want > inPage) {
+            want = inPage;
+        }
+        if (!userRangeOk(addr, want)) {
+            out.add(done).write(0);
+            return -EFAULT;
+        }
+        let left = rawCopy(out.add(done) as *mut void, addr as usize as *void, want);
+        let got = want - left;
+        for (i in 0..got) {
+            if (out.add(done + i).read() == 0) {
+                return truncate<i32>(done + i);
+            }
+        }
+        if (left != 0) {
+            out.add(done).write(0); // the string ran into an inaccessible page
+            return -EFAULT;
+        }
+        done = done + want;
+    }
+    out.add(done).write(0);
+    return -ENAMETOOLONG;
+}

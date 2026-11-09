@@ -253,6 +253,8 @@ PORTS = [
     ("kernel/process/elfparse.cee", "kernel/process/elfparse.c", "The user executable validator (elf.h)", None, False),
     ("kernel/syscall/personality.cee", "kernel/syscall/personality.c",
      "Which personality runs a program (process.h)", None, True),
+    ("kernel/syscall/uaccess.cee", "kernel/syscall/uaccess.c", "Kernel access to user memory (uaccess.h)", None,
+     True),
     ("kernel/module/modelf.cee", "kernel/module/modelf.c", "ET_REL module image validation and layout (modelf.h)", None,
      False),
     ("kernel/module/modspec.cee", "kernel/module/modspec.c", "The module.cycle= specification's parsers (module.h)", None,
