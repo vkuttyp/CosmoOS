@@ -1,9 +1,6 @@
 /*
- * blk_floor.c - The C under kernel/block/blk.cee (roadmap 2.0 SA7): the
- * module exports, which EXPORT_SYMBOL puts in a section CeeSafe does not
- * write. The block layer is CeeSafe (blk.cee, generated into blk.c); the C
- * compiler checks the values its self-tests share with the C headers
- * (ADR 0080 §3.1, blktest.cee and parttest.cee).
+ * blk_floor.c - blk.cee's module exports (roadmap 2.0 SA7): EXPORT_SYMBOL
+ * puts them in a section CeeSafe does not write.
  */
 
 #include <kernel/blk.h>
