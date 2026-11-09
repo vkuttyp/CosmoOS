@@ -190,6 +190,75 @@ static void run_digest(void)
     CHECK(g_digest == LINUX_DIGEST);
 }
 
+/* --- the encoders' digest ---------------------------------------------------- */
+
+/*
+ * Roadmap 2.0 SA8: the encoders convert.c held -- stat, statx and the
+ * terminal's modes out -- over 100,000 seeded inputs, every output byte
+ * hashed. The Linux struct stat differs between the architectures, so
+ * there is one recorded digest per layout: this host's (LX_ABI_*). The C
+ * gave them (convert.c, 2026-11-10); the CeeSafe that replaced it gives
+ * the same.
+ */
+#define ENCODER_SEED 0x5A8C0DE5E1F0A7B3ull
+#if defined(LX_ABI_X86_64)
+#define ENCODER_DIGEST 0x15ff4a3eb99bf16full
+#else
+#define ENCODER_DIGEST 0x7159817551c8dcffull
+#endif
+
+static uint64_t g_enc;
+
+static void enc_bytes(const void *p, size_t n)
+{
+    const uint8_t *b = p;
+    for (size_t i = 0; i < n; i++) {
+        g_enc ^= b[i];
+        g_enc *= 0x100000001b3ull;
+    }
+}
+
+static void run_encoder_digest(void)
+{
+    g_rng = ENCODER_SEED;
+    g_enc = 0xcbf29ce484222325ull;
+    for (unsigned r = 0; r < ROUNDS; r++) {
+        struct cosmo_stat st;
+        memset(&st, 0, sizeof(st));
+        st.ino = next();
+        st.type = (uint32_t)(next() % 9);   /* every COSMO_DT_* and some that are not */
+        st.mode = (uint32_t)next();
+        st.nlink = (uint32_t)next();
+        st.uid = (uint32_t)next();
+        st.gid = (uint32_t)next();
+        st.dev = (uint32_t)next();
+        uint64_t k = next();
+        st.size = (k & 1) ? next() : next() % 100000;   /* the rounding of blocks, and sizes near the top */
+        st.mtime_ns = (k & 2) ? next() : next() % 10000000000ull;
+        st.ctime_ns = (k & 4) ? next() : next() % 10000000000ull;
+        struct lx_stat ls;
+        memset(&ls, 0xA5, sizeof(ls));   /* every byte the encoder leaves would show */
+        lx_stat_from_native(&st, &ls);
+        enc_bytes(&ls, sizeof(ls));
+        struct lx_statx sx;
+        memset(&sx, 0xA5, sizeof(sx));
+        lx_statx_from_native(&st, (uint32_t)next(), &sx);
+        enc_bytes(&sx, sizeof(sx));
+        struct cosmo_termios ct;
+        memset(&ct, 0, sizeof(ct));
+        ct.modes = (uint32_t)next();
+        ct.vmin = (uint8_t)next();
+        ct.vtime = (uint8_t)next();
+        struct lx_termios lt;
+        memset(&lt, 0xA5, sizeof(lt));
+        lx_termios_from_native(&lt, &ct);
+        enc_bytes(&lt, sizeof(lt));
+    }
+    printf("  encoder digest 0x%016llx over %u inputs (%s stat)\n", (unsigned long long)g_enc, ROUNDS,
+           LX_STAT_SIZE == 144 ? "x86-64" : "aarch64");
+    CHECK(g_enc == ENCODER_DIGEST);
+}
+
 static volatile uint64_t g_sink;
 
 /* LINUX_BENCH=1: every conversion on the same inputs, best of 9, ns per input. */
@@ -342,6 +411,7 @@ int main(void)
     CHECK(lx_prot(0x10, &p) < 0);
 
     run_digest();
+    run_encoder_digest();
 
     if (g_failures) {
         printf("linux                         FAIL (%d)\n", g_failures);
