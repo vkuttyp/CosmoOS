@@ -8,7 +8,8 @@
 // The table's two entries and the partition's info live in kzalloc'd memory where the C kept them on the stack: a
 // CeeSafe local cannot hold C state (CeeSafe's type-system.md §33.1).
 
-@header("kernel/blk.h", "kernel/compiler.h", "kernel/gpt.h", "kernel/part.h", "kernel/ramblk.h", "kernel/selftest.h", "kernel/string.h")
+@header("kernel/blk.h", "kernel/compiler.h", "kernel/gpt.h", "kernel/part.h", "kernel/ramblk.h", "kernel/selftest.h",
+    "kernel/string.h", "kernel/errno.h", "kernel/kmalloc.h")
 extern "C" {
     struct blkdev {
         obj: kobject;
@@ -52,22 +53,27 @@ extern "C" {
     fn kzalloc(size: usize) -> *mut void;
     fn memset(p: *mut void, c: i32, n: usize) -> *mut void;
     fn strcmp(a: *CChar, b: *CChar) -> i32;
+
+    // The values and layout the C compiler checks (ADR 0080 §3.1), which the floor asserted.
+    const EINVAL: i32 = 22;
+    const EBUSY: i32 = 16;
+    const KMEM_ZERO: u32 = 1;
+    /// gpt.h's sizes of a built table for 512-byte sectors: the entry array, and the head and tail it is in.
+    @cvalue("GPT_BUILD_ARRAY_SECTORS(512)")
+    const ARRAY_SECTORS: u64 = 32;
+    @cvalue("GPT_BUILD_HEAD_SECTORS(512)")
+    const HEAD_SECTORS: u32 = 34;
+    @cvalue("GPT_BUILD_TAIL_SECTORS(512)")
+    const TAIL_SECTORS: u32 = 33;
 }
 
 /// The build's CONFIG_DEBUG, folded by the C compiler: without the RAM disk the test passes at once.
 static DEBUG_BUILD: bool = COSMO_CONFIG_DEBUG();
 
-// ---- errno.h, kmalloc.h and gpt.h values (asserted in blk_floor.c) ----
+// ---- The test's own constants (errno.h, kmalloc.h and gpt.h's are the extern block's) ----
 
-const EINVAL: i32 = 22;
-const EBUSY: i32 = 16;
-const KMEM_ZERO: u32 = 1;
 const SS: u32 = 512;
 const DISK_SECTORS: u64 = 512; // ramblk_create(64): 64 blocks of 4 KiB
-/// GPT_BUILD_ARRAY_SECTORS(512), GPT_BUILD_HEAD_SECTORS(512) and GPT_BUILD_TAIL_SECTORS(512).
-const ARRAY_SECTORS: u64 = 32;
-const HEAD_SECTORS: u32 = 34;
-const TAIL_SECTORS: u32 = 33;
 const DISK_GUID: [u8; 16] = [0x11, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
 /// gpt.h's gpt_type_esp and gpt_type_cosmo_root, gpt.cee's bytes (a C array is not imported).
 const TYPE_ESP: [u8; 16] = [

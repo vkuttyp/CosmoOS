@@ -9,7 +9,9 @@
 // cannot hold C state (CeeSafe's type-system.md §33.1). The one stack buffer left is the C's: blk-segments' refusal of
 // a buffer outside the direct map.
 
-@header("kernel/blk.h", "kernel/compiler.h", "kernel/dma.h", "kernel/ramblk.h", "kernel/selftest.h", "kernel/string.h", "kernel/timer.h", "kernel/wait.h")
+@header("kernel/blk.h", "kernel/compiler.h", "kernel/dma.h", "kernel/ramblk.h", "kernel/selftest.h", "kernel/string.h",
+    "kernel/timer.h", "kernel/wait.h", "kernel/errno.h", "kernel/kmalloc.h",
+    "kernel/page.h")
 extern "C" {
     struct device;
     struct blkdev {
@@ -71,23 +73,25 @@ extern "C" {
     fn clock_now_ns() -> u64;
     fn clock_since_ns(stamp: u64) -> u64;
     fn thread_sleep_ns(ns: u64);
+
+    // The values and layout the C compiler checks (ADR 0080 §3.1), which the floor asserted.
+    const EINVAL: i32 = 22;
+    const ETIMEDOUT: i32 = 110;
+    const BIO_READ: u32 = 0;
+    const BIO_WRITE: u32 = 1;
+    const BIO_PREFLUSH: u32 = 1;
+    const BIO_FUA: u32 = 2;
+    const BLK_TIMEOUT_NS: u64 = 30000000000;
+    const PAGE_SIZE: usize = 4096;
+    const DMA_ZERO: u32 = 1;
+    const KMEM_ZERO: u32 = 1;
 }
 
 /// The build's CONFIG_DEBUG, folded by the C compiler: without the RAM device each test passes at once.
 static DEBUG_BUILD: bool = COSMO_CONFIG_DEBUG();
 
-// ---- errno.h, blk.h, page.h, dma.h and kmalloc.h values (asserted in blk_floor.c) ----
+// ---- The test's own constants (errno.h, blk.h, page.h, dma.h and kmalloc.h's are the extern block's) ----
 
-const EINVAL: i32 = 22;
-const ETIMEDOUT: i32 = 110;
-const BIO_READ: u32 = 0;
-const BIO_WRITE: u32 = 1;
-const BIO_PREFLUSH: u32 = 1;
-const BIO_FUA: u32 = 2;
-const BLK_TIMEOUT_NS: u64 = 30000000000;
-const PAGE_SIZE: usize = 4096;
-const DMA_ZERO: u32 = 1;
-const KMEM_ZERO: u32 = 1;
 const MS: u64 = 1000000;
 /// How long a test waits for completions it expects (the C's 2 s deadlines).
 const WAIT_NS: u64 = 2000000000;
