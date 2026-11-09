@@ -1712,10 +1712,10 @@ are `if (cfg("X"))` blocks, which are C's `#if`. Waits on a condition go
 through `wait_floor_until*` (`kernel/scheduler/wait_floor.c`, which
 gained the killable timed one). Every digest is unchanged, and the debug
 and release kernels, the fuzz build, the host tests, the analysis and both
-boots pass at each step. The port found four ceesafec bugs, fixed after
-0.24.1 (an inverted `cfg` test, a pointer constant's cast, a `cfg` arm moved
-out of its `#if`, a callback only a `cfg` block names): CI needs the
-release that has them.
+boots pass at each step. The port found four ceesafec bugs, fixed in
+0.24.2 (an inverted `cfg` test, a pointer constant's cast, a `cfg` arm moved
+out of its `#if`, a callback only a `cfg` block names), which CI pins; its
+formatter is the one the sources are formatted with.
 
 Size: about 4.5x.
 
