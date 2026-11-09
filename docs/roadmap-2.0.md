@@ -1717,6 +1717,15 @@ boots pass at each step. The port found four ceesafec bugs, fixed in
 out of its `#if`, a callback only a `cfg` block names), which CI pins; its
 formatter is the one the sources are formatted with.
 
+Cross-image (2026-11-09): published releases' cosmofs is C (v1.0.13 has no
+`.cee` in it). `test-large` checks both directions. Its write stage runs
+this build's `fsctl check` on the root v1.0.13 installed and upgraded, and
+the check finds it clean. Its old stage boots v1.0.13, which mounts the two
+pools this build wrote, reads their files back by SHA-256 and checks both
+clean. `test-upgrade` and `test-be` boot this build on roots v1.0.3 and
+v1.0.7 wrote. Local run, x86_64 release with ceesafec 0.24.2: `test-large`
+PASS in 3732 s (f418495d).
+
 Size: about 4.5x.
 
 ### SA8 The Linux personality and the system-call layer
