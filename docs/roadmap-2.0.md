@@ -1183,10 +1183,12 @@ VFS, page cache and mount namespaces; the block layer. Converted in
 dependency order (block, pool, cosmofs, VFS), each step on the existing
 suites.
 
-- [ ] **Acceptance:** `test-install`, `test-upgrade`, `test-snapshot`,
+- [x] **Acceptance:** `test-install`, `test-upgrade`, `test-snapshot`,
   `test-fsck`, `test-mirror`, `test-encrypt` and `test-large` pass on both
-  architectures with no C left in those trees; an image written by the C
-  build mounts and checks clean under the CeeSafe build, and the reverse
+  architectures with no C left in those trees but what only C can write
+  (`blk_floor.c`'s module exports: EXPORT_SYMBOL's section is C's); an image
+  written by the C build mounts and checks clean under the CeeSafe build,
+  and the reverse
   (until 2.0's format break, if SA7 takes it).
 
 Progress (the block layer first, each step on a host test holding the
