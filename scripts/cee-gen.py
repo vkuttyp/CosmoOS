@@ -257,6 +257,8 @@ PORTS = [
      True),
     ("kernel/syscall/uaccesstest.cee", "kernel/syscall/uaccesstest.c",
      "The self-tests of the exception fixups and the user-access guard: uaccess, uaccess-guard", None, True),
+    ("kernel/syscall/syscall.cee", "kernel/syscall/syscall.c",
+     "The system-call dispatcher, the filter and the counters (syscall.h)", None, True),
     ("kernel/module/modelf.cee", "kernel/module/modelf.c", "ET_REL module image validation and layout (modelf.h)", None,
      False),
     ("kernel/module/modspec.cee", "kernel/module/modspec.c", "The module.cycle= specification's parsers (module.h)", None,

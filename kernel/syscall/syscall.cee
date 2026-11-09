@@ -1,0 +1,247 @@
+// syscall.cee - The generic system-call dispatcher (kernel/include/kernel/syscall.h), in CeeSafe (roadmap 2.0 SA8): the
+// personality's table, the system-call filter (docs/kernel/security/design.md §1f) and the counters.
+//
+// A call's arguments go to its handler as a struct syscall_args; this file builds one in a CeeSafe struct of the same
+// layout, whose offsets the C compiler checks, so the dispatch allocates nothing.
+
+@header(
+    "arch/irq.h", "arch/user.h", "kernel/errno.h", "kernel/percpu.h", "kernel/process.h", "kernel/signal.h",
+    "kernel/syscall.h", "kernel/thread.h",
+)
+extern "C" {
+    struct syscall_args;
+    /// process.h's handler type, a function pointer: read through handlerOf.
+    @ctype("syscall_fn")
+    struct syscall_fn;
+    struct percpu {
+        irq_depth: u32;
+        preempt_count: i32;
+    }
+    struct personality {
+        name: *CChar;
+        table: *syscall_fn; // the handlers, NULL for a number not implemented
+        count: u32;
+        always_allowed: *u16;
+        nr_always_allowed: u32;
+    }
+    struct process {
+        pid: u32;
+        pers: *personality;
+        lock: spinlock_t;
+        syscalls: u64;
+        syscall_mask: [u64; 8]; // read and stored atomically (maskWord), written under `lock`
+    }
+    struct thread {
+        syscall_nr: u64;
+        syscall_arg0: u64;
+    }
+    // syscall.h's (uapi), errno.h's.
+    const COSMO_SYSCALL_MASK_WORDS: u32 = 8;
+    const COSMO_SIGSYS: i32 = 31;
+    const EPERM: i32 = 1;
+    const ENOSYS: i32 = 38;
+    /// struct syscall_args: the number, the six arguments and the frame, as `Args` lays them out.
+    @cvalue("sizeof(struct syscall_args)")
+    const ARGS_SIZE: usize = 64;
+    @cvalue("offsetof(struct syscall_args, a)")
+    const ARGS_A_AT: usize = 8;
+    @cvalue("offsetof(struct syscall_args, frame)")
+    const ARGS_FRAME_AT: usize = 56;
+    fn raw_this_cpu() -> *mut percpu;
+    fn process_current() -> *mut process;
+    fn thread_current() -> *mut thread;
+    fn arch_irq_enabled() -> bool;
+    fn process_kill(p: *mut process, sig: i32);
+    fn process_check_kill();
+    fn signal_pending() -> bool;
+    fn signal_deliver(frame: *mut void, isSyscall: bool);
+    fn arch_user_regs_set_result_in_frame(frame: *mut void, v: i64);
+    fn arch_user_regs_result_in_frame(frame: *void) -> i64;
+    fn strlen(s: *CChar) -> usize;
+}
+
+/// struct syscall_args, built here: ARGS_SIZE, ARGS_A_AT and ARGS_FRAME_AT are its offsets, which the C compiler checks.
+struct Args {
+    nr: u64;
+    a: [u64; 6];
+    frame: *mut void;
+}
+
+/// Word `i` of `p`'s system-call mask, as an atomic: every access is one (__atomic_load_n and __atomic_store_n in C).
+/// Safety: `p` is a live process and `i` below COSMO_SYSCALL_MASK_WORDS.
+unsafe fn maskWord(p: *process, i: usize) -> *AtomicU64 =>
+    (borrow Ptr.toBorrow(p).syscall_mask[i] as *u64) as *AtomicU64;
+
+/// The handler of `nr` in `pers`'s table, null where the personality implements none.
+/// Safety: `nr` is below the table's count.
+unsafe fn handlerOf(pers: borrow personality, nr: u64) -> *(extern "C" fn(*mut syscall_args) -> i64) =>
+    (pers.table as *(extern "C" fn(*mut syscall_args) -> i64)).add(nr as usize);
+
+static CALLS: AtomicU64 = AtomicU64.constant(0);
+static UNKNOWN: AtomicU64 = AtomicU64.constant(0);
+static FILTERED: AtomicU64 = AtomicU64.constant(0);
+
+/// The panic of a broken invariant (the C's KASSERT).
+fn check(ok: bool, what: StringView) {
+    if (!ok) {
+        var buffer: [u8; 128] = [0; 128];
+        var line = TextWriter.create(mut buffer[..]);
+        line.text("assertion failed: ");
+        line.text(what);
+        line.text(" at kernel/syscall/syscall.cee (syscall_dispatch)");
+        KernelLog.panic(line);
+    }
+}
+
+/// Writes the C string `s` to `line`.
+/// Safety: `s` is a zero-terminated string.
+unsafe fn cText(line: borrow mut TextWriter, s: *CChar) {
+    line.bytes(Slice.fromRaw(s as *u8, strlen(s)));
+}
+
+/// Whether this process may make this call. A number past the mask is denied rather than allowed: a program built
+/// against a smaller system call count must deny what it has never heard of, which is the direction that fails safe.
+///
+/// The always-allowed set is the personality's, because it owns the numbering: without it a filter that forgot `exit`
+/// would turn every clean shutdown into a signal death, and one that forgot `rt_sigreturn` would make the first signal
+/// fatal for a reason unrelated to the filter.
+/// Safety: `p` is a live process.
+@export("syscall_allowed")
+unsafe fn syscallAllowed(p: *process, nr: u64) -> bool {
+    if (nr >= COSMO_SYSCALL_MASK_WORDS as u64 * 64) {
+        return false;
+    }
+    let proc = Ptr.toBorrow(p);
+    let word = Ptr.toBorrow(maskWord(p, (nr / 64) as usize)).loadWith(LoadOrdering.Relaxed);
+    if ((word & (1u64 << (nr % 64))) != 0) {
+        return true;
+    }
+    let pers = Ptr.toBorrow(proc.pers);
+    for (i in 0..pers.nr_always_allowed) {
+        if (pers.always_allowed.add(i as usize).read() as u64 == nr) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Narrowing only: the new mask is the intersection with what is in force, so no sequence of calls widens what a
+/// process may do.
+///
+/// Under the process lock, which is what makes an install whole. The threads of a process share one mask, and two
+/// things race it: another install (a plain read-modify-write would let the later writer put back bits the earlier one
+/// had just removed) and a spawn, which copies every word to a child. Making the words individually atomic is not
+/// enough for the second -- a copy could take some words from before an install and some from after, and the child
+/// would keep a call the parent had already denied. Every writer and the copy take this lock, so a child gets the mask
+/// as it was before an install or as it is after, and never a mixture.
+///
+/// The stores are still atomic because the check on the syscall path reads without the lock, and must see a whole word.
+/// Safety: `p` is a live process; `mask` holds `words` words.
+@export("syscall_filter_install")
+unsafe fn syscallFilterInstall(p: *mut process, mask: *u64, words: u32) {
+    let lock = borrow mut Ptr.toBorrowMut(p).lock as *mut spinlock_t;
+    let s = spin_lock_irqsave(lock);
+    for (i in 0..COSMO_SYSCALL_MASK_WORDS) {
+        let keep = if (i < words) mask.add(i as usize).read() else 0;
+        let w = Ptr.toBorrow(maskWord(p as *process, i as usize));
+        w.storeWith(w.loadWith(LoadOrdering.Relaxed) & keep, StoreOrdering.Relaxed);
+    }
+    spin_unlock_irqrestore(lock, s);
+}
+
+@export("syscall_filtered_count")
+fn syscallFilteredCount() -> u64 => FILTERED.loadWith(LoadOrdering.Relaxed);
+
+@export("syscall_count")
+fn syscallCount() -> u64 => CALLS.loadWith(LoadOrdering.Relaxed);
+
+@export("syscall_unknown_count")
+fn syscallUnknownCount() -> u64 => UNKNOWN.loadWith(LoadOrdering.Relaxed);
+
+/// Called by the arch entry: the value to place in the user's result register.
+/// Safety: the arch entry's: a system call's thread with interrupts on, `args` six words, `frame` its saved registers.
+@export("syscall_dispatch")
+unsafe fn syscallDispatch(nr: u64, args: *u64, frame: *mut void) -> i64 {
+    let pc = Ptr.toBorrow(raw_this_cpu() as *percpu); // identity: the two counts below are zero on any CPU a syscall runs on
+    let p = process_current();
+
+    check(arch_irq_enabled(), "arch_irq_enabled()");
+    check(pc.irq_depth == 0 && pc.preempt_count == 0, "pc->irq_depth == 0 && pc->preempt_count == 0");
+    if (p.isNull()) {
+        var buffer: [u8; 80] = [0; 80];
+        var line = TextWriter.create(mut buffer[..]);
+        line.text("system call ");
+        line.decimal(nr);
+        line.text(" from a thread without a process");
+        KernelLog.panic(line);
+        return -ENOSYS as i64; // not reached: the panic does not return
+    }
+
+    CALLS.fetchAddWith(1, Ordering.Relaxed);
+    let proc = Ptr.toBorrowMut(p);
+    proc.syscalls = proc.syscalls + 1;
+
+    let pers = Ptr.toBorrow(proc.pers);
+    if (nr >= pers.count as u64 || handlerOf(pers, nr).read().isNull()) {
+        UNKNOWN.fetchAddWith(1, Ordering.Relaxed);
+        var buffer: [u8; 96] = [0; 96];
+        var line = TextWriter.create(mut buffer[..]);
+        line.text("syscall: pid ");
+        line.decimal(proc.pid as u64);
+        line.text(" unknown number ");
+        line.decimal(nr);
+        line.text(" (");
+        cText(mut line, pers.name);
+        line.text(")");
+        KernelLog.send(LogLevel.Debug, line);
+        return -ENOSYS as i64;
+    }
+
+    // The filter (docs/kernel/security/design.md §1f), asked only of calls that exist. A filter takes away authority
+    // the process would otherwise have; it does not invent a death for a call nobody can make, and a number the kernel
+    // does not implement answers -ENOSYS whether or not a filter is installed -- installing nothing must change nothing.
+    //
+    // Read without the lock, and that is safe because of the code rather than the caller: every write takes `p->lock`
+    // and is a per-word atomic store, this is a per-word atomic load, and the mask only ever narrows. A reader
+    // therefore sees one whole word, old or new, and a call in flight when a filter lands may complete -- which is what
+    // a filter installed concurrently with a system call means on any system. (A process has more than one thread
+    // since docs/audit/next-subsystem-threads.md, so "only the process itself writes it" would not be a reason.)
+    if (!syscallAllowed(p as *process, nr)) {
+        FILTERED.fetchAddWith(1, Ordering.Relaxed);
+        var buffer: [u8; 96] = [0; 96];
+        var line = TextWriter.create(mut buffer[..]);
+        line.text("syscall: pid ");
+        line.decimal(proc.pid as u64);
+        line.text(" killed: number ");
+        line.decimal(nr);
+        line.text(" is outside its filter");
+        KernelLog.send(LogLevel.Warn, line);
+        process_kill(p, COSMO_SIGSYS);
+        process_check_kill();
+        return -EPERM as i64; // not reached: process_check_kill does not return here
+    }
+
+    var a = Args {
+        nr: nr,
+        a: [
+            args.read(), args.add(1).read(), args.add(2).read(), args.add(3).read(), args.add(4).read(),
+            args.add(5).read(),
+        ],
+        frame: frame,
+    };
+    let t = Ptr.toBorrowMut(thread_current());
+    t.syscall_nr = nr;
+    t.syscall_arg0 = a.a[0];
+    process_check_kill();
+    let handler = handlerOf(pers, nr).read();
+    var rc = handler(borrow mut a as *mut Args as *mut syscall_args);
+    // A signal that arrived (or a kill, or an exiting process) is acted on here, on the system-call frame: a handler
+    // frame, a restart of an interrupted call, or the end of the process. The result register is set first so the
+    // frame the handler returns into carries it.
+    if (signal_pending()) {
+        arch_user_regs_set_result_in_frame(frame, rc);
+        signal_deliver(frame, true);
+        rc = arch_user_regs_result_in_frame(frame as *void);
+    }
+    return rc;
+}
