@@ -126,6 +126,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel/syscall/syscall.c \
 	kernel/syscall/native.c \
 	kernel/syscall/jobctl.c \
+	kernel/syscall/threads.c \
 	kernel/syscall/personality.c \
 	kernel/syscall/uaccess.c \
 	kernel/syscall/uaccesstest.c \

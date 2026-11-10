@@ -83,11 +83,6 @@ void syscall_bounce_put(struct io_bounce *b)
 uint64_t syscall_bounce_heap_count(void) { return __atomic_load_n(&g_bounce_heap, __ATOMIC_RELAXED); }
 uint64_t syscall_bounce_fallback_count(void) { return __atomic_load_n(&g_bounce_fallback, __ATOMIC_RELAXED); }
 
-static int64_t sys_exit(struct syscall_args *a)
-{
-    process_exit((int)a->a[0]);
-}
-
 int64_t syscall_obj_write(struct kobject *obj, const uint64_t ubuf, size_t len)
 {
     const struct kobject_io_type *io = kobject_io_of(obj);
@@ -212,181 +207,12 @@ static int64_t sys_read(struct syscall_args *a)
     return syscall_handle_read((int)a->a[0], a->a[1], (size_t)a->a[2]);
 }
 
-static int64_t sys_getpid(struct syscall_args *a)
-{
-    (void)a;
-    return (int64_t)process_current()->pid;
-}
-
-/* The caller's own thread id: the pid for a process's first thread, so a
- * single-threaded program's answer is its pid, as on Linux. */
-static int64_t sys_thread_self(struct syscall_args *a)
-{
-    (void)a;
-    return (int64_t)thread_current()->user_tid;
-}
-
-/* Wait while the word still holds `val`, and wake waiters on it. The futex
- * itself requires 4-byte alignment (-EINVAL) and does the compare and the
- * enqueue under one lock, so a wake between them cannot be lost; these add
- * only the range check. */
-static int64_t sys_futex_wait(struct syscall_args *a)
-{
-    if (!user_range_ok(a->a[0], 4))
-        return -EFAULT;
-    /* The timer's deadline used to be a bare clock_now_ns() + this, so a
-     * duration near the top of the range wrapped into the past and
-     * expired at once -- the opposite of what the caller asked for. It
-     * saturates now (clock_deadline_ns), and this check stays anyway: a
-     * syscall should refuse an impossible duration rather than silently
-     * turn it into "never". Anything past INT64_MAX (292 years) is
-     * -EINVAL; 0 is still "no timeout". */
-    if (a->a[2] > (uint64_t)INT64_MAX)
-        return -EINVAL;
-    return futex_wait(process_current()->space, a->a[0], (uint32_t)a->a[1], a->a[2], false);
-}
-
-static int64_t sys_futex_wake(struct syscall_args *a)
-{
-    if (!user_range_ok(a->a[0], 4))
-        return -EFAULT;
-    return futex_wake(process_current()->space, a->a[0], (unsigned)a->a[1], false);
-}
-
-/*
- * Wake up to `nr_wake` waiters on the first word and move up to
- * `nr_requeue` more onto the second without waking them -- if the first
- * word still holds `val`, else -EAGAIN and nobody moved. The compare form
- * only: the native ABI is new and need not carry the non-comparing
- * FUTEX_REQUEUE's lost-wakeup race for compatibility with nothing
- * (docs/audit/next-subsystem-native-thread-door.md). The kernel never
- * reads the second word -- it is a key, not a load -- which is what lets
- * libc's broadcast hand it a pointer it has not dereferenced itself.
- * Returns woken + requeued, as the Linux door reports.
- */
-static int64_t sys_futex_requeue(struct syscall_args *a)
-{
-    if (!user_range_ok(a->a[0], 4) || !user_range_ok(a->a[1], 4))
-        return -EFAULT;
-    return futex_requeue(process_current()->space, a->a[0], a->a[1], (unsigned)a->a[2], (unsigned)a->a[3], true,
-                         (uint32_t)a->a[4], false);   /* the native calls always classify: the kernel can see what the word maps */
-}
-
-/*
- * The calling thread's thread pointer, and only the calling thread's: a
- * thread pointer is the definition of per-thread state, so this is shaped
- * like sigprocmask and not like the syscall filter. SYS_thread_create's
- * `tls` remains how a *new* thread gets one before its first instruction;
- * this is how a thread that already exists gets one, which in practice
- * means a process's first thread, from libc's startup.
+/* --- threads, futexes, sleeping and the clocks (threads.cee) ---------------
  *
- * Zero is legal, and is what every thread has until something sets it.
- *
- * The range check is eight bytes because eight is what the kernel can
- * honestly promise: libc's block is libc's business and its size is not
- * the kernel's to know, but on x86-64 the architecture itself dereferences
- * the first word through %fs:0, so a base whose first word is not in the
- * caller's space is wrong on its face. The alignment is 16, which every
- * layout a C ABI will put there wants anyway.
- */
-static int64_t sys_set_tls(struct syscall_args *a)
-{
-    uint64_t base = a->a[0];
-    if (base % 16u)
-        return -EINVAL;
-    if (base != 0 && !user_range_ok(base, 8))
-        return -EFAULT;
-    arch_set_tls_base((uintptr_t)base);
-    return 0;
-}
-
-/* This thread ends; the process ends with the last of them, carrying that
- * thread's status. SYS_exit remains the process. */
-static int64_t sys_thread_exit(struct syscall_args *a)
-{
-    process_thread_exit((int)a->a[0]);
-}
-
-/*
- * A thread of the calling process, at `entry` on a stack the caller owns.
- * The order here is the order the failure modes want: everything before
- * process_add_thread fails with nothing created, and everything after it
- * fails with process_thread_abandon.
- */
-static int64_t sys_thread_create(struct syscall_args *a)
-{
-    struct cosmo_thread req;
-    if (copy_from_user(&req, a->a[0], sizeof(req)))
-        return -EFAULT;
-    if (req.flags != 0 || req.reserved != 0 || req.entry == 0 || req.stack_top == 0)
-        return -EINVAL;
-    if (req.stack_top % 16u || req.stack_top <= ARCH_THREAD_TOP_BYTES)
-        return -EINVAL;
-    if (req.clear_tid % 4u)
-        return -EINVAL;
-    if (req.clear_tid && !user_range_ok(req.clear_tid, 4))
-        return -EFAULT;
-
-    /* The top of the stack: x86-64's return slot, and on every
-     * architecture the write that proves the stack is really there. Done
-     * before anything is linked, because an aligned stack_top can still be
-     * unmapped or read-only and a failure here must leave nothing behind.
-     * Uniform across architectures deliberately: a validation that one
-     * architecture performed and the other did not would let a program
-     * that only runs on one create a thread doomed to fault on its first
-     * push. */
-    {
-        uint64_t top = 0;
-        uint64_t at = req.stack_top - ARCH_THREAD_TOP_BYTES;
-        if (!user_range_ok(at, ARCH_THREAD_TOP_BYTES) || copy_to_user(at, &top, ARCH_THREAD_TOP_BYTES))
-            return -EFAULT;
-    }
-
-    struct arch_user_regs regs;
-    arch_user_regs_init_thread(&regs, (uintptr_t)req.entry, (uintptr_t)req.arg, (uintptr_t)req.stack_top);
-
-    struct thread *t;
-    int rc = process_add_thread(process_current(), &regs, (uintptr_t)req.tls, &t);
-    if (rc)
-        return rc;
-    uint32_t tid = t->user_tid;
-    if (req.clear_tid) {
-        t->clear_child_tid = req.clear_tid;
-        /* Before the start, so the word's only two states are this id and
-         * the zero the exit writes: a caller that wrote it afterwards could
-         * lose the race to a child that had already finished. */
-        if (copy_to_user(req.clear_tid, &tid, sizeof(tid))) {
-            process_thread_abandon(t);
-            return -EFAULT;
-        }
-    }
-    process_thread_start(t);
-    return (int64_t)tid;
-}
-
-static int64_t sys_yield(struct syscall_args *a)
-{
-    (void)a;
-    sched_yield();
-    return 0;
-}
-
-static int64_t sys_sleep_ns(struct syscall_args *a)
-{
-    uint64_t ns = a->a[0];
-    if (ns > 3600ULL * NS_PER_SEC)
-        return -EINVAL;
-    return thread_sleep_ns_killable(ns);
-}
-
-static int64_t sys_clock_ns(struct syscall_args *a)
-{
-    switch ((unsigned)a->a[0]) {
-    case COSMO_CLOCK_MONOTONIC: return (int64_t)clock_now_ns();
-    case COSMO_CLOCK_REALTIME:  return (int64_t)clock_realtime_ns();
-    default:                    return -EINVAL;
-    }
-}
+ * sys_exit, sys_getpid, sys_thread_self, sys_futex_wait .. sys_futex_requeue,
+ * sys_set_tls, sys_thread_exit, sys_thread_create, sys_yield, sys_sleep_ns
+ * and sys_clock_ns are CeeSafe's (kernel/syscall/threads.cee, roadmap 2.0
+ * SA8; syscall.h). */
 
 static struct file *file_of(int h, unsigned rights);
 

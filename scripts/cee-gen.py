@@ -261,6 +261,8 @@ PORTS = [
      "The system-call dispatcher, the filter and the counters (syscall.h)", None, True),
     ("kernel/syscall/jobctl.cee", "kernel/syscall/jobctl.c",
      "The native calls on sessions, the terminal, credentials, limits and blocking (syscall.h)", None, False),
+    ("kernel/syscall/threads.cee", "kernel/syscall/threads.c",
+     "The native calls on threads, futexes, sleeping and the clocks (syscall.h)", None, False),
     ("kernel/module/modelf.cee", "kernel/module/modelf.c", "ET_REL module image validation and layout (modelf.h)", None,
      False),
     ("kernel/module/modspec.cee", "kernel/module/modspec.c", "The module.cycle= specification's parsers (module.h)", None,

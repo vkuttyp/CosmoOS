@@ -92,6 +92,21 @@ int64_t sys_vcpu_run(struct syscall_args *a);
 int64_t sys_vcpu_stop(struct syscall_args *a);
 int64_t sys_vcpu_irq(struct syscall_args *a);
 
+/* The native calls on processes' threads, futexes, sleeping and the
+ * clocks (kernel/syscall/threads.cee). */
+int64_t sys_exit(struct syscall_args *a);
+int64_t sys_getpid(struct syscall_args *a);
+int64_t sys_thread_self(struct syscall_args *a);
+int64_t sys_futex_wait(struct syscall_args *a);
+int64_t sys_futex_wake(struct syscall_args *a);
+int64_t sys_futex_requeue(struct syscall_args *a);
+int64_t sys_set_tls(struct syscall_args *a);
+int64_t sys_thread_exit(struct syscall_args *a);
+int64_t sys_thread_create(struct syscall_args *a);
+int64_t sys_yield(struct syscall_args *a);
+int64_t sys_sleep_ns(struct syscall_args *a);
+int64_t sys_clock_ns(struct syscall_args *a);
+
 /* The native calls on sessions, the terminal, credentials, limits,
  * readiness and the blocking mode (kernel/syscall/jobctl.cee). */
 int64_t sys_setpgid(struct syscall_args *a);

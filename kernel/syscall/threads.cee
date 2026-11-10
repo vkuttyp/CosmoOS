@@ -1,0 +1,298 @@
+// threads.cee - The native personality's calls on processes' threads, futexes, sleeping and the clocks
+// (uapi/cosmo/syscall.h), in CeeSafe (roadmap 2.0 SA8): exit, getpid, thread_self, futex_wait, futex_wake,
+// futex_requeue, set_tls, thread_exit, thread_create, yield, sleep_ns and clock_ns. native.c's table names them
+// (syscall.h).
+//
+// struct cosmo_thread is a CeeSafe struct of the same layout, and a struct arch_user_regs a local of the larger
+// architecture's size, both of which the C compiler checks (the extern block). The top-of-stack write is one word,
+// which is ARCH_THREAD_TOP_BYTES on every architecture (TOP_IS_A_WORD).
+
+@header(
+    "arch/user.h", "kernel/errno.h", "kernel/futex.h", "kernel/process.h", "kernel/sched.h", "kernel/syscall.h",
+    "kernel/thread.h", "kernel/timer.h", "kernel/uaccess.h", "kernel/wait.h", "uapi/cosmo/syscall.h",
+)
+extern "C" {
+    struct syscall_args {
+        a: [u64; 6];
+    }
+    struct vm_space;
+    struct process {
+        pid: u32;
+        space: *mut vm_space;
+    }
+    struct thread {
+        user_tid: u32;
+        clear_child_tid: u64;
+    }
+    struct arch_user_regs;
+    struct cosmo_thread;
+
+    @cvalue(
+        "sizeof(struct cosmo_thread) == 48 && offsetof(struct cosmo_thread, arg) == 8 && offsetof(struct cosmo_thread, stack_top) == 16 && offsetof(struct cosmo_thread, tls) == 24 && offsetof(struct cosmo_thread, clear_tid) == 32 && offsetof(struct cosmo_thread, flags) == 40 && offsetof(struct cosmo_thread, reserved) == 44 && sizeof(unsigned) == 4",
+    )
+    const COSMO_THREAD_LAYOUT: bool = true;
+    @cvalue(
+        "sizeof(struct arch_user_regs) <= 34 * sizeof(uint64_t) && _Alignof(struct arch_user_regs) <= sizeof(uint64_t)",
+    )
+    const REGS_FIT: bool = true;
+    const ARCH_THREAD_TOP_BYTES: u64 = 8;
+    @cvalue("ARCH_THREAD_TOP_BYTES == sizeof(uint64_t)")
+    const TOP_IS_A_WORD: bool = true;
+    const COSMO_CLOCK_MONOTONIC: u32 = 0;
+    const COSMO_CLOCK_REALTIME: u32 = 1;
+    const NS_PER_SEC: u64 = 1000000000;
+    const INT64_MAX: u64 = 0x7FFFFFFFFFFFFFFF;
+    const EFAULT: i32 = 14;
+    const EINVAL: i32 = 22;
+
+    fn process_current() -> *mut process;
+    fn thread_current() -> *mut thread;
+    fn process_exit(status: i32);        // __noreturn
+    fn process_thread_exit(status: i32); // __noreturn
+    fn user_range_ok(addr: u64, len: usize) -> bool;
+    fn copy_from_user(dst: *mut void, userSrc: u64, len: usize) -> i32;
+    fn copy_to_user(userDst: u64, src: *void, len: usize) -> i32;
+    fn futex_wait(space: *mut vm_space, uaddr: u64, val: u32, timeoutNs: u64, isPrivate: bool) -> i32;
+    fn futex_wake(space: *mut vm_space, uaddr: u64, n: u32, isPrivate: bool) -> i32;
+    fn futex_requeue(
+        space: *mut vm_space,
+        uaddr1: u64,
+        uaddr2: u64,
+        nrWake: u32,
+        nrRequeue: u32,
+        compare: bool,
+        val: u32,
+        isPrivate: bool,
+    ) -> i32;
+    fn arch_set_tls_base(base: usize);
+    fn arch_user_regs_init_thread(r: *mut arch_user_regs, entry: usize, arg: usize, sp: usize);
+    fn process_add_thread(p: *mut process, regs: *arch_user_regs, tls: usize, out: *mut *mut thread) -> i32;
+    fn process_thread_start(t: *mut thread);
+    fn process_thread_abandon(t: *mut thread);
+    fn sched_yield();
+    fn thread_sleep_ns_killable(ns: u64) -> i32;
+    fn clock_now_ns() -> u64;
+    fn clock_realtime_ns() -> u64;
+}
+
+/// A struct cosmo_thread (COSMO_THREAD_LAYOUT).
+struct ThreadReq {
+    entry: u64;
+    arg: u64;
+    stackTop: u64;
+    tls: u64;
+    clearTid: u64;
+    flags: u32;
+    reserved: u32;
+}
+
+/// Safety: the dispatcher's: `a` is the call's arguments.
+unsafe fn arg(a: *mut syscall_args, i: usize) -> u64 => Ptr.toBorrow(a as *syscall_args).a[i];
+
+/// The calling process's address space.
+/// Safety: in a process's thread.
+unsafe fn space() -> *mut vm_space => Ptr.toBorrow(process_current() as *process).space;
+
+/// Safety: the dispatcher's.
+@export("sys_exit")
+unsafe fn exit(a: *mut syscall_args) -> i64 {
+    process_exit(truncate<i32>(arg(a, 0)));
+    return 0; // not reached: process_exit does not return
+}
+
+/// Safety: the dispatcher's.
+@export("sys_getpid")
+unsafe fn getpid(a: *mut syscall_args) -> i64 {
+    let _ = a;
+    return Ptr.toBorrow(process_current() as *process).pid as i64;
+}
+
+/// The caller's own thread id: the pid for a process's first thread, so a single-threaded program's answer is its pid,
+/// as on Linux.
+/// Safety: the dispatcher's.
+@export("sys_thread_self")
+unsafe fn threadSelf(a: *mut syscall_args) -> i64 {
+    let _ = a;
+    return Ptr.toBorrow(thread_current() as *thread).user_tid as i64;
+}
+
+/// Wait while the word still holds `val`, and wake waiters on it. The futex itself requires 4-byte alignment
+/// (-EINVAL) and does the compare and the enqueue under one lock, so a wake between them cannot be lost; these add only
+/// the range check.
+///
+/// The timer's deadline used to be a bare clock_now_ns() + this, so a duration near the top of the range wrapped into
+/// the past and expired at once -- the opposite of what the caller asked for. It saturates now (clock_deadline_ns), and
+/// this check stays anyway: a syscall should refuse an impossible duration rather than silently turn it into "never".
+/// Anything past INT64_MAX (292 years) is -EINVAL; 0 is still "no timeout".
+/// Safety: the dispatcher's.
+@export("sys_futex_wait")
+unsafe fn futexWait(a: *mut syscall_args) -> i64 {
+    if (!user_range_ok(arg(a, 0), 4)) {
+        return -EFAULT as i64;
+    }
+    if (arg(a, 2) > INT64_MAX) {
+        return -EINVAL as i64;
+    }
+    return futex_wait(space(), arg(a, 0), truncate<u32>(arg(a, 1)), arg(a, 2), false) as i64;
+}
+
+/// Safety: the dispatcher's.
+@export("sys_futex_wake")
+unsafe fn futexWake(a: *mut syscall_args) -> i64 {
+    if (!user_range_ok(arg(a, 0), 4)) {
+        return -EFAULT as i64;
+    }
+    return futex_wake(space(), arg(a, 0), truncate<u32>(arg(a, 1)), false) as i64;
+}
+
+/// Wake up to `nr_wake` waiters on the first word and move up to `nr_requeue` more onto the second without waking
+/// them -- if the first word still holds `val`, else -EAGAIN and nobody moved. The compare form only: the native ABI is
+/// new and need not carry the non-comparing FUTEX_REQUEUE's lost-wakeup race for compatibility with nothing
+/// (docs/audit/next-subsystem-native-thread-door.md). The kernel never reads the second word -- it is a key, not a
+/// load -- which is what lets libc's broadcast hand it a pointer it has not dereferenced itself. Returns woken +
+/// requeued, as the Linux door reports. The native calls always classify: the kernel can see what the word maps.
+/// Safety: the dispatcher's.
+@export("sys_futex_requeue")
+unsafe fn futexRequeue(a: *mut syscall_args) -> i64 {
+    if (!user_range_ok(arg(a, 0), 4) || !user_range_ok(arg(a, 1), 4)) {
+        return -EFAULT as i64;
+    }
+    return futex_requeue(
+        space(),
+        arg(a, 0),
+        arg(a, 1),
+        truncate<u32>(arg(a, 2)),
+        truncate<u32>(arg(a, 3)),
+        true,
+        truncate<u32>(arg(a, 4)),
+        false,
+    ) as i64;
+}
+
+/// The calling thread's thread pointer, and only the calling thread's: a thread pointer is the definition of
+/// per-thread state, so this is shaped like sigprocmask and not like the syscall filter. SYS_thread_create's `tls`
+/// remains how a *new* thread gets one before its first instruction; this is how a thread that already exists gets
+/// one, which in practice means a process's first thread, from libc's startup.
+///
+/// Zero is legal, and is what every thread has until something sets it.
+///
+/// The range check is eight bytes because eight is what the kernel can honestly promise: libc's block is libc's
+/// business and its size is not the kernel's to know, but on x86-64 the architecture itself dereferences the first
+/// word through %fs:0, so a base whose first word is not in the caller's space is wrong on its face. The alignment is
+/// 16, which every layout a C ABI will put there wants anyway.
+/// Safety: the dispatcher's.
+@export("sys_set_tls")
+unsafe fn setTls(a: *mut syscall_args) -> i64 {
+    let base = arg(a, 0);
+    if (base % 16 != 0) {
+        return -EINVAL as i64;
+    }
+    if (base != 0 && !user_range_ok(base, 8)) {
+        return -EFAULT as i64;
+    }
+    arch_set_tls_base(truncate<usize>(base));
+    return 0;
+}
+
+/// This thread ends; the process ends with the last of them, carrying that thread's status. SYS_exit remains the
+/// process.
+/// Safety: the dispatcher's.
+@export("sys_thread_exit")
+unsafe fn threadExit(a: *mut syscall_args) -> i64 {
+    process_thread_exit(truncate<i32>(arg(a, 0)));
+    return 0; // not reached: process_thread_exit does not return
+}
+
+/// A thread of the calling process, at `entry` on a stack the caller owns. The order here is the order the failure
+/// modes want: everything before process_add_thread fails with nothing created, and everything after it fails with
+/// process_thread_abandon.
+/// Safety: the dispatcher's.
+@export("sys_thread_create")
+unsafe fn threadCreate(a: *mut syscall_args) -> i64 {
+    var req = ThreadReq { entry: 0, arg: 0, stackTop: 0, tls: 0, clearTid: 0, flags: 0, reserved: 0 };
+    if (copy_from_user(borrow mut req as *mut ThreadReq as *mut void, arg(a, 0), 48) != 0) {
+        return -EFAULT as i64;
+    }
+    if (req.flags != 0 || req.reserved != 0 || req.entry == 0 || req.stackTop == 0) {
+        return -EINVAL as i64;
+    }
+    if (req.stackTop % 16 != 0 || req.stackTop <= ARCH_THREAD_TOP_BYTES) {
+        return -EINVAL as i64;
+    }
+    if (req.clearTid % 4 != 0) {
+        return -EINVAL as i64;
+    }
+    if (req.clearTid != 0 && !user_range_ok(req.clearTid, 4)) {
+        return -EFAULT as i64;
+    }
+
+    // The top of the stack: x86-64's return slot, and on every architecture the write that proves the stack is really
+    // there. Done before anything is linked, because an aligned stack_top can still be unmapped or read-only and a
+    // failure here must leave nothing behind. Uniform across architectures deliberately: a validation that one
+    // architecture performed and the other did not would let a program that only runs on one create a thread doomed to
+    // fault on its first push.
+    let top: u64 = 0;
+    let at = req.stackTop - ARCH_THREAD_TOP_BYTES;
+    if (!user_range_ok(at, 8) || copy_to_user(at, borrow top as *u64 as *void, 8) != 0) {
+        return -EFAULT as i64;
+    }
+
+    var regs = [0u64; 34];
+    let rp = borrow mut regs as *mut [u64; 34] as *mut arch_user_regs;
+    arch_user_regs_init_thread(rp, truncate<usize>(req.entry), truncate<usize>(req.arg), truncate<usize>(req.stackTop));
+
+    var t = 0 as *mut thread;
+    let rc = process_add_thread(
+        process_current(),
+        rp as *arch_user_regs,
+        truncate<usize>(req.tls),
+        borrow mut t as *mut *mut thread,
+    );
+    if (rc != 0) {
+        return rc as i64;
+    }
+    let tid = Ptr.toBorrow(t as *thread).user_tid;
+    if (req.clearTid != 0) {
+        let tm = Ptr.toBorrowMut(t);
+        tm.clear_child_tid = req.clearTid;
+        // Before the start, so the word's only two states are this id and the zero the exit writes: a caller that
+        // wrote it afterwards could lose the race to a child that had already finished.
+        if (copy_to_user(req.clearTid, borrow tid as *u32 as *void, 4) != 0) {
+            process_thread_abandon(t);
+            return -EFAULT as i64;
+        }
+    }
+    process_thread_start(t);
+    return tid as i64;
+}
+
+/// Safety: the dispatcher's.
+@export("sys_yield")
+unsafe fn yieldCpu(a: *mut syscall_args) -> i64 {
+    let _ = a;
+    sched_yield();
+    return 0;
+}
+
+/// Safety: the dispatcher's.
+@export("sys_sleep_ns")
+unsafe fn sleepNs(a: *mut syscall_args) -> i64 {
+    let ns = arg(a, 0);
+    if (ns > 3600 * NS_PER_SEC) {
+        return -EINVAL as i64;
+    }
+    return thread_sleep_ns_killable(ns) as i64;
+}
+
+/// Safety: the dispatcher's.
+@export("sys_clock_ns")
+unsafe fn clockNs(a: *mut syscall_args) -> i64 {
+    let clock = truncate<u32>(arg(a, 0));
+    if (clock == COSMO_CLOCK_MONOTONIC) {
+        return truncate<i64>(clock_now_ns());
+    }
+    if (clock == COSMO_CLOCK_REALTIME) {
+        return truncate<i64>(clock_realtime_ns());
+    }
+    return -EINVAL as i64;
+}
