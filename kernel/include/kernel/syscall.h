@@ -92,6 +92,13 @@ int64_t sys_vcpu_run(struct syscall_args *a);
 int64_t sys_vcpu_stop(struct syscall_args *a);
 int64_t sys_vcpu_irq(struct syscall_args *a);
 
+/* The native calls on reading, writing, the log and closing
+ * (kernel/syscall/io.cee). */
+int64_t sys_read(struct syscall_args *a);
+int64_t sys_write(struct syscall_args *a);
+int64_t sys_log(struct syscall_args *a);
+int64_t sys_close(struct syscall_args *a);
+
 /* The native calls on mappings (kernel/syscall/mmap.cee). */
 int64_t sys_mmap(struct syscall_args *a);
 int64_t sys_msync(struct syscall_args *a);
