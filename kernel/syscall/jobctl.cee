@@ -1,0 +1,363 @@
+// jobctl.cee - The native personality's calls on sessions, process groups and the terminal, credentials, resource
+// limits and an object's readiness and blocking mode (uapi/cosmo/syscall.h), in CeeSafe (roadmap 2.0 SA8). native.c's
+// table names them (syscall.h).
+//
+// The records copied in and out -- struct cosmo_termios and struct cosmo_ttysize -- are CeeSafe structs of the same
+// layout, which the C compiler checks (the extern block).
+
+@header(
+    "kernel/cred.h", "kernel/errno.h", "kernel/handle.h", "kernel/object.h", "kernel/process.h", "kernel/syscall.h",
+    "kernel/tty.h", "kernel/uaccess.h", "uapi/cosmo/syscall.h",
+)
+extern "C" {
+    struct syscall_args {
+        a: [u64; 6];
+    }
+    struct handle_table;
+    struct process {
+        handles: handle_table;
+    }
+    struct kobject;
+    struct tty;
+    struct cosmo_termios;
+    struct cosmo_ttysize;
+    struct credentials {
+        ruid: u32;
+        euid: u32;
+        suid: u32;
+        rgid: u32;
+        egid: u32;
+        sgid: u32;
+        ngroups: u32;
+        groups: [u32; 16];
+    }
+
+    @cvalue(
+        "sizeof(struct cosmo_termios) == 8 && offsetof(struct cosmo_termios, vmin) == 4 && offsetof(struct cosmo_termios, vtime) == 5 && offsetof(struct cosmo_termios, reserved) == 6",
+    )
+    const TERMIOS_LAYOUT: bool = true;
+    @cvalue(
+        "sizeof(struct cosmo_ttysize) == 8 && offsetof(struct cosmo_ttysize, rows) == 2 && offsetof(struct cosmo_ttysize, reserved) == 4",
+    )
+    const TTYSIZE_LAYOUT: bool = true;
+    const CRED_NGROUPS_MAX: u32 = 16;
+    const COSMO_TTY_MODES: u32 = 0x3f;
+    const HANDLE_RIGHT_MANAGE: u32 = 16;
+    const EPERM: i32 = 1;
+    const EBADF: i32 = 9;
+    const EFAULT: i32 = 14;
+    const EINVAL: i32 = 22;
+    const ENOTTY: i32 = 25;
+
+    fn process_current() -> *mut process;
+    fn cred_current() -> *credentials;
+    fn copy_from_user(dst: *mut void, userSrc: u64, len: usize) -> i32;
+    fn copy_to_user(userDst: u64, src: *void, len: usize) -> i32;
+    fn process_setpgid(pid: u32, pgid: u32) -> i32;
+    fn process_getpgid(pid: u32, out: *mut u32) -> i32;
+    fn process_setsid(out: *mut u32) -> i32;
+    fn process_getsid(pid: u32, out: *mut u32) -> i32;
+    fn process_setresuid(ruid: i64, euid: i64, suid: i64) -> i32;
+    fn process_setresgid(rgid: i64, egid: i64, sgid: i64) -> i32;
+    fn process_setgroups(groups: *u32, n: u32) -> i32;
+    fn process_getrlimit(resource: u32, value: *mut u64) -> i32;
+    fn process_setrlimit(resource: u32, value: u64) -> i32;
+    fn handle_get(t: *mut handle_table, h: i32, rightsOut: *mut u32) -> *mut kobject;
+    fn handle_lookup(t: *mut handle_table, h: i32, rightsNeeded: u32) -> *mut kobject;
+    fn handle_lookup_rights(t: *mut handle_table, h: i32, rightsNeeded: u32, missingRights: *mut bool) -> *mut kobject;
+    fn kobject_put(obj: *mut kobject);
+    fn kobject_ready(obj: *mut kobject) -> u32;
+    fn kobject_set_nonblock(obj: *mut kobject, on: i32) -> i32;
+    fn tty_of_open(obj: *mut kobject) -> *mut tty;
+    fn tty_put(t: *mut tty);
+    fn tty_get_pgrp(t: *mut tty, out: *mut u32) -> i32;
+    fn tty_set_pgrp(t: *mut tty, pgid: u32) -> i32;
+    fn tty_get_termios(t: *mut tty, out: *mut cosmo_termios);
+    fn tty_set_termios(t: *mut tty, tio: *cosmo_termios);
+    fn tty_get_size(t: *mut tty, out: *mut cosmo_ttysize);
+}
+
+/// A struct cosmo_termios (TERMIOS_LAYOUT).
+struct Termios {
+    modes: u32;
+    vmin: u8;
+    vtime: u8;
+    reserved: u16;
+}
+
+/// A struct cosmo_ttysize (TTYSIZE_LAYOUT).
+struct TtySize {
+    cols: u16;
+    rows: u16;
+    reserved: u32;
+}
+
+/// Safety: the dispatcher's: `a` is the call's arguments.
+unsafe fn arg(a: *mut syscall_args, i: usize) -> u64 => Ptr.toBorrow(a as *syscall_args).a[i];
+
+/// The `i`th argument as C's (int) sees it.
+/// Safety: the dispatcher's.
+unsafe fn arg32(a: *mut syscall_args, i: usize) -> i32 => truncate<i32>(arg(a, i));
+
+/// The `i`th argument as a pid_t, through C's (int).
+/// Safety: the dispatcher's.
+unsafe fn argPid(a: *mut syscall_args, i: usize) -> u32 => truncate<u32>(arg(a, i));
+
+/// The calling process's handle table.
+/// Safety: in a process's thread.
+unsafe fn handles() -> *mut handle_table {
+    let p = Ptr.toBorrowMut(process_current());
+    return borrow mut p.handles as *mut handle_table;
+}
+
+/// `rc`, or `value` when `rc` is 0.
+fn orValue(rc: i32, value: u32) -> i64 => if (rc != 0) rc as i64 else value as i64;
+
+// --- sessions, process groups and the terminal ---------------------------------------------------------------------
+
+/// Safety: the dispatcher's.
+@export("sys_setpgid")
+unsafe fn setpgid(a: *mut syscall_args) -> i64 => process_setpgid(argPid(a, 0), argPid(a, 1)) as i64;
+
+/// Safety: the dispatcher's.
+@export("sys_getpgid")
+unsafe fn getpgid(a: *mut syscall_args) -> i64 {
+    var pgid: u32 = 0;
+    let rc = process_getpgid(argPid(a, 0), borrow mut pgid as *mut u32);
+    return orValue(rc, pgid);
+}
+
+/// Safety: the dispatcher's.
+@export("sys_setsid")
+unsafe fn setsid(a: *mut syscall_args) -> i64 {
+    let _ = a;
+    var sid: u32 = 0;
+    let rc = process_setsid(borrow mut sid as *mut u32);
+    return orValue(rc, sid);
+}
+
+/// Safety: the dispatcher's.
+@export("sys_getsid")
+unsafe fn getsid(a: *mut syscall_args) -> i64 {
+    var sid: u32 = 0;
+    let rc = process_getsid(argPid(a, 0), borrow mut sid as *mut u32);
+    return orValue(rc, sid);
+}
+
+/// The tty behind a handle, referenced (the caller puts it), or null with the error in `err`. There are two ways to
+/// hold one: the console kobject that init inherits as handles 0, 1 and 2, and an open file on `/dev/console` or
+/// `/dev/tty`. Both are terminals and both must answer -- a program that opened `/dev/tty` because it had closed
+/// handle 0 would otherwise be told the thing it just opened is not a terminal.
+/// Safety: in a process's thread.
+unsafe fn ttyOfHandle(h: i32, err: borrow mut i32) -> *mut tty {
+    var rights: u32 = 0;
+    let obj = handle_get(handles(), h, borrow mut rights as *mut u32);
+    if (obj.isNull()) {
+        *err = -EBADF;
+        return 0 as *mut tty;
+    }
+    let t = tty_of_open(obj);
+    kobject_put(obj);
+    if (t.isNull()) {
+        *err = -ENOTTY;
+    }
+    return t;
+}
+
+/// Safety: the dispatcher's.
+@export("sys_tcgetpgrp")
+unsafe fn tcgetpgrp(a: *mut syscall_args) -> i64 {
+    var err: i32 = 0;
+    let t = ttyOfHandle(arg32(a, 0), mut err);
+    if (t.isNull()) {
+        return err as i64;
+    }
+    var pgid: u32 = 0;
+    let rc = tty_get_pgrp(t, borrow mut pgid as *mut u32);
+    tty_put(t);
+    return orValue(rc, pgid);
+}
+
+/// Safety: the dispatcher's.
+@export("sys_tcgetattr")
+unsafe fn tcgetattr(a: *mut syscall_args) -> i64 {
+    var err: i32 = 0;
+    let t = ttyOfHandle(arg32(a, 0), mut err);
+    if (t.isNull()) {
+        return err as i64;
+    }
+    var tio = Termios { modes: 0, vmin: 0, vtime: 0, reserved: 0 };
+    tty_get_termios(t, borrow mut tio as *mut Termios as *mut cosmo_termios);
+    tty_put(t);
+    return if (copy_to_user(arg(a, 1), borrow tio as *Termios as *void, 8) != 0) -EFAULT as i64 else 0;
+}
+
+/// Safety: the dispatcher's.
+@export("sys_tcsetattr")
+unsafe fn tcsetattr(a: *mut syscall_args) -> i64 {
+    var err: i32 = 0;
+    let t = ttyOfHandle(arg32(a, 0), mut err);
+    if (t.isNull()) {
+        return err as i64;
+    }
+    var tio = Termios { modes: 0, vmin: 0, vtime: 0, reserved: 0 };
+    var rc: i32 = 0;
+    if (copy_from_user(borrow mut tio as *mut Termios as *mut void, arg(a, 1), 8) != 0) {
+        rc = -EFAULT;
+    } else if ((tio.modes & (COSMO_TTY_MODES ^ 0xFFFFFFFF)) != 0 || tio.reserved != 0) {
+        // A mode this kernel does not have is a program asking for behaviour it will not get, which is worth refusing
+        // rather than silently dropping.
+        rc = -EINVAL;
+    } else {
+        tty_set_termios(t, borrow tio as *Termios as *cosmo_termios);
+    }
+    tty_put(t);
+    return rc as i64;
+}
+
+/// Safety: the dispatcher's.
+@export("sys_ttysize")
+unsafe fn ttysize(a: *mut syscall_args) -> i64 {
+    var err: i32 = 0;
+    let t = ttyOfHandle(arg32(a, 0), mut err);
+    if (t.isNull()) {
+        return err as i64;
+    }
+    var sz = TtySize { cols: 0, rows: 0, reserved: 0 };
+    tty_get_size(t, borrow mut sz as *mut TtySize as *mut cosmo_ttysize);
+    tty_put(t);
+    return if (copy_to_user(arg(a, 1), borrow sz as *TtySize as *void, 8) != 0) -EFAULT as i64 else 0;
+}
+
+/// Safety: the dispatcher's.
+@export("sys_tcsetpgrp")
+unsafe fn tcsetpgrp(a: *mut syscall_args) -> i64 {
+    var err: i32 = 0;
+    let t = ttyOfHandle(arg32(a, 0), mut err);
+    if (t.isNull()) {
+        return err as i64;
+    }
+    let pgid = arg32(a, 1);
+    let rc = if (pgid <= 0) -EINVAL else tty_set_pgrp(t, truncate<u32>(pgid));
+    tty_put(t);
+    return rc as i64;
+}
+
+// --- credentials ---------------------------------------------------------------------------------------------------
+
+/// Safety: the dispatcher's.
+@export("sys_setresuid")
+unsafe fn setresuid(a: *mut syscall_args) -> i64 =>
+    process_setresuid(truncate<i64>(arg(a, 0)), truncate<i64>(arg(a, 1)), truncate<i64>(arg(a, 2))) as i64;
+
+/// Safety: the dispatcher's.
+@export("sys_setresgid")
+unsafe fn setresgid(a: *mut syscall_args) -> i64 =>
+    process_setresgid(truncate<i64>(arg(a, 0)), truncate<i64>(arg(a, 1)), truncate<i64>(arg(a, 2))) as i64;
+
+/// Copy the three ids out to the three pointers the call names.
+/// Safety: the dispatcher's.
+unsafe fn putThree(a: *mut syscall_args, r: u32, e: u32, s: u32) -> i64 {
+    if (copy_to_user(arg(a, 0), borrow r as *u32 as *void, 4) != 0 ||
+        copy_to_user(arg(a, 1), borrow e as *u32 as *void, 4) != 0 ||
+        copy_to_user(arg(a, 2), borrow s as *u32 as *void, 4) != 0) {
+        return -EFAULT as i64;
+    }
+    return 0;
+}
+
+/// Safety: the dispatcher's.
+@export("sys_getresuid")
+unsafe fn getresuid(a: *mut syscall_args) -> i64 {
+    let c = Ptr.toBorrow(cred_current());
+    return putThree(a, c.ruid, c.euid, c.suid);
+}
+
+/// Safety: the dispatcher's.
+@export("sys_getresgid")
+unsafe fn getresgid(a: *mut syscall_args) -> i64 {
+    let c = Ptr.toBorrow(cred_current());
+    return putThree(a, c.rgid, c.egid, c.sgid);
+}
+
+/// Safety: the dispatcher's.
+@export("sys_setgroups")
+unsafe fn setgroups(a: *mut syscall_args) -> i64 {
+    let n = arg(a, 1);
+    if (n > CRED_NGROUPS_MAX as u64) {
+        return -EINVAL as i64;
+    }
+    var groups = [0u32; 16];
+    if (n != 0 && copy_from_user(
+        borrow mut groups as *mut [u32; 16] as *mut void,
+        arg(a, 0),
+        truncate<usize>(n) * 4,
+    ) != 0) {
+        return -EFAULT as i64;
+    }
+    return process_setgroups(borrow groups as *[u32; 16] as *u32, truncate<u32>(n)) as i64;
+}
+
+/// Safety: the dispatcher's.
+@export("sys_getgroups")
+unsafe fn getgroups(a: *mut syscall_args) -> i64 {
+    let c = Ptr.toBorrow(cred_current());
+    let n = arg(a, 1);
+    if (n == 0) {
+        return c.ngroups as i64;
+    }
+    if (n < c.ngroups as u64) {
+        return -EINVAL as i64;
+    }
+    if (c.ngroups != 0 && copy_to_user(
+        arg(a, 0),
+        borrow c.groups as *[u32; 16] as *void,
+        c.ngroups as usize * 4,
+    ) != 0) {
+        return -EFAULT as i64;
+    }
+    return c.ngroups as i64;
+}
+
+// --- resource limits, readiness and the blocking mode --------------------------------------------------------------
+
+/// Safety: the dispatcher's.
+@export("sys_getrlimit")
+unsafe fn getrlimit(a: *mut syscall_args) -> i64 {
+    var v: u64 = 0;
+    let rc = process_getrlimit(truncate<u32>(arg(a, 0)), borrow mut v as *mut u64);
+    if (rc != 0) {
+        return rc as i64;
+    }
+    return copy_to_user(arg(a, 1), borrow v as *u64 as *void, 8) as i64;
+}
+
+/// Safety: the dispatcher's.
+@export("sys_setrlimit")
+unsafe fn setrlimit(a: *mut syscall_args) -> i64 => process_setrlimit(truncate<u32>(arg(a, 0)), arg(a, 1)) as i64;
+
+/// Safety: the dispatcher's.
+@export("sys_ioready")
+unsafe fn ioready(a: *mut syscall_args) -> i64 {
+    let obj = handle_lookup(handles(), arg32(a, 0), 0);
+    if (obj.isNull()) {
+        return -EBADF as i64;
+    }
+    let r = kobject_ready(obj);
+    kobject_put(obj);
+    return r as i64;
+}
+
+/// Making an object non-blocking changes how it behaves rather than what it holds, which is what MANAGE is for.
+/// Safety: the dispatcher's.
+@export("sys_setnonblock")
+unsafe fn setnonblock(a: *mut syscall_args) -> i64 {
+    var noRights = false;
+    let obj = handle_lookup_rights(handles(), arg32(a, 0), HANDLE_RIGHT_MANAGE, borrow mut noRights as *mut bool);
+    if (obj.isNull()) {
+        return if (noRights) -EPERM as i64 else -EBADF as i64;
+    }
+    let rc = kobject_set_nonblock(obj, if (arg(a, 1) != 0) 1 else 0);
+    kobject_put(obj);
+    return if (rc < 0) rc as i64 else 0;
+}

@@ -92,6 +92,28 @@ int64_t sys_vcpu_run(struct syscall_args *a);
 int64_t sys_vcpu_stop(struct syscall_args *a);
 int64_t sys_vcpu_irq(struct syscall_args *a);
 
+/* The native calls on sessions, the terminal, credentials, limits,
+ * readiness and the blocking mode (kernel/syscall/jobctl.cee). */
+int64_t sys_setpgid(struct syscall_args *a);
+int64_t sys_getpgid(struct syscall_args *a);
+int64_t sys_setsid(struct syscall_args *a);
+int64_t sys_getsid(struct syscall_args *a);
+int64_t sys_tcgetpgrp(struct syscall_args *a);
+int64_t sys_tcgetattr(struct syscall_args *a);
+int64_t sys_tcsetattr(struct syscall_args *a);
+int64_t sys_ttysize(struct syscall_args *a);
+int64_t sys_tcsetpgrp(struct syscall_args *a);
+int64_t sys_setresuid(struct syscall_args *a);
+int64_t sys_setresgid(struct syscall_args *a);
+int64_t sys_getresuid(struct syscall_args *a);
+int64_t sys_getresgid(struct syscall_args *a);
+int64_t sys_setgroups(struct syscall_args *a);
+int64_t sys_getgroups(struct syscall_args *a);
+int64_t sys_getrlimit(struct syscall_args *a);
+int64_t sys_setrlimit(struct syscall_args *a);
+int64_t sys_ioready(struct syscall_args *a);
+int64_t sys_setnonblock(struct syscall_args *a);
+
 /* The native signal ABI (kernel/process/native_signal.c): the frame a
  * handler runs on, and the four calls that install and mask signals. */
 int native_signal_frame(struct arch_user_regs *regs, const struct sigaction_k *act,
