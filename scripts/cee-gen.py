@@ -265,6 +265,8 @@ PORTS = [
      False),
     ("compat/linux/lxconv.cee", "compat/linux/lxconv.c",
      "The Linux personality's decoders, and the conversions fuzz_linux drives (convert.h)", None, False),
+    ("compat/linux/netioctl.cee", "compat/linux/netioctl.c",
+     "Linux's interface ioctls on a socket (linux_internal.h)", None, True),
     ("kernel-services/network/netparse.cee", "kernel-services/network/netparse.c",
      "The network receive path's decoders: frames, TCP segments, DHCP and DNS (netparse_types.h)",
      "kernel/include/kernel/net/netparse_types.h", False),

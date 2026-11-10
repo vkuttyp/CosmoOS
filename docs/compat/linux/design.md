@@ -248,7 +248,7 @@ length honoured, full size reported). `setsockopt` returns 0 for
 are built since the unix-sockets unit (with `AF_UNIX` and `SCM_RIGHTS`).
 `getsockopt(SO_PEERCRED)` answers on a connected unix stream socket.
 
-### Interface ioctls (`netioctl.c`; shell completeness S1)
+### Interface ioctls (`netioctl.cee`; shell completeness S1)
 
 BusyBox's `ifconfig` asks about interfaces through netdevice(7)'s
 `SIOCGIF*` requests on any socket and configures them through `SIOCSIF*`;

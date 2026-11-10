@@ -1,0 +1,376 @@
+// netioctl.cee - Linux's interface ioctls on a socket (shell completeness S1; docs/compat/linux/design.md, "Interface
+// ioctls"), in CeeSafe (roadmap 2.0 SA8).
+//
+// BusyBox's ifconfig, route and arp learn about interfaces through netdevice(7)'s SIOCGIF* requests on any socket, and
+// configure them through SIOCSIF*. The getters translate the stack's interface listing (netif_info_by_name,
+// netif_list), so they show exactly what /proc/net, netctl and the packet paths see. The setters are PRIV_NET's, as
+// netctl's configuration is (roadmap M5), and checked before anything else, as Linux checks CAP_NET_ADMIN.
+//
+// Two setters exist only to answer: SIOCSIFMTU and SIOCSIFHWADDR take the value the interface already has and refuse
+// any other with -EOPNOTSUPP. IPv4 output never fragments and TCP's segment size is a constant, so a smaller MTU would
+// fail every full-sized send rather than shrink them; and the address a NIC filters on is the device's.
+//
+// A struct lx_ifreq is a name and a union, so it is handled here as its 40 bytes (`Ifreq`), the union's members read
+// and written little-endian at the offsets the extern block gives, which the C compiler checks; a struct netif_info is
+// a local of its size in words, checked the same way, read through the header's struct.
+
+@header(
+    "kernel/cred.h", "kernel/errno.h", "kernel/net/ether.h", "kernel/net/inet.h", "kernel/netif.h",
+    "kernel/string.h", "kernel/uaccess.h", "linux_abi.h", "linux_internal.h",
+)
+extern "C" {
+    struct credentials;
+    struct netif;
+    struct netif_info {
+        name: [u8; 8];
+        index: u32;
+        flags: u32;
+        mtu: u32;
+        mac: [u8; 6];
+        addr: u32;
+        mask: u32;
+        gateway: u32;
+    }
+    /// The Linux ABI's fields are read and written little-endian.
+    @cvalue("__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__")
+    const LITTLE_ENDIAN: bool = true;
+    @cvalue("sizeof(struct netif_info) / sizeof(uint64_t)")
+    const NETIF_INFO_WORDS: usize = 15;
+    @cvalue("_Alignof(struct netif_info) <= sizeof(uint64_t)")
+    const NETIF_INFO_ALIGN_OK: bool = true;
+    @cvalue("sizeof(struct lx_ifreq)")
+    const IFREQ_SIZE: usize = 40;
+    @cvalue("sizeof(struct lx_ifconf)")
+    const IFCONF_SIZE: usize = 16;
+    @cvalue("offsetof(struct lx_ifreq, ifr_addr.family)")
+    const IFR_FAMILY: usize = 16;
+    @cvalue("offsetof(struct lx_ifreq, ifr_addr.addr)")
+    const IFR_ADDR: usize = 20;
+    @cvalue("sizeof(((struct lx_ifreq *)0)->ifr_addr)")
+    const IFR_ADDR_SIZE: usize = 16;
+    @cvalue(
+        "offsetof(struct lx_ifreq, ifr_hwaddr.family) == 16 && offsetof(struct lx_ifreq, ifr_hwaddr.data) == 18 && sizeof(((struct lx_ifreq *)0)->ifr_hwaddr) == 16",
+    )
+    const IFR_HWADDR_LAYOUT: bool = true;
+    @cvalue("offsetof(struct lx_ifreq, ifr_flags) == 16 && offsetof(struct lx_ifreq, ifr_ivalue) == 16")
+    const IFR_VALUE_LAYOUT: bool = true;
+    @cvalue("offsetof(struct lx_ifconf, ifc_len) == 0 && offsetof(struct lx_ifconf, ifc_buf) == 8")
+    const IFCONF_LAYOUT: bool = true;
+    const LX_IFNAMSIZ: usize = 16;
+    const LX_SIOCGIFNAME: u32 = 0x8910;
+    const LX_SIOCGIFCONF: u32 = 0x8912;
+    const LX_SIOCGIFFLAGS: u32 = 0x8913;
+    const LX_SIOCSIFFLAGS: u32 = 0x8914;
+    const LX_SIOCGIFADDR: u32 = 0x8915;
+    const LX_SIOCSIFADDR: u32 = 0x8916;
+    const LX_SIOCGIFBRDADDR: u32 = 0x8919;
+    const LX_SIOCSIFBRDADDR: u32 = 0x891a;
+    const LX_SIOCGIFNETMASK: u32 = 0x891b;
+    const LX_SIOCSIFNETMASK: u32 = 0x891c;
+    const LX_SIOCGIFMETRIC: u32 = 0x891d;
+    const LX_SIOCGIFMTU: u32 = 0x8921;
+    const LX_SIOCSIFMTU: u32 = 0x8922;
+    const LX_SIOCSIFHWADDR: u32 = 0x8924;
+    const LX_SIOCGIFHWADDR: u32 = 0x8927;
+    const LX_SIOCGIFINDEX: u32 = 0x8933;
+    const LX_IFF_UP: u32 = 0x1;
+    const LX_IFF_BROADCAST: u32 = 0x2;
+    const LX_IFF_LOOPBACK: u32 = 0x8;
+    const LX_IFF_RUNNING: u32 = 0x40;
+    const LX_IFF_NOARP: u32 = 0x80;
+    const LX_IFF_MULTICAST: u32 = 0x1000;
+    const LX_ARPHRD_ETHER: u16 = 1;
+    const LX_ARPHRD_LOOPBACK: u16 = 772;
+    const LX_AF_INET: u16 = 2;
+    const NETIF_UP: u32 = 1;
+    const NETIF_LOOPBACK: u32 = 2;
+    const NETIF_NOARP: u32 = 4;
+    const NETIF_MAX: u32 = 32;
+    const PRIV_NET: u32 = 4;
+    const EPERM: i32 = 1;
+    const ENOMEM: i32 = 12;
+    const EFAULT: i32 = 14;
+    const ENODEV: i32 = 19;
+    const EINVAL: i32 = 22;
+    const ENOTTY: i32 = 25;
+    const EOPNOTSUPP: i32 = 95;
+    const EADDRNOTAVAIL: i32 = 99;
+    fn cred_current() -> *credentials;
+    fn cred_has(c: *credentials, priv: u32) -> bool;
+    fn netif_list(out: *mut netif_info, max: u32) -> u32;
+    fn netif_info_by_name(name: *CChar, out: *mut netif_info) -> bool;
+    fn netif_info_by_index(index: u32, out: *mut netif_info) -> bool;
+    fn netif_find(name: *CChar) -> *mut netif;
+    fn netif_put(nif: *mut netif);
+    fn netif_set_ipv4(nif: *mut netif, addr: u32, mask: u32, gateway: u32);
+    fn netif_set_up(nif: *mut netif, up: bool);
+    fn arp_flush(nif: *mut netif);
+    fn copy_from_user(dst: *mut void, userSrc: u64, len: usize) -> i32;
+    fn copy_to_user(userDst: u64, src: *void, len: usize) -> i32;
+}
+
+/// A struct lx_ifreq: the name, then the union's 24 bytes.
+struct Ifreq {
+    bytes: [u8; 40];
+}
+
+/// A struct lx_ifconf: ifc_len, padding, ifc_buf.
+struct Ifconf {
+    len: i32;
+    pad: u32;
+    buf: u64;
+}
+
+fn le16(b: Slice<u8>, at: usize) -> u16 => b[at] as u16 | (b[at + 1] as u16) << 8;
+
+fn le32(b: Slice<u8>, at: usize) -> u32 =>
+    b[at] as u32 | (b[at + 1] as u32) << 8 | (b[at + 2] as u32) << 16 | (b[at + 3] as u32) << 24;
+
+fn put16(b: SliceMut<u8>, at: usize, v: u16) {
+    b[at] = truncate<u8>(v);
+    b[at + 1] = truncate<u8>(v >> 8);
+}
+
+fn put32(b: SliceMut<u8>, at: usize, v: u32) {
+    for (k in 0..4u32) {
+        b[at + k as usize] = truncate<u8>(v >> (8 * k));
+    }
+}
+
+/// The flags Linux would report for this interface. RUNNING (the carrier) follows UP: no driver here reports a link
+/// state of its own.
+fn lxFlags(f: borrow netif_info) -> u16 {
+    var v: u32 = 0;
+    if ((f.flags & NETIF_UP) != 0) {
+        v |= LX_IFF_UP | LX_IFF_RUNNING;
+    }
+    if ((f.flags & NETIF_LOOPBACK) != 0) {
+        v |= LX_IFF_LOOPBACK;
+    } else {
+        v |= LX_IFF_BROADCAST | LX_IFF_MULTICAST;
+    }
+    if ((f.flags & NETIF_NOARP) != 0) {
+        v |= LX_IFF_NOARP;
+    }
+    return truncate<u16>(v);
+}
+
+/// The broadcast address a configured interface has (loopback has none).
+fn brdOf(f: borrow netif_info) -> u32 =>
+    if ((f.flags & NETIF_LOOPBACK) != 0) 0 else f.addr | (f.mask ^ 0xFFFFFFFF);
+
+/// inet.h's ntohl and htonl: a byte swap, the targets being little-endian (LITTLE_ENDIAN).
+fn swap32(v: u32) -> u32 => (v >> 24) | ((v >> 8) & 0xFF00) | ((v << 8) & 0xFF0000) | (v << 24);
+
+/// A class's natural mask, which Linux gives an address SIOCSIFADDR sets.
+fn classMask(addr: u32) -> u32 {
+    let a = swap32(addr);
+    let m: u32 = if (a < 0x80000000) 0xff000000 else if (a < 0xc0000000) 0xffff0000 else 0xffffff00;
+    return swap32(m);
+}
+
+/// Whether a mask is ones, then zeros.
+fn maskContiguous(mask: u32) -> bool {
+    let m = swap32(mask);
+    return (m & ((m ^ 0xFFFFFFFF) >> 1)) == 0;
+}
+
+/// The request's ifr_addr: an AF_INET sockaddr of `addr`.
+fn putAddr(r: borrow mut Ifreq, addr: u32) {
+    r.bytes[IFR_FAMILY..IFR_FAMILY + IFR_ADDR_SIZE].fill(0);
+    put16(mut r.bytes[..], IFR_FAMILY, LX_AF_INET);
+    put32(mut r.bytes[..], IFR_ADDR, addr);
+}
+
+/// `name` (a C string of at most `n` bytes) into the request's ifr_name, cut to fit with its NUL, as strlcpy.
+fn putName(r: borrow mut Ifreq, name: Slice<u8>) {
+    var n: usize = 0;
+    while (n < name.length && name[n] != 0) {
+        n += 1;
+    }
+    if (n > LX_IFNAMSIZ - 1) {
+        n = LX_IFNAMSIZ - 1;
+    }
+    r.bytes[..n].copyFrom(name[..n]);
+    r.bytes[n] = 0;
+}
+
+/// SIOCGIFCONF: an AF_INET entry per interface with an IPv4 address, as Linux lists them; with no buffer, the length a
+/// full listing needs.
+/// Safety: `arg` is the caller's user address; thread context.
+unsafe fn ifconf(arg: u64) -> i64 {
+    var c = Ifconf { len: 0, pad: 0, buf: 0 };
+    if (copy_from_user(borrow mut c as *mut Ifconf as *mut void, arg, IFCONF_SIZE) != 0) {
+        return -EFAULT as i64;
+    }
+    let infoBytes = NETIF_INFO_WORDS * 8;
+    let ifs = kmalloc(NETIF_MAX as usize * infoBytes, 0) as *mut u8;
+    if (ifs.isNull()) {
+        return -ENOMEM as i64;
+    }
+    let n = netif_list(ifs as *mut netif_info, NETIF_MAX); // every interface: the registry holds no more
+    var used: u64 = 0;
+    var rc: i64 = 0;
+    for (i in 0..n) {
+        let f = Ptr.toBorrow(ifs.add(i as usize * infoBytes) as *netif_info);
+        if (f.addr == 0) {
+            continue;
+        }
+        if (c.buf != 0) {
+            if (c.len < 0 || used + IFREQ_SIZE as u64 > truncate<u64>(c.len)) {
+                break;
+            }
+            var r = Ifreq { bytes: [0; 40] };
+            putName(mut r, f.name[..]);
+            putAddr(mut r, f.addr);
+            if (copy_to_user(c.buf + used, borrow r as *Ifreq as *void, IFREQ_SIZE) != 0) {
+                rc = -EFAULT as i64;
+                break;
+            }
+        }
+        used += IFREQ_SIZE as u64;
+    }
+    kfree(ifs as *mut void);
+    if (rc != 0) {
+        return rc;
+    }
+    c.len = truncate<i32>(used); // at most NETIF_MAX records of 40 bytes
+    return if (copy_to_user(arg, borrow c as *Ifconf as *void, IFCONF_SIZE) != 0) -EFAULT as i64 else 0;
+}
+
+/// A new IPv4 configuration, as the DHCP client applies one: a change of address, mask or gateway also drops the
+/// interface's neighbours, which were learned under the old one (a reused address or a router kept on the link must
+/// be resolved afresh, not sent to a remembered MAC).
+/// Safety: `nif` is a referenced interface.
+unsafe fn setIpv4(nif: *mut netif, f: borrow netif_info, a: u32, m: u32, g: u32) {
+    if (a == f.addr && m == f.mask && g == f.gateway) {
+        return;
+    }
+    netif_set_ipv4(nif, a, m, g);
+    arp_flush(nif);
+}
+
+/// SIOCSIF{FLAGS,ADDR,NETMASK,BRDADDR,MTU,HWADDR}, PRIV_NET checked.
+/// Safety: `f` is the interface `r` names, as the stack listed it.
+unsafe fn setOne(req: u32, r: borrow Ifreq, f: borrow netif_info) -> i64 {
+    let u = r.bytes[..];
+    if (req == LX_SIOCSIFMTU) {
+        return if (le32(u, IFR_FAMILY) == f.mtu) 0 else -EOPNOTSUPP as i64;
+    }
+    if (req == LX_SIOCSIFHWADDR) {
+        return if (u[IFR_FAMILY + 2..IFR_FAMILY + 8] == f.mac[..]) 0 else -EOPNOTSUPP as i64;
+    }
+    if (req == LX_SIOCSIFBRDADDR) {
+        // There is no broadcast of its own to set: it is the address's.
+        if (f.addr == 0) {
+            return -EADDRNOTAVAIL as i64;
+        }
+        return if (le32(u, IFR_ADDR) == brdOf(f)) 0 else -EINVAL as i64;
+    }
+    let nif = netif_find(f.name[..].ptr as *CChar);
+    if (nif.isNull()) {
+        return -ENODEV as i64;
+    }
+    var rc: i64 = 0;
+    if (req == LX_SIOCSIFFLAGS) {
+        // UP is the one flag a caller sets; RUNNING follows it (Linux ignores it too). Asking for anything else --
+        // PROMISC, NOARP -- is refused rather than pretended.
+        let have = lxFlags(f);
+        let want = le16(u, IFR_FAMILY);
+        if (((have ^ want) as u32 & ((LX_IFF_UP | LX_IFF_RUNNING) ^ 0xFFFFFFFF)) != 0) {
+            rc = -EINVAL as i64;
+        } else {
+            let up = (want as u32 & LX_IFF_UP) != 0;
+            if (up != ((f.flags & NETIF_UP) != 0)) {
+                netif_set_up(nif, up);
+            }
+        }
+    } else if (req == LX_SIOCSIFADDR) {
+        if (le16(u, IFR_FAMILY) != LX_AF_INET) {
+            rc = -EINVAL as i64;
+        } else {
+            let a = le32(u, IFR_ADDR);
+            let m = if (a == 0) 0 else classMask(a); // Linux: address 0 removes it
+            // The gateway stays while it is still on the link.
+            let g = if (a != 0 && ((f.gateway ^ a) & m) == 0) f.gateway else 0;
+            setIpv4(nif, f, a, m, g);
+        }
+    } else if (req == LX_SIOCSIFNETMASK) {
+        let m = le32(u, IFR_ADDR);
+        if (f.addr == 0) {
+            rc = -EADDRNOTAVAIL as i64;
+        } else if (!maskContiguous(m)) {
+            rc = -EINVAL as i64;
+        } else {
+            let g = if (((f.gateway ^ f.addr) & m) == 0) f.gateway else 0;
+            setIpv4(nif, f, f.addr, m, g);
+        }
+    } else {
+        rc = -ENOTTY as i64;
+    }
+    netif_put(nif);
+    return rc;
+}
+
+/// An interface ioctl on a socket: `req`, with `arg` the caller's struct ifreq or ifconf.
+/// Safety: thread context; `arg` is the caller's user address.
+@export("lx_ioctl_net")
+unsafe fn ioctlNet(req: u32, arg: u64) -> i64 {
+    if (req == LX_SIOCGIFCONF) {
+        return ifconf(arg);
+    }
+    let set = req == LX_SIOCSIFFLAGS || req == LX_SIOCSIFADDR || req == LX_SIOCSIFNETMASK ||
+        req == LX_SIOCSIFBRDADDR || req == LX_SIOCSIFMTU || req == LX_SIOCSIFHWADDR;
+    let get = req == LX_SIOCGIFNAME || req == LX_SIOCGIFFLAGS || req == LX_SIOCGIFADDR || req == LX_SIOCGIFBRDADDR ||
+        req == LX_SIOCGIFNETMASK || req == LX_SIOCGIFMETRIC || req == LX_SIOCGIFMTU || req == LX_SIOCGIFHWADDR ||
+        req == LX_SIOCGIFINDEX;
+    if (!set && !get) {
+        return -ENOTTY as i64;
+    }
+    if (set && !cred_has(cred_current(), PRIV_NET)) {
+        return -EPERM as i64;
+    }
+    var r = Ifreq { bytes: [0; 40] };
+    if (copy_from_user(borrow mut r as *mut Ifreq as *mut void, arg, IFREQ_SIZE) != 0) {
+        return -EFAULT as i64;
+    }
+    r.bytes[LX_IFNAMSIZ - 1] = 0;
+    var info = [0u64; 15]; // a struct netif_info: NETIF_INFO_WORDS, which the C compiler checks
+    let fp = info[..].ptr as *mut netif_info;
+    let found = if (req == LX_SIOCGIFNAME) netif_info_by_index(le32(r.bytes[..], IFR_FAMILY), fp)
+        else netif_info_by_name(r.bytes[..].ptr as *CChar, fp);
+    if (!found) {
+        return -ENODEV as i64;
+    }
+    let f = Ptr.toBorrow(fp as *netif_info);
+    if (set) {
+        return setOne(req, r, f);
+    }
+    if (req == LX_SIOCGIFNAME) {
+        r.bytes[..LX_IFNAMSIZ].fill(0);
+        putName(mut r, f.name[..]);
+    } else if (req == LX_SIOCGIFINDEX) {
+        put32(mut r.bytes[..], IFR_FAMILY, f.index);
+    } else if (req == LX_SIOCGIFFLAGS) {
+        put16(mut r.bytes[..], IFR_FAMILY, lxFlags(f));
+    } else if (req == LX_SIOCGIFMETRIC) {
+        put32(mut r.bytes[..], IFR_FAMILY, 0); // Linux's is always 0
+    } else if (req == LX_SIOCGIFMTU) {
+        put32(mut r.bytes[..], IFR_FAMILY, f.mtu);
+    } else if (req == LX_SIOCGIFHWADDR) {
+        r.bytes[IFR_FAMILY..IFR_FAMILY + 16].fill(0);
+        put16(
+            mut r.bytes[..], IFR_FAMILY,
+            if ((f.flags & NETIF_LOOPBACK) != 0) LX_ARPHRD_LOOPBACK else LX_ARPHRD_ETHER,
+        );
+        r.bytes[IFR_FAMILY + 2..IFR_FAMILY + 8].copyFrom(f.mac[..]);
+    } else {
+        // SIOCGIFADDR, SIOCGIFNETMASK, SIOCGIFBRDADDR
+        if (f.addr == 0) {
+            return -EADDRNOTAVAIL as i64;
+        }
+        let a = if (req == LX_SIOCGIFADDR) f.addr else if (req == LX_SIOCGIFNETMASK) f.mask else brdOf(f);
+        putAddr(mut r, a);
+    }
+    return if (copy_to_user(arg, borrow r as *Ifreq as *void, IFREQ_SIZE) != 0) -EFAULT as i64 else 0;
+}

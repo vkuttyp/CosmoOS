@@ -1908,7 +1908,7 @@ static int64_t lx_fcntl(struct syscall_args *a)
 
 /*
  * `ioctl`, for what a terminal needs, and on a socket the interface
- * requests (netioctl.c, shell completeness S1).
+ * requests (netioctl.cee, shell completeness S1).
  * Until the terminal-modes unit every request answered -ENOTTY, and the
  * cost was not fidelity but correctness: a libc told the console is not a
  * terminal fully buffers its output, so a hosted program's prompt does not
@@ -2067,7 +2067,7 @@ static int64_t lx_ioctl(struct syscall_args *a)
     const struct chrdev_ops *chr = t == NULL && f != NULL ? ramfs_chr_ops_of(f->vn) : NULL;
     int64_t rc = t != NULL ? lx_ioctl_tty(t, f, req, a->a[2])
                  : chr != NULL && chr->ioctl != NULL ? chr->ioctl(f->vn, f, req, a->a[2])
-                 : socket_from_kobject(obj) != NULL ? lx_ioctl_net(req, a->a[2])   /* netioctl.c */
+                 : socket_from_kobject(obj) != NULL ? lx_ioctl_net(req, a->a[2])   /* netioctl.cee */
                                                     : -ENOTTY;
     if (t != NULL)
         tty_put(t);

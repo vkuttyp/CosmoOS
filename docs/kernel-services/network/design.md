@@ -1790,7 +1790,7 @@ from a page, and procfs keeps only the text, so a short file costs a short
 allocation for as long as it is held open.
 
 **The interface ioctls** are the Linux personality's
-(`compat/linux/netioctl.c`; `docs/compat/linux/design.md`, "Interface
+(`compat/linux/netioctl.cee`; `docs/compat/linux/design.md`, "Interface
 ioctls"): the getters translate `netif_info`; the setters are
 `PRIV_NET`'s and call `netif_set_up` and `netif_set_ipv4`, as the DHCP
 client does, and like it they drop the interface's neighbours when the
