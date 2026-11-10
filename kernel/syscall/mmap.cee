@@ -1,0 +1,409 @@
+// mmap.cee - The native personality's calls on a process's mappings (uapi/cosmo/syscall.h), in CeeSafe (roadmap 2.0
+// SA8): mmap, msync, munmap and mprotect. native.c's table names them (syscall.h).
+
+@header(
+    "kernel/errno.h", "kernel/handle.h", "kernel/object.h", "kernel/process.h", "kernel/syscall.h", "kernel/types.h",
+    "kernel/uaccess.h", "kernel/vfs.h", "kernel/vmm.h", "uapi/cosmo/syscall.h",
+)
+extern "C" {
+    struct syscall_args {
+        a: [u64; 6];
+    }
+    struct handle_table;
+    struct vm_space;
+    struct process {
+        handles: handle_table;
+        space: *mut vm_space;
+    }
+    struct kobject;
+    struct vnode {
+        @cname("type")
+        kind: u32;
+    }
+    struct file {
+        obj: kobject;
+        vn: *mut vnode;
+    }
+
+    @cvalue("sizeof(vm_prot_t) == sizeof(uint32_t) && sizeof(enum vnode_type) == sizeof(uint32_t)")
+    const WORDS_FIT: bool = true;
+    const USER_LO: u64 = 0x0000000000400000;
+    const USER_HI: u64 = 0x00007FFFFFFFF000;
+    const VNODE_REG: u32 = 1;
+    const COSMO_O_ACCMODE: u32 = 0x0003;
+    const COSMO_O_RDONLY: u32 = 0x0000;
+    const HANDLE_RIGHT_READ: u32 = 1;
+    const HANDLE_RIGHT_WRITE: u32 = 2;
+    const VM_PROT_READ: u32 = 1;
+    const VM_PROT_WRITE: u32 = 2;
+    const VM_PROT_EXEC: u32 = 4;
+    const VM_MAP_SHARED: u32 = 1;
+    const VM_MAP_REPLACE: u32 = 2;
+    const VM_UNMAP_STRICT: u32 = 1;
+    const COSMO_PROT_READ: u32 = 1;
+    const COSMO_PROT_WRITE: u32 = 2;
+    const COSMO_PROT_EXEC: u32 = 4;
+    const COSMO_MAP_ANONYMOUS: u32 = 1;
+    const COSMO_MAP_FIXED: u32 = 2;
+    const COSMO_MAP_FIXED_NOREPLACE: u32 = 4;
+    const COSMO_MAP_SHARED: u32 = 8;
+    const COSMO_MAP_PRIVATE: u32 = 16;
+    const COSMO_MS_ASYNC: u32 = 1;
+    const COSMO_MS_INVALIDATE: u32 = 2;
+    const COSMO_MS_SYNC: u32 = 4;
+    const EBADF: i32 = 9;
+    const ENOMEM: i32 = 12;
+    const EACCES: i32 = 13;
+    const ENODEV: i32 = 19;
+    const EINVAL: i32 = 22;
+
+    fn process_current() -> *mut process;
+    fn user_range_ok(addr: u64, len: usize) -> bool;
+    fn is_page_aligned(x: u64) -> bool;
+    fn user_mmap_base(space: *vm_space) -> u64;
+    fn handle_get(t: *mut handle_table, h: i32, rightsOut: *mut u32) -> *mut kobject;
+    fn kobject_put(obj: *mut kobject);
+    fn file_from_kobject(obj: *mut kobject) -> *mut file;
+    fn file_put(f: *mut file);
+    fn file_flags(f: *file) -> u32;
+    fn vm_user_map_anon(space: *mut vm_space, base: u64, size: usize, prot: u32, flags: u32, name: *CChar) -> i32;
+    fn vm_user_map_anon_replace(
+        space: *mut vm_space,
+        base: u64,
+        size: usize,
+        prot: u32,
+        flags: u32,
+        name: *CChar,
+    ) -> i32;
+    fn vm_user_map_anon_free(
+        space: *mut vm_space,
+        from: u64,
+        size: usize,
+        prot: u32,
+        flags: u32,
+        name: *CChar,
+        base: *mut u64,
+    ) -> i32;
+    fn vm_user_map_file(
+        space: *mut vm_space,
+        base: u64,
+        size: usize,
+        prot: u32,
+        maxprot: u32,
+        flags: u32,
+        vn: *mut vnode,
+        off: u64,
+        name: *CChar,
+    ) -> i32;
+    fn vm_user_map_file_free(
+        space: *mut vm_space,
+        from: u64,
+        size: usize,
+        prot: u32,
+        maxprot: u32,
+        flags: u32,
+        vn: *mut vnode,
+        off: u64,
+        name: *CChar,
+        base: *mut u64,
+    ) -> i32;
+    fn vm_user_unmap(space: *mut vm_space, base: u64, size: usize, flags: u32) -> i32;
+    fn vm_user_msync(space: *mut vm_space, base: u64, size: usize) -> i32;
+    fn vm_user_range_mapped(space: *mut vm_space, addr: u64, len: usize, prot: u32) -> bool;
+    fn vm_user_protect(space: *mut vm_space, base: u64, size: usize, prot: u32) -> i32;
+    fn vm_user_sync_icache(space: *mut vm_space, base: u64, size: usize);
+}
+
+/// Safety: the dispatcher's: `a` is the call's arguments.
+unsafe fn arg(a: *mut syscall_args, i: usize) -> u64 => Ptr.toBorrow(a as *syscall_args).a[i];
+
+/// The calling process's address space.
+/// Safety: in a process's thread.
+unsafe fn space() -> *mut vm_space => Ptr.toBorrow(process_current() as *process).space;
+
+/// A native protection as the VM layer's. PROT_NONE reserves the range: every access faults (design.md §6.2).
+fn vmProt(prot: u32) -> u32 {
+    var v: u32 = 0;
+    if ((prot & COSMO_PROT_READ) != 0) {
+        v = v | VM_PROT_READ;
+    }
+    if ((prot & COSMO_PROT_WRITE) != 0) {
+        v = v | VM_PROT_WRITE;
+    }
+    if ((prot & COSMO_PROT_EXEC) != 0) {
+        v = v | VM_PROT_EXEC;
+    }
+    return v;
+}
+
+/// The checks munmap, msync and mprotect share: a page-aligned, non-empty, page-multiple range of user memory.
+/// Safety: in a process's thread.
+unsafe fn rangeOk(addr: u64, len: u64) -> bool =>
+    is_page_aligned(addr) && len != 0 && is_page_aligned(len) && user_range_ok(addr, truncate<usize>(len));
+
+/// What mmap_file_check found: the file, referenced, and the ceiling a later mprotect may reach.
+struct Mapped {
+    f: *mut file;
+    maxprot: u32;
+}
+
+/// The file half of a mapping request, the same at both doors (compat/linux/syscalls.c makes the same checks with
+/// Linux's names): a regular file (else -ENODEV) reachable through a handle with the READ right (else -EBADF); a SHARED
+/// mapping with PROT_WRITE needs the file opened for writing and the handle's WRITE right (else -EACCES). On success
+/// `out` holds a referenced file and the ceiling a later mprotect may reach: a shared mapping of a file opened
+/// read-only can never be made writable, everything else is bounded by W^X alone.
+/// Safety: in a process's thread.
+unsafe fn mmapFileCheck(fd: i32, shared: bool, write: bool, out: borrow mut Mapped) -> i32 {
+    // ONE lookup, carrying the handle's rights: a second lookup of the same number could resolve to a different file
+    // if another thread closed and reopened it in between, and "writable" would then be decided by a file other than
+    // the one mapped (review found the first version doing exactly that).
+    var rights: u32 = 0;
+    let pr = Ptr.toBorrowMut(process_current());
+    let obj = handle_get(borrow mut pr.handles as *mut handle_table, fd, borrow mut rights as *mut u32);
+    if (obj.isNull()) {
+        return -EBADF;
+    }
+    let f = file_from_kobject(obj);
+    if (f.isNull() || (rights & HANDLE_RIGHT_READ) == 0) {
+        kobject_put(obj);
+        return -EBADF;
+    }
+    let vn = Ptr.toBorrow(f as *file).vn;
+    if (Ptr.toBorrow(vn as *vnode).kind != VNODE_REG) {
+        file_put(f);
+        return -ENODEV;
+    }
+    // The handle's rights bound the file's mode: a handle duplicated without WRITE cannot map for writing what the
+    // file allows.
+    let writable = (file_flags(f as *file) & COSMO_O_ACCMODE) != COSMO_O_RDONLY && (rights & HANDLE_RIGHT_WRITE) != 0;
+    if (shared && write && !writable) {
+        file_put(f);
+        return -EACCES;
+    }
+    out.maxprot = VM_PROT_READ | VM_PROT_EXEC | (if (!shared || writable) VM_PROT_WRITE else 0);
+    out.f = f;
+    return 0;
+}
+
+/// mmap's request once checked.
+struct Request {
+    hint: u64;
+    len: usize;
+    vprot: u32;
+    flags: u32;
+    shared: bool;
+    off: u64;
+}
+
+/// Map `r` (`m.f` null: anonymous memory), the address into `base`.
+/// Safety: in a process's thread; `m.f` is null or referenced.
+unsafe fn place(r: borrow Request, m: borrow Mapped, base: borrow mut u64) -> i32 {
+    let s = space();
+    let anon = m.f.isNull();
+    let vn = if (anon) 0 as *mut vnode else Ptr.toBorrow(m.f as *file).vn;
+    let mapShared = if (r.shared) VM_MAP_SHARED else 0;
+    if ((r.flags & COSMO_MAP_FIXED) != 0) {
+        if (!is_page_aligned(r.hint) || !user_range_ok(r.hint, r.len)) {
+            return -EINVAL;
+        }
+        *base = r.hint;
+        // POSIX: a fixed mapping takes the range whatever is there. Replacement is one operation in the VM layer rather
+        // than an unmap and a map here, because the gap between those two is a window another thread's
+        // mmap(NULL, ...) can be handed -- which is exactly what cosmo_thread_start used to lose
+        // (docs/audit/next-subsystem-map-fixed.md). NOREPLACE keeps the old refusal. A file mapping goes through the
+        // same replacement, so M40 holds for it too.
+        if ((r.flags & COSMO_MAP_FIXED_NOREPLACE) == 0) {
+            return if (anon) vm_user_map_anon_replace(s, r.hint, r.len, r.vprot, 0, "mmap\0".ptr as *CChar)
+                else vm_user_map_file(
+                    s,
+                    r.hint,
+                    r.len,
+                    r.vprot,
+                    m.maxprot,
+                    VM_MAP_REPLACE | mapShared,
+                    vn,
+                    r.off,
+                    "mmap-file\0".ptr as *CChar,
+                );
+        }
+        return if (anon) vm_user_map_anon(s, r.hint, r.len, r.vprot, 0, "mmap\0".ptr as *CChar)
+            else vm_user_map_file(
+                s,
+                r.hint,
+                r.len,
+                r.vprot,
+                m.maxprot,
+                mapShared,
+                vn,
+                r.off,
+                "mmap-file\0".ptr as *CChar,
+            );
+    }
+    // The kernel chooses: first fit from the hint, then from the base, each attempt one operation that chooses and
+    // inserts under a single hold of the space lock (M46). This was a find and then a map, two holds, and two threads
+    // placing at once were handed the same hole about half the time -- the loser got -EEXIST for a request that named
+    // no address, which reached userland as a thread start failing (docs/audit/next-subsystem-mmap-place.md). -ENOMEM
+    // from the first attempt means "no gap there" and nothing else, so it is the only answer that tries the second.
+    let mbase = user_mmap_base(s as *vm_space);
+    var from = if (r.hint >= USER_LO && is_page_aligned(r.hint)) r.hint else mbase;
+    var out: u64 = 0;
+    while (true) {
+        let rc = if (anon) vm_user_map_anon_free(
+            s,
+            from,
+            r.len,
+            r.vprot,
+            0,
+            "mmap\0".ptr as *CChar,
+            borrow mut out as *mut u64,
+        ) else vm_user_map_file_free(
+            s,
+            from,
+            r.len,
+            r.vprot,
+            m.maxprot,
+            mapShared,
+            vn,
+            r.off,
+            "mmap-file\0".ptr as *CChar,
+            borrow mut out as *mut u64,
+        );
+        if (rc != -ENOMEM || from == mbase) {
+            *base = out;
+            return rc;
+        }
+        from = mbase;
+    }
+    return -ENOMEM; // not reached
+}
+
+/// Safety: the dispatcher's.
+@export("sys_mmap")
+unsafe fn mmap(a: *mut syscall_args) -> i64 {
+    let hint = arg(a, 0);
+    let len64 = arg(a, 1);
+    let prot = truncate<u32>(arg(a, 2));
+    let flags = truncate<u32>(arg(a, 3));
+    let fd = truncate<i32>(arg(a, 4));
+    let off = arg(a, 5);
+
+    // A flag bit this kernel does not define is refused, so a program can learn what the kernel it runs on supports
+    // and a future flag is never silently dropped (the rule for every native flags word).
+    let known =
+        COSMO_MAP_ANONYMOUS | COSMO_MAP_FIXED | COSMO_MAP_FIXED_NOREPLACE | COSMO_MAP_SHARED | COSMO_MAP_PRIVATE;
+    if ((flags & (known ^ 0xFFFFFFFF)) != 0) {
+        return -EINVAL as i64;
+    }
+    // NOREPLACE qualifies FIXED; on its own it has no address to keep.
+    if ((flags & COSMO_MAP_FIXED_NOREPLACE) != 0 && (flags & COSMO_MAP_FIXED) == 0) {
+        return -EINVAL as i64;
+    }
+    if (len64 == 0 || !is_page_aligned(len64) || len64 > USER_HI - USER_LO) {
+        return -EINVAL as i64;
+    }
+    let anon = (flags & COSMO_MAP_ANONYMOUS) != 0;
+    let shared = (flags & COSMO_MAP_SHARED) != 0;
+    // A file mapping names exactly one of SHARED and PRIVATE. Anonymous memory may say PRIVATE (it is) and may not say
+    // SHARED: without a fork there is nobody to share it with, and a program that asked for cross-process anonymous
+    // sharing must not be told yes (docs/audit/next-subsystem-file-regions.md, "The two doors").
+    let isPrivate = (flags & COSMO_MAP_PRIVATE) != 0;
+    if (if (anon) shared else shared == isPrivate) {
+        return -EINVAL as i64;
+    }
+    if ((prot & ((COSMO_PROT_READ | COSMO_PROT_WRITE | COSMO_PROT_EXEC) ^ 0xFFFFFFFF)) != 0) {
+        return -EINVAL as i64;
+    }
+    if ((prot & COSMO_PROT_WRITE) != 0 && (prot & COSMO_PROT_EXEC) != 0) {
+        return -EINVAL as i64; // W^X
+    }
+    if (!anon && (!is_page_aligned(off) || off > 0xFFFFFFFFFFFFFFFF - len64)) {
+        return -EINVAL as i64;
+    }
+
+    let r = Request {
+        hint: hint,
+        len: truncate<usize>(len64),
+        vprot: vmProt(prot),
+        flags: flags,
+        shared: shared,
+        off: off,
+    };
+    var m = Mapped { f: 0 as *mut file, maxprot: VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXEC };
+    if (!anon) {
+        let frc = mmapFileCheck(fd, shared, (r.vprot & VM_PROT_WRITE) != 0, mut m);
+        if (frc != 0) {
+            return frc as i64;
+        }
+    }
+    var base: u64 = 0;
+    let rc = place(borrow r, borrow m, mut base);
+    if (!m.f.isNull()) {
+        file_put(m.f);
+    }
+    return if (rc != 0) rc as i64 else truncate<i64>(base);
+}
+
+/// Safety: the dispatcher's.
+@export("sys_msync")
+unsafe fn msync(a: *mut syscall_args) -> i64 {
+    let addr = arg(a, 0);
+    let len = arg(a, 1);
+    let flags = truncate<u32>(arg(a, 2));
+    if ((flags & ((COSMO_MS_ASYNC | COSMO_MS_INVALIDATE | COSMO_MS_SYNC) ^ 0xFFFFFFFF)) != 0) {
+        return -EINVAL as i64; // an undefined bit: the native rule
+    }
+    if ((flags & COSMO_MS_ASYNC) != 0 && (flags & COSMO_MS_SYNC) != 0) {
+        return -EINVAL as i64; // POSIX: one or the other
+    }
+    if (!rangeOk(addr, len)) {
+        return -EINVAL as i64;
+    }
+    if ((flags & COSMO_MS_SYNC) == 0) {
+        // ASYNC: the dirty pages are the cache's already and reach the filesystem by vfs_sync, the write-back thread or
+        // the last close, which is what "scheduled" means here. INVALIDATE: nothing is stale, the mapping IS the cache.
+        // Both still owe the range check.
+        return if (vm_user_range_mapped(space(), addr, truncate<usize>(len), 0)) 0 else -ENOMEM as i64;
+    }
+    return vm_user_msync(space(), addr, truncate<usize>(len)) as i64;
+}
+
+/// Safety: the dispatcher's.
+@export("sys_munmap")
+unsafe fn munmap(a: *mut syscall_args) -> i64 {
+    let addr = arg(a, 0);
+    let len = arg(a, 1);
+    if (!rangeOk(addr, len)) {
+        return -EINVAL as i64;
+    }
+    return vm_user_unmap(space(), addr, truncate<usize>(len), VM_UNMAP_STRICT) as i64;
+}
+
+/// Safety: the dispatcher's.
+@export("sys_mprotect")
+unsafe fn mprotect(a: *mut syscall_args) -> i64 {
+    let addr = arg(a, 0);
+    let len = arg(a, 1);
+    let prot = truncate<u32>(arg(a, 2));
+    // The native rules, the same ones mmap and munmap keep: an undefined prot bit is an error rather than ignored, and
+    // len is a page multiple rather than rounded up.
+    if ((prot & ((COSMO_PROT_READ | COSMO_PROT_WRITE | COSMO_PROT_EXEC) ^ 0xFFFFFFFF)) != 0) {
+        return -EINVAL as i64;
+    }
+    if (!rangeOk(addr, len)) {
+        return -EINVAL as i64;
+    }
+    let vprot = vmProt(prot);
+    // W|X, a hole in the range and a range a replacement has claimed are all decided in the VM layer, not here; this
+    // door only translates.
+    let rc = vm_user_protect(space(), addr, truncate<usize>(len), vprot);
+    if (rc != 0) {
+        return rc as i64;
+    }
+    // Bytes written to this range as data may still be in the data cache and stale in the instruction cache. User code
+    // cannot fix that itself (SCTLR_EL1.UCI is clear), so the kernel does when the range becomes executable -- for
+    // every caller, not just a test.
+    if ((vprot & VM_PROT_EXEC) != 0) {
+        vm_user_sync_icache(space(), addr, truncate<usize>(len));
+    }
+    return 0;
+}

@@ -92,6 +92,12 @@ int64_t sys_vcpu_run(struct syscall_args *a);
 int64_t sys_vcpu_stop(struct syscall_args *a);
 int64_t sys_vcpu_irq(struct syscall_args *a);
 
+/* The native calls on mappings (kernel/syscall/mmap.cee). */
+int64_t sys_mmap(struct syscall_args *a);
+int64_t sys_msync(struct syscall_args *a);
+int64_t sys_munmap(struct syscall_args *a);
+int64_t sys_mprotect(struct syscall_args *a);
+
 /* The native calls on mounting and the root (kernel/syscall/mount.cee). */
 int64_t sys_mount(struct syscall_args *a);
 int64_t sys_umount(struct syscall_args *a);

@@ -2164,7 +2164,7 @@ static int64_t lx_mmap(struct syscall_args *a)
      * MAP_SHARED maps the file's own pages -- a write through the mapping
      * is a write to the file, seen by read() and every other mapping;
      * MAP_PRIVATE is copy-on-write. The same checks the native door makes
-     * (kernel/syscall/native.c, mmap_file_check), with Linux's errnos: a
+     * (kernel/syscall/mmap.cee, mmapFileCheck), with Linux's errnos: a
      * regular file (-ENODEV), the READ right (-EBADF), and for a shared
      * writable mapping a file opened for writing through a handle with
      * the WRITE right (-EACCES). The eager copy this used to make is gone.

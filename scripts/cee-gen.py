@@ -267,6 +267,7 @@ PORTS = [
      "The native calls on paths and open files (syscall.h)", None, False),
     ("kernel/syscall/mount.cee", "kernel/syscall/mount.c",
      "Mounting, unmounting and switching the root (syscall.h)", None, True),
+    ("kernel/syscall/mmap.cee", "kernel/syscall/mmap.c", "The native calls on mappings (syscall.h)", None, False),
     ("kernel/module/modelf.cee", "kernel/module/modelf.c", "ET_REL module image validation and layout (modelf.h)", None,
      False),
     ("kernel/module/modspec.cee", "kernel/module/modspec.c", "The module.cycle= specification's parsers (module.h)", None,
