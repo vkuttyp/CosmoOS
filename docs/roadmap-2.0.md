@@ -1755,8 +1755,12 @@ both layouts (`0x7159817551c8dcff` AArch64, `0x15ff4a3eb99bf16f`
 x86-64) -- and `netioctl.cee` (`struct lx_ifreq` as its 40 bytes at
 checked offsets). Each step passed the builds, the analysis and both
 boot tests; the dispatcher and the encoders `test-busybox` too, the
-ioctls `test-net-login`, the self-tests `test-guard`. Left: `signal.c`,
-then `native.c` and `syscalls.c` in sections.
+ioctls `test-net-login`, the self-tests `test-guard`. `signal.c` then
+followed into `sigcalls.cee`: the signal calls, then both
+architectures' handler frames, `rt_sigreturn` and the trampoline page,
+each architecture's code in `cfg` blocks behind one export (both boot
+tests and `test-busybox` on both). Left: `native.c` and `syscalls.c` in
+sections.
 
 Size: about 1.5x.
 
