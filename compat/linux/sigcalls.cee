@@ -1,0 +1,470 @@
+// sigcalls.cee - Linux's signal system calls over the kernel's signal core (docs/compat/linux/design.md, stage 2;
+// kernel/process/signal.c), in CeeSafe (roadmap 2.0 SA8): rt_sigaction, rt_sigprocmask, rt_sigpending,
+// rt_sigsuspend, pause, sigaltstack, kill, tgkill, tkill, gettid, set_tid_address, exit and exit_group. The handler
+// frames and rt_sigreturn are signal.c's.
+//
+// The core's records a call builds or copies -- struct sigaction_k, struct signal_info, the guest's stack_t -- are
+// CeeSafe structs of the same layout, which the C compiler checks (the extern block), and a struct arch_user_regs is
+// a local of the larger architecture's size, which it checks too.
+
+@header(
+    "arch/user.h", "kernel/errno.h", "kernel/process.h", "kernel/signal.h", "kernel/syscall.h", "kernel/thread.h",
+    "kernel/uaccess.h", "linux_abi.h", "linux_internal.h",
+)
+extern "C" {
+    struct syscall_args {
+        a: [u64; 6];
+        frame: *mut void;
+    }
+    struct sigaltstack_k {
+        sp: u64;
+        size: u64;
+        flags: u32;
+    }
+    struct thread {
+        altstack: sigaltstack_k;
+        clear_child_tid: u64;
+        user_tid: u32;
+    }
+    struct credentials {
+        ruid: u32;
+    }
+    struct process {
+        pid: u32;
+        cred: credentials;
+    }
+    struct sigaction_k;
+    struct signal_info;
+    struct arch_user_regs;
+    enum signal_source: u32;
+
+    // The records built here, as `Act`, `Info` and `Stack` lay them out.
+    @cvalue("sizeof(struct sigaction_k)")
+    const SIGACTION_SIZE: usize = 32;
+    @cvalue(
+        "sizeof(struct signal_info) == 32 && offsetof(struct signal_info, sig) == 0 && offsetof(struct signal_info, source) == 4 && offsetof(struct signal_info, fault_addr) == 8 && offsetof(struct signal_info, code) == 16 && offsetof(struct signal_info, sender_pid) == 20 && offsetof(struct signal_info, sender_uid) == 24 && offsetof(struct signal_info, status) == 28 && sizeof(enum signal_source) == 4",
+    )
+    const SIGNAL_INFO_LAYOUT: bool = true;
+    @cvalue("sizeof(struct lx_stack_t)")
+    const STACK_SIZE: usize = 24;
+    @cvalue("offsetof(struct lx_stack_t, ss_flags) == 8 && offsetof(struct lx_stack_t, ss_size) == 16")
+    const STACK_LAYOUT: bool = true;
+    @cvalue(
+        "sizeof(struct arch_user_regs) <= 34 * sizeof(uint64_t) && _Alignof(struct arch_user_regs) <= sizeof(uint64_t)",
+    )
+    const REGS_FIT: bool = true;
+    const SIGSRC_USER: u32 = 0;
+    const SIGSRC_TKILL: u32 = 1;
+
+    const LX_NSIG: i32 = 64;
+    const LX_SIG_BLOCK: i32 = 0;
+    const LX_SIG_UNBLOCK: i32 = 1;
+    const LX_SIG_SETMASK: i32 = 2;
+    const LX_SS_ONSTACK: u32 = 1;
+    const LX_SS_DISABLE: u32 = 2;
+    const LX_SS_AUTODISARM: u32 = 0x80000000;
+    const LX_MINSIGSTKSZ: u64 = 2048;
+    const SIGKILL: i32 = 9;
+    const SIGSTOP: i32 = 19;
+    const EPERM: i32 = 1;
+    const ESRCH: i32 = 3;
+    const ENOMEM: i32 = 12;
+    const EFAULT: i32 = 14;
+    const EINVAL: i32 = 22;
+
+    fn thread_current() -> *mut thread;
+    fn process_current() -> *mut process;
+    fn copy_from_user(dst: *mut void, userSrc: u64, len: usize) -> i32;
+    fn copy_to_user(userDst: u64, src: *void, len: usize) -> i32;
+    fn user_range_ok(addr: u64, len: usize) -> bool;
+    fn signal_set_action(p: *mut process, sig: i32, act: *sigaction_k, old: *mut sigaction_k) -> i32;
+    fn signal_get_action(p: *mut process, sig: i32, out: *mut sigaction_k);
+    fn signal_blocked() -> u64;
+    fn signal_set_blocked(mask: u64);
+    fn signal_set_blocked_saved(saved: u64);
+    fn signal_pending_set() -> u64;
+    fn signal_wait() -> i32;
+    fn signal_send(p: *mut process, sig: i32, info: *signal_info) -> i32;
+    fn signal_send_thread(t: *mut thread, sig: i32, info: *signal_info) -> i32;
+    fn process_may_signal(sender: *process, target: *process, sig: i32) -> bool;
+    fn process_group_next(pgid: u32, after: u32) -> *mut process;
+    fn process_put(p: *mut process);
+    fn process_getpgid(pid: u32, out: *mut u32) -> i32;
+    fn process_lookup(pid: u32) -> *mut process;
+    fn process_find_thread(p: *mut process, userTid: u32) -> *mut thread;
+    fn process_thread_exit(status: i32); // __noreturn
+    fn process_exit(status: i32);        // __noreturn
+    fn arch_user_regs_from_syscall(frame: *void, r: *mut arch_user_regs);
+    fn arch_user_regs_sp(r: *arch_user_regs) -> usize;
+}
+
+/// A struct sigaction_k: the handler, the flags, the restorer, the mask.
+struct Act {
+    handler: u64;
+    flags: u64;
+    restorer: u64;
+    mask: u64;
+}
+
+/// A struct signal_info (SIGNAL_INFO_LAYOUT).
+struct Info {
+    sig: i32;
+    source: u32;
+    faultAddr: u64;
+    code: u32;
+    senderPid: u32;
+    senderUid: u32;
+    status: i32;
+}
+
+/// The guest's stack_t.
+struct Stack {
+    sp: u64;
+    flags: i32;
+    pad: i32;
+    size: u64;
+}
+
+fn validSig(sig: i32) -> bool => sig >= 1 && sig < LX_NSIG;
+
+/// The `i`th argument as C's (int) sees it.
+/// Safety: `a` is the dispatcher's.
+unsafe fn arg32(a: *mut syscall_args, i: usize) -> i32 => truncate<i32>(Ptr.toBorrow(a as *syscall_args).a[i]);
+
+/// Safety: `a` is the dispatcher's.
+unsafe fn arg(a: *mut syscall_args, i: usize) -> u64 => Ptr.toBorrow(a as *syscall_args).a[i];
+
+// --- the alternate stack (signal.c's frames keep their own copy of these three) -----------------------------------
+
+fn altstackEnabled(t: borrow thread) -> bool => t.altstack.size != 0 && (t.altstack.flags & LX_SS_DISABLE) == 0;
+
+/// Linux's on_sig_stack: (base, base + size].
+fn onAltstack(t: borrow thread, sp: u64) -> bool =>
+    altstackEnabled(t) && sp > t.altstack.sp && sp - t.altstack.sp <= t.altstack.size;
+
+fn altstackOut(t: borrow thread, sp: u64) -> Stack {
+    let flags = if (onAltstack(t, sp)) LX_SS_ONSTACK else if (altstackEnabled(t)) 0 else LX_SS_DISABLE;
+    return Stack { sp: t.altstack.sp, flags: truncate<i32>(flags), pad: 0, size: t.altstack.size };
+}
+
+// --- the calls -----------------------------------------------------------------------------------------------------
+
+/// Safety: the dispatcher's: `a` is the call's arguments, in the calling thread.
+@export("lx_rt_sigaction")
+unsafe fn rtSigaction(a: *mut syscall_args) -> i64 {
+    let sig = arg32(a, 0);
+    if (!validSig(sig) || arg(a, 3) != 8) {
+        return -EINVAL as i64;
+    }
+    let p = process_current();
+    var act = Act { handler: 0, flags: 0, restorer: 0, mask: 0 };
+    var old = Act { handler: 0, flags: 0, restorer: 0, mask: 0 };
+    let oldp = borrow mut old as *mut Act as *mut sigaction_k;
+    if (arg(a, 1) != 0) {
+        if (sig == SIGKILL || sig == SIGSTOP) {
+            return -EINVAL as i64;
+        }
+        if (copy_from_user(borrow mut act as *mut Act as *mut void, arg(a, 1), SIGACTION_SIZE) != 0) {
+            return -EFAULT as i64;
+        }
+        let _ = signal_set_action(p, sig, borrow act as *Act as *sigaction_k, oldp);
+    } else {
+        signal_get_action(p, sig, oldp);
+    }
+    if (arg(a, 2) != 0 && copy_to_user(arg(a, 2), borrow old as *Act as *void, SIGACTION_SIZE) != 0) {
+        return -EFAULT as i64;
+    }
+    return 0;
+}
+
+/// Safety: the dispatcher's.
+@export("lx_rt_sigprocmask")
+unsafe fn rtSigprocmask(a: *mut syscall_args) -> i64 {
+    if (arg(a, 3) != 8) {
+        return -EINVAL as i64;
+    }
+    var old = signal_blocked();
+    if (arg(a, 1) != 0) {
+        var set: u64 = 0;
+        if (copy_from_user(borrow mut set as *mut u64 as *mut void, arg(a, 1), 8) != 0) {
+            return -EFAULT as i64;
+        }
+        let how = arg32(a, 0);
+        if (how == LX_SIG_BLOCK) {
+            signal_set_blocked(old | set);
+        } else if (how == LX_SIG_UNBLOCK) {
+            signal_set_blocked(old & (set ^ 0xFFFFFFFFFFFFFFFF));
+        } else if (how == LX_SIG_SETMASK) {
+            signal_set_blocked(set);
+        } else {
+            return -EINVAL as i64;
+        }
+    }
+    if (arg(a, 2) != 0 && copy_to_user(arg(a, 2), borrow old as *u64 as *void, 8) != 0) {
+        return -EFAULT as i64;
+    }
+    return 0;
+}
+
+/// Safety: the dispatcher's.
+@export("lx_rt_sigpending")
+unsafe fn rtSigpending(a: *mut syscall_args) -> i64 {
+    if (arg(a, 1) != 8) {
+        return -EINVAL as i64;
+    }
+    let set = signal_pending_set();
+    return if (copy_to_user(arg(a, 0), borrow set as *u64 as *void, 8) != 0) -EFAULT as i64 else 0;
+}
+
+/// Wait with `mask` in place; the handler's frame records the previous mask and the return restores it (the core's
+/// saved-mask rule).
+/// Safety: the dispatcher's.
+@export("lx_rt_sigsuspend")
+unsafe fn rtSigsuspend(a: *mut syscall_args) -> i64 {
+    if (arg(a, 1) != 8) {
+        return -EINVAL as i64;
+    }
+    var mask: u64 = 0;
+    if (copy_from_user(borrow mut mask as *mut u64 as *mut void, arg(a, 0), 8) != 0) {
+        return -EFAULT as i64;
+    }
+    let old = signal_blocked();
+    signal_set_blocked(mask);
+    signal_set_blocked_saved(old);
+    return signal_wait() as i64;
+}
+
+/// Safety: the dispatcher's.
+@export("lx_pause")
+unsafe fn pause(a: *mut syscall_args) -> i64 {
+    let _ = a;
+    return signal_wait() as i64;
+}
+
+/// Safety: the dispatcher's.
+@export("lx_sigaltstack")
+unsafe fn sigaltstack(a: *mut syscall_args) -> i64 {
+    let tp = thread_current();
+    var regs = [0u64; 34]; // a struct arch_user_regs (REGS_FIT)
+    let rp = regs[..].ptr as *mut arch_user_regs;
+    arch_user_regs_from_syscall(Ptr.toBorrow(a as *syscall_args).frame as *void, rp);
+    let sp = arch_user_regs_sp(rp as *arch_user_regs) as u64;
+    let old = altstackOut(Ptr.toBorrow(tp as *thread), sp);
+    if (arg(a, 0) != 0) {
+        var st = Stack { sp: 0, flags: 0, pad: 0, size: 0 };
+        if (copy_from_user(borrow mut st as *mut Stack as *mut void, arg(a, 0), STACK_SIZE) != 0) {
+            return -EFAULT as i64;
+        }
+        if (onAltstack(Ptr.toBorrow(tp as *thread), sp)) {
+            return -EPERM as i64;
+        }
+        let flags = truncate<u32>(st.flags) & (LX_SS_AUTODISARM ^ 0xFFFFFFFF);
+        if (flags != 0 && flags != LX_SS_DISABLE && flags != LX_SS_ONSTACK) {
+            return -EINVAL as i64;
+        }
+        let t = Ptr.toBorrowMut(tp);
+        if (flags == LX_SS_DISABLE) {
+            t.altstack.sp = 0;
+            t.altstack.size = 0;
+            t.altstack.flags = LX_SS_DISABLE;
+        } else {
+            if (st.size < LX_MINSIGSTKSZ) {
+                return -ENOMEM as i64;
+            }
+            if (!user_range_ok(st.sp, st.size as usize)) {
+                return -EFAULT as i64;
+            }
+            t.altstack.sp = st.sp;
+            t.altstack.size = st.size;
+            t.altstack.flags = 0;
+        }
+    }
+    if (arg(a, 1) != 0 && copy_to_user(arg(a, 1), borrow old as *Stack as *void, STACK_SIZE) != 0) {
+        return -EFAULT as i64;
+    }
+    return 0;
+}
+
+/// Safety: `target` is a referenced process; the calling thread's.
+unsafe fn sendToProcess(target: *mut process, sig: i32, src: u32) -> i64 {
+    let cur = process_current();
+    if (!process_may_signal(cur as *process, target as *process, sig)) {
+        return -EPERM as i64;
+    }
+    if (sig == 0) {
+        return 0;
+    }
+    let c = Ptr.toBorrow(cur as *process);
+    let info = Info {
+        sig: sig,
+        source: src,
+        faultAddr: 0,
+        code: 0,
+        senderPid: c.pid,
+        senderUid: c.cred.ruid,
+        status: 0,
+    };
+    return signal_send(target, sig, borrow info as *Info as *signal_info) as i64;
+}
+
+/// A whole process group, POSIX's rule: the call succeeds if the signal reached anyone, and the refusals surface only
+/// when every member refused (kernel/syscall/native.c does the same for the native ABI).
+/// Safety: the calling thread's.
+unsafe fn killGroup(pgid: u32, sig: i32) -> i64 {
+    var sent: u32 = 0;
+    var denied: u32 = 0;
+    var after: u32 = 0;
+    while (true) {
+        let p = process_group_next(pgid, after);
+        if (p.isNull()) {
+            break;
+        }
+        after = Ptr.toBorrow(p as *process).pid;
+        let rc = sendToProcess(p, sig, SIGSRC_USER);
+        process_put(p);
+        if (rc == 0) {
+            sent += 1;
+        } else if (rc == -EPERM as i64) {
+            denied += 1;
+        }
+    }
+    if (sent > 0) {
+        return 0;
+    }
+    return if (denied > 0) -EPERM as i64 else -ESRCH as i64;
+}
+
+/// Safety: the dispatcher's.
+@export("lx_kill")
+unsafe fn kill(a: *mut syscall_args) -> i64 {
+    let pid = arg32(a, 0);
+    let sig = arg32(a, 1);
+    if (sig != 0 && !validSig(sig)) {
+        return -EINVAL as i64;
+    }
+    if (pid == -1) {
+        return -EINVAL as i64; // every process: nothing here wants it
+    }
+    if (pid <= 0) {
+        // 0 is the caller's own group, a negative pid names one.
+        var pgid: u32 = 0;
+        if (pid == 0) {
+            let rc = process_getpgid(0, borrow mut pgid as *mut u32);
+            if (rc != 0) {
+                return rc as i64;
+            }
+        } else {
+            pgid = truncate<u32>(-(pid as i64));
+        }
+        return killGroup(pgid, sig);
+    }
+    let target = process_lookup(truncate<u32>(pid));
+    if (target.isNull()) {
+        return -ESRCH as i64;
+    }
+    let rc = sendToProcess(target, sig, SIGSRC_USER);
+    process_put(target);
+    return rc;
+}
+
+/// Safety: `target` is a referenced process; the calling thread's.
+unsafe fn sendToThread(target: *mut process, tid: u32, sig: i32) -> i64 {
+    let cur = process_current();
+    if (!process_may_signal(cur as *process, target as *process, sig)) {
+        return -EPERM as i64;
+    }
+    let t = process_find_thread(target, tid);
+    if (t.isNull()) {
+        return -ESRCH as i64;
+    }
+    if (sig == 0) {
+        return 0;
+    }
+    let c = Ptr.toBorrow(cur as *process);
+    let info = Info {
+        sig: sig, source: SIGSRC_TKILL, faultAddr: 0, code: 0, senderPid: c.pid, senderUid: c.cred.ruid, status: 0,
+    };
+    return signal_send_thread(t, sig, borrow info as *Info as *signal_info) as i64;
+}
+
+/// Safety: the dispatcher's.
+@export("lx_tgkill")
+unsafe fn tgkill(a: *mut syscall_args) -> i64 {
+    let tgid = arg32(a, 0);
+    let tid = arg32(a, 1);
+    let sig = arg32(a, 2);
+    if (tgid <= 0 || tid <= 0) {
+        return -EINVAL as i64;
+    }
+    if (sig != 0 && !validSig(sig)) {
+        return -EINVAL as i64;
+    }
+    let target = process_lookup(truncate<u32>(tgid));
+    if (target.isNull()) {
+        return -ESRCH as i64;
+    }
+    let rc = sendToThread(target, truncate<u32>(tid), sig);
+    process_put(target);
+    return rc;
+}
+
+/// tkill names a thread without its group: the caller's own process is the only one whose threads are searched
+/// (thread ids are per process here).
+/// Safety: the dispatcher's.
+@export("lx_tkill")
+unsafe fn tkill(a: *mut syscall_args) -> i64 {
+    let tid = arg32(a, 0);
+    let sig = arg32(a, 1);
+    if (tid <= 0) {
+        return -EINVAL as i64;
+    }
+    if (sig != 0 && !validSig(sig)) {
+        return -EINVAL as i64;
+    }
+    let cur = process_current();
+    let utid = truncate<u32>(tid); // positive
+    if (utid == Ptr.toBorrow(cur as *process).pid || utid >= 0x10000) {
+        return sendToThread(cur, utid, sig);
+    }
+    let target = process_lookup(utid); // another process's main thread
+    if (target.isNull()) {
+        return -ESRCH as i64;
+    }
+    let rc = sendToThread(target, truncate<u32>(tid), sig);
+    process_put(target);
+    return rc;
+}
+
+/// Safety: the dispatcher's.
+@export("lx_gettid")
+unsafe fn gettid(a: *mut syscall_args) -> i64 {
+    let _ = a;
+    return Ptr.toBorrow(thread_current() as *thread).user_tid as i64;
+}
+
+/// Safety: the dispatcher's.
+@export("lx_set_tid_address")
+unsafe fn setTidAddress(a: *mut syscall_args) -> i64 {
+    let t = Ptr.toBorrowMut(thread_current());
+    t.clear_child_tid = arg(a, 0);
+    return t.user_tid as i64;
+}
+
+/// The exit status argument, (int)a[0] & 0xff.
+/// Safety: the dispatcher's.
+unsafe fn status(a: *mut syscall_args) -> i32 => truncate<i32>(truncate<u32>(arg(a, 0)) & 0xff);
+
+/// exit ends the calling thread; the process ends with the last one.
+/// Safety: the dispatcher's.
+@export("lx_exit")
+unsafe fn exit(a: *mut syscall_args) -> i64 {
+    process_thread_exit(status(a));
+    return 0; // not reached: process_thread_exit does not return
+}
+
+/// Safety: the dispatcher's.
+@export("lx_exit_group")
+unsafe fn exitGroup(a: *mut syscall_args) -> i64 {
+    process_exit(status(a));
+    return 0; // not reached: process_exit does not return
+}
