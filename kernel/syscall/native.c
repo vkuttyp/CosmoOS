@@ -498,93 +498,11 @@ int syscall_handle_stat(int h, struct cosmo_stat *st)
     return rc;
 }
 
-int syscall_mount(const char *device, const char *target, const char *fstype, unsigned flags)
-{
-    if (!cred_has(cred_current(), PRIV_MOUNT))
-        return -EPERM;
-    struct blkdev *bd = NULL;
-    if (device != NULL) {
-        bd = blk_find(device);
-        if (bd == NULL)
-            return -ENODEV;
-    }
-    /* A relative target from the caller's directory, as every other path
-     * call resolves one (P27); it used to be resolved from the root. */
-    char *cwdname = kmalloc(VFS_PATH_MAX, 0);   /* its name, which the mount records (P32); off the frame */
-    if (cwdname == NULL) {
-        if (bd)
-            blkdev_put(bd);
-        return -ENOMEM;
-    }
-    struct vnode *cwd = process_cwd_snapshot(cwdname, VFS_PATH_MAX);
-    int rc = vfs_mount_at(cwd, cwd ? cwdname : NULL, target, fstype, bd, flags);
-    if (cwd)
-        vnode_put(cwd);
-    kfree(cwdname);
-    if (bd)
-        blkdev_put(bd);   /* the mount took its own reference */
-    return rc;
-}
+/* --- mounting and the root (mount.cee) -----------------------------------
+ *
+ * syscall_mount, syscall_umount, sys_mount, sys_umount and sys_switch_root
+ * are CeeSafe's (kernel/syscall/mount.cee, roadmap 2.0 SA8; syscall.h). */
 
-int syscall_umount(const char *target, unsigned flags)
-{
-    if (!cred_has(cred_current(), PRIV_MOUNT))
-        return -EPERM;
-    struct vnode *cwd = process_cwd_get();   /* as syscall_mount (P27) */
-    int rc = vfs_umount_at(cwd, target, flags);
-    if (cwd)
-        vnode_put(cwd);
-    return rc;
-}
-
-static int64_t sys_mount(struct syscall_args *a)
-{
-    if (!cred_has(cred_current(), PRIV_MOUNT))
-        return -EPERM;
-    unsigned cflags = (unsigned)a->a[3];
-    if (cflags & ~(COSMO_MOUNT_RDONLY | COSMO_MOUNT_SCRATCH))
-        return -EINVAL;   /* an unknown flag bit: see sys_mmap */
-    unsigned flags = ((cflags & COSMO_MOUNT_RDONLY) ? MOUNT_RDONLY : 0) |
-                     ((cflags & COSMO_MOUNT_SCRATCH) ? MOUNT_SCRATCH : 0);
-    char source[BLKDEV_NAME_MAX], target[VFS_PATH_MAX], fstype[16];
-    int rc = strncpy_from_user(source, a->a[0], sizeof(source));
-    if (rc < 0)
-        return rc;
-    rc = get_path(a->a[1], target);
-    if (rc)
-        return rc;
-    rc = strncpy_from_user(fstype, a->a[2], sizeof(fstype));
-    if (rc < 0)
-        return rc;
-    if ((flags & MOUNT_SCRATCH) && strcmp(fstype, "ramfs") != 0)
-        return -EINVAL;   /* a scratch root is ramfs's alone */
-    bool none = source[0] == '\0' || strcmp(source, "none") == 0;
-    return syscall_mount(none ? NULL : source, target, fstype, flags);
-}
-
-static int64_t sys_umount(struct syscall_args *a)
-{
-    if (!cred_has(cred_current(), PRIV_MOUNT))
-        return -EPERM;
-    unsigned flags = (unsigned)a->a[1];
-    if (flags & ~COSMO_UMOUNT_FORCE)
-        return -EINVAL;   /* an unknown flag bit: see sys_mmap */
-    char target[VFS_PATH_MAX];
-    int rc = get_path(a->a[0], target);
-    if (rc)
-        return rc;
-    return syscall_umount(target, flags ? VFS_UMOUNT_FORCE : 0);
-}
-
-/*
- * Roadmap M2: init, mounted a disk root at `path`, makes it the root
- * (docs/kernel-services/vfs/design.md, "Switching the root"). Init alone,
- * and only while it is the only process: nothing else may hold a
- * directory, an open file or a mapping in the tree about to be released,
- * and nothing else may be part-way through a path walk in it. Init's own
- * directory moves to the new root; the old one is released if nothing
- * holds it (a log line either way).
- */
 /* SYS_exec (roadmap M3): Linux execve's operation at the native door. */
 static int64_t sys_exec(struct syscall_args *a)
 {
@@ -596,34 +514,6 @@ static int64_t sys_exec(struct syscall_args *a)
         rc = process_execve(ea, a->frame);
     exec_args_free(ea);
     return rc;
-}
-
-static int64_t sys_switch_root(struct syscall_args *a)
-{
-    struct process *p = process_current();
-    if (!cred_has(cred_current(), PRIV_MOUNT) || !process_is_init(p))
-        return -EPERM;
-    if (process_count() != 1)
-        return -EBUSY;
-    if (p->root != NULL || (p->mntns != NULL && p->mntns != mountns_initial()))
-        return -EINVAL;   /* a confined init has no global root to switch */
-    char path[VFS_PATH_MAX];
-    int rc = get_path(a->a[0], path);
-    if (rc)
-        return rc;
-    struct vnode *cwd = process_cwd_get();
-    struct mount *old = NULL;
-    rc = vfs_switch_root(cwd, path, &old);
-    if (cwd)
-        vnode_put(cwd);
-    if (rc)
-        return rc;
-    rc = process_chdir("/");
-    if (rc)
-        kerror("switch root: init cannot move to the new root (%d); the old one is kept", rc);
-    else
-        (void)vfs_release_old_root(old);   /* -EBUSY keeps it, and says so */
-    return 0;
 }
 
 /* --- Phase 8: sockets ------------------------------------------------------- */

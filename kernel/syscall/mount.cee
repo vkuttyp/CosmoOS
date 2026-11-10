@@ -1,0 +1,235 @@
+// mount.cee - Mounting, unmounting and switching the root (uapi/cosmo/syscall.h), in CeeSafe (roadmap 2.0 SA8): the
+// native calls mount, umount and switch_root, and syscall_mount and syscall_umount, which the Linux door shares
+// (syscall.h). native.c's table names the calls.
+
+@header(
+    "kernel/blk.h", "kernel/cred.h", "kernel/errno.h", "kernel/kmalloc.h", "kernel/mountns.h", "kernel/process.h",
+    "kernel/string.h", "kernel/syscall.h", "kernel/uaccess.h", "kernel/vfs.h", "uapi/cosmo/syscall.h",
+)
+extern "C" {
+    struct syscall_args {
+        a: [u64; 6];
+    }
+    struct vnode;
+    struct mount;
+    struct mount_ns;
+    struct blkdev;
+    struct credentials;
+    struct process {
+        root: *mut vnode;
+        mntns: *mut mount_ns;
+    }
+
+    @cvalue("VFS_PATH_MAX == 1024 && BLKDEV_NAME_MAX == 16")
+    const BUFFERS_FIT: bool = true;
+    const VFS_PATH_MAX: usize = 1024;
+    const BLKDEV_NAME_MAX: usize = 16;
+    const PRIV_MOUNT: u32 = 1;
+    const COSMO_MOUNT_RDONLY: u32 = 1;
+    const COSMO_MOUNT_SCRATCH: u32 = 2;
+    const COSMO_UMOUNT_FORCE: u32 = 1;
+    const MOUNT_RDONLY: u32 = 1;
+    const MOUNT_SCRATCH: u32 = 4;
+    const VFS_UMOUNT_FORCE: u32 = 1;
+    const EPERM: i32 = 1;
+    const ENOENT: i32 = 2;
+    const ENOMEM: i32 = 12;
+    const EBUSY: i32 = 16;
+    const ENODEV: i32 = 19;
+    const EINVAL: i32 = 22;
+
+    fn cred_current() -> *credentials;
+    fn cred_has(c: *credentials, privilege: u32) -> bool;
+    fn process_current() -> *mut process;
+    fn process_is_init(p: *process) -> bool;
+    fn process_count() -> u32;
+    fn process_cwd_get() -> *mut vnode;
+    fn process_cwd_snapshot(path: *mut CChar, len: usize) -> *mut vnode;
+    fn process_chdir(path: *CChar) -> i32;
+    fn mountns_initial() -> *mut mount_ns;
+    fn strcmp(a: *CChar, b: *CChar) -> i32;
+    fn strncpy_from_user(dst: *mut CChar, userSrc: u64, max: usize) -> i32;
+    fn blk_find(name: *CChar) -> *mut blkdev;
+    fn blkdev_put(bd: *mut blkdev);
+    fn vnode_put(vn: *mut vnode);
+    fn vfs_mount_at(
+        start: *mut vnode,
+        startname: *CChar,
+        path: *CChar,
+        fsname: *CChar,
+        bdev: *mut blkdev,
+        flags: u32,
+    ) -> i32;
+    fn vfs_umount_at(start: *mut vnode, path: *CChar, flags: u32) -> i32;
+    fn vfs_switch_root(start: *mut vnode, path: *CChar, oldOut: *mut *mut mount) -> i32;
+    fn vfs_release_old_root(old: *mut mount) -> i32;
+}
+
+/// Safety: the dispatcher's: `a` is the call's arguments.
+unsafe fn arg(a: *mut syscall_args, i: usize) -> u64 => Ptr.toBorrow(a as *syscall_args).a[i];
+
+/// Safety: in a thread with credentials.
+unsafe fn mayMount() -> bool => cred_has(cred_current(), PRIV_MOUNT);
+
+/// A path from user memory into `buf` (VFS_PATH_MAX bytes); an empty one is -ENOENT.
+/// Safety: `buf` holds VFS_PATH_MAX bytes.
+unsafe fn getPath(uptr: u64, buf: *mut CChar) -> i32 {
+    let rc = strncpy_from_user(buf, uptr, VFS_PATH_MAX);
+    if (rc < 0) {
+        return rc;
+    }
+    return if (Slice.fromRaw(buf as *u8, 1)[0] == 0) -ENOENT else 0;
+}
+
+/// Mount `fstype` from `device` (null: none) on `target`, a relative target from the caller's directory, as every
+/// other path call resolves one (P27); it used to be resolved from the root.
+/// Safety: in a process's thread; the strings are terminated.
+@export("syscall_mount")
+unsafe fn syscallMount(device: *CChar, target: *CChar, fstype: *CChar, flags: u32) -> i32 {
+    if (!mayMount()) {
+        return -EPERM;
+    }
+    var bd = 0 as *mut blkdev;
+    if (!device.isNull()) {
+        bd = blk_find(device);
+        if (bd.isNull()) {
+            return -ENODEV;
+        }
+    }
+    let cwdname = kmalloc(VFS_PATH_MAX, 0) as *mut CChar; // its name, which the mount records (P32); off the frame
+    if (cwdname.isNull()) {
+        if (!bd.isNull()) {
+            blkdev_put(bd);
+        }
+        return -ENOMEM;
+    }
+    let cwd = process_cwd_snapshot(cwdname, VFS_PATH_MAX);
+    let startname = if (cwd.isNull()) 0 as *CChar else cwdname as *CChar;
+    let rc = vfs_mount_at(cwd, startname, target, fstype, bd, flags);
+    if (!cwd.isNull()) {
+        vnode_put(cwd);
+    }
+    kfree(cwdname as *mut void);
+    if (!bd.isNull()) {
+        blkdev_put(bd); // the mount took its own reference
+    }
+    return rc;
+}
+
+/// Unmount `target`, resolved as syscall_mount resolves it (P27).
+/// Safety: in a process's thread; `target` is terminated.
+@export("syscall_umount")
+unsafe fn syscallUmount(target: *CChar, flags: u32) -> i32 {
+    if (!mayMount()) {
+        return -EPERM;
+    }
+    let cwd = process_cwd_get();
+    let rc = vfs_umount_at(cwd, target, flags);
+    if (!cwd.isNull()) {
+        vnode_put(cwd);
+    }
+    return rc;
+}
+
+/// Safety: the dispatcher's.
+@export("sys_mount")
+unsafe fn mountCall(a: *mut syscall_args) -> i64 {
+    if (!mayMount()) {
+        return -EPERM as i64;
+    }
+    let cflags = truncate<u32>(arg(a, 3));
+    if ((cflags & ((COSMO_MOUNT_RDONLY | COSMO_MOUNT_SCRATCH) ^ 0xFFFFFFFF)) != 0) {
+        return -EINVAL as i64; // an unknown flag bit: see sys_mmap
+    }
+    let flags = (if ((cflags & COSMO_MOUNT_RDONLY) != 0) MOUNT_RDONLY else 0) |
+        (if ((cflags & COSMO_MOUNT_SCRATCH) != 0) MOUNT_SCRATCH else 0);
+    var source = [0u8; 16];
+    var target = [0u8; 1024];
+    var fstype = [0u8; 16];
+    let src = borrow mut source as *mut [u8; 16] as *mut CChar;
+    let tgt = borrow mut target as *mut [u8; 1024] as *mut CChar;
+    let fs = borrow mut fstype as *mut [u8; 16] as *mut CChar;
+    var rc = strncpy_from_user(src, arg(a, 0), BLKDEV_NAME_MAX);
+    if (rc < 0) {
+        return rc as i64;
+    }
+    rc = getPath(arg(a, 1), tgt);
+    if (rc != 0) {
+        return rc as i64;
+    }
+    rc = strncpy_from_user(fs, arg(a, 2), 16);
+    if (rc < 0) {
+        return rc as i64;
+    }
+    if ((flags & MOUNT_SCRATCH) != 0 && strcmp(fs as *CChar, "ramfs\0".ptr as *CChar) != 0) {
+        return -EINVAL as i64; // a scratch root is ramfs's alone
+    }
+    let none = source[0] == 0 || strcmp(src as *CChar, "none\0".ptr as *CChar) == 0;
+    return syscallMount(if (none) 0 as *CChar else src as *CChar, tgt as *CChar, fs as *CChar, flags) as i64;
+}
+
+/// Safety: the dispatcher's.
+@export("sys_umount")
+unsafe fn umountCall(a: *mut syscall_args) -> i64 {
+    if (!mayMount()) {
+        return -EPERM as i64;
+    }
+    let flags = truncate<u32>(arg(a, 1));
+    if ((flags & (COSMO_UMOUNT_FORCE ^ 0xFFFFFFFF)) != 0) {
+        return -EINVAL as i64; // an unknown flag bit: see sys_mmap
+    }
+    var target = [0u8; 1024];
+    let tgt = borrow mut target as *mut [u8; 1024] as *mut CChar;
+    let rc = getPath(arg(a, 0), tgt);
+    if (rc != 0) {
+        return rc as i64;
+    }
+    return syscallUmount(tgt as *CChar, if (flags != 0) VFS_UMOUNT_FORCE else 0) as i64;
+}
+
+/// Roadmap M2: init, mounted a disk root at `path`, makes it the root (docs/kernel-services/vfs/design.md, "Switching
+/// the root"). Init alone, and only while it is the only process: nothing else may hold a directory, an open file or a
+/// mapping in the tree about to be released, and nothing else may be part-way through a path walk in it. Init's own
+/// directory moves to the new root; the old one is released if nothing holds it (a log line either way).
+/// Safety: the dispatcher's.
+@export("sys_switch_root")
+unsafe fn switchRoot(a: *mut syscall_args) -> i64 {
+    let p = process_current();
+    if (!mayMount() || !process_is_init(p as *process)) {
+        return -EPERM as i64;
+    }
+    if (process_count() != 1) {
+        return -EBUSY as i64;
+    }
+    let proc = Ptr.toBorrow(p as *process);
+    if (!proc.root.isNull() || (!proc.mntns.isNull() && proc.mntns != mountns_initial())) {
+        return -EINVAL as i64; // a confined init has no global root to switch
+    }
+    var path = [0u8; 1024];
+    let pp = borrow mut path as *mut [u8; 1024] as *mut CChar;
+    var rc = getPath(arg(a, 0), pp);
+    if (rc != 0) {
+        return rc as i64;
+    }
+    let cwd = process_cwd_get();
+    var old = 0 as *mut mount;
+    rc = vfs_switch_root(cwd, pp as *CChar, borrow mut old as *mut *mut mount);
+    if (!cwd.isNull()) {
+        vnode_put(cwd);
+    }
+    if (rc != 0) {
+        return rc as i64;
+    }
+    rc = process_chdir("/\0".ptr as *CChar);
+    if (rc != 0) {
+        var buffer: [u8; 96] = [0; 96];
+        var line = TextWriter.create(mut buffer[..]);
+        line.text("switch root: init cannot move to the new root (-");
+        line.decimal(truncate<u64>(-(rc as i64)));
+        line.text("); the old one is kept");
+        KernelLog.send(LogLevel.Error, line);
+    } else {
+        let _ = vfs_release_old_root(old); // -EBUSY keeps it, and says so
+    }
+    return 0;
+}
