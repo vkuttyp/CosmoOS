@@ -1,0 +1,571 @@
+// files.cee - The native personality's calls on paths and open files (uapi/cosmo/syscall.h), in CeeSafe (roadmap 2.0
+// SA8): open, symlink, link, chmod, chown, utimes, umask, chroot, readlink, lstat, stat, fstat, lseek, mkdir, mknod,
+// unlink, rmdir, rename, getdents, sync and fsync. native.c's table names them (syscall.h).
+//
+// A path is copied into a buffer of VFS_PATH_MAX bytes: on the stack for one path, on the heap (kmalloc) where a call
+// takes two or three, which keeps every frame under the 2048-byte guard (scripts/frame-baseline.txt). A struct
+// cosmo_stat is a local of u64 words whose size the C compiler checks (the extern block).
+
+@header(
+    "kernel/errno.h", "kernel/handle.h", "kernel/kmalloc.h", "kernel/object.h", "kernel/process.h",
+    "kernel/syscall.h", "kernel/uaccess.h", "kernel/vfs.h", "uapi/cosmo/syscall.h",
+)
+extern "C" {
+    struct syscall_args {
+        a: [u64; 6];
+    }
+    struct handle_table;
+    struct process {
+        handles: handle_table;
+        umask: u32;
+    }
+    struct kobject;
+    struct vnode {
+        @cname("type")
+        kind: u32;
+    }
+    struct file {
+        obj: kobject;
+        vn: *mut vnode;
+    }
+    struct cosmo_stat;
+
+    @cvalue("VFS_PATH_MAX == 1024")
+    const PATH_IS_1024: bool = true;
+    @cvalue("sizeof(struct cosmo_stat) == 7 * sizeof(uint64_t)")
+    const STAT_IS_7_WORDS: bool = true;
+    @cvalue("sizeof(enum vnode_type) == sizeof(uint32_t)")
+    const VNODE_TYPE_IS_A_WORD: bool = true;
+    const VFS_PATH_MAX: usize = 1024;
+    const COSMO_O_ACCMODE: u32 = 0x0003;
+    const COSMO_O_RDONLY: u32 = 0x0000;
+    const COSMO_O_WRONLY: u32 = 0x0001;
+    const COSMO_O_RDWR: u32 = 0x0002;
+    const COSMO_O_CREAT: u32 = 0x0040;
+    const COSMO_O_EXCL: u32 = 0x0080;
+    const COSMO_O_TRUNC: u32 = 0x0200;
+    const COSMO_O_APPEND: u32 = 0x0400;
+    const COSMO_O_NONBLOCK: u32 = 0x0800;
+    const COSMO_O_DIRECTORY: u32 = 0x10000;
+    const COSMO_O_NOFOLLOW: u32 = 0x20000;
+    const COSMO_O_NOCTTY: u32 = 0x40000;
+    const COSMO_DT_FIFO: u32 = 4;
+    const COSMO_UTIME_NOW: u64 = 0xFFFFFFFFFFFFFFFF;
+    const VNODE_DIR: u32 = 2;
+    const VNODE_FIFO: u32 = 4;
+    const VFS_SET_MODE: u32 = 1;
+    const VFS_SET_MTIME: u32 = 2;
+    const VFS_SET_MTIME_NOW: u32 = 4;
+    const HANDLE_RIGHT_READ: u32 = 1;
+    const HANDLE_RIGHT_WRITE: u32 = 2;
+    const HANDLE_RIGHT_OWNER: u32 = 28;
+    const EBADF: i32 = 9;
+    const ENOENT: i32 = 2;
+    const ENOMEM: i32 = 12;
+    const EFAULT: i32 = 14;
+    const EINVAL: i32 = 22;
+
+    fn process_current() -> *mut process;
+    fn process_cwd_get() -> *mut vnode;
+    fn process_cwd_snapshot(path: *mut CChar, len: usize) -> *mut vnode;
+    fn process_chroot(dir: *mut vnode) -> i32;
+    fn kmalloc(size: usize, flags: u32) -> *mut void;
+    fn kfree(ptr: *mut void);
+    fn user_range_ok(addr: u64, len: usize) -> bool;
+    fn copy_to_user(userDst: u64, src: *void, len: usize) -> i32;
+    fn strncpy_from_user(dst: *mut CChar, userSrc: u64, max: usize) -> i32;
+    fn handle_lookup(t: *mut handle_table, h: i32, rightsNeeded: u32) -> *mut kobject;
+    fn handle_install(t: *mut handle_table, obj: *mut kobject, rights: u32) -> i32;
+    fn kobject_put(obj: *mut kobject);
+    fn file_from_kobject(obj: *mut kobject) -> *mut file;
+    fn file_put(f: *mut file);
+    fn file_set_dir_path(f: *mut file, name: *CChar);
+    fn file_seek(f: *mut file, off: i64, whence: i32) -> i64;
+    fn file_readdir(f: *mut file, buf: *mut void, len: usize) -> i64;
+    fn file_sync(f: *mut file) -> i32;
+    fn vnode_put(vn: *mut vnode);
+    fn vfs_open_named(
+        start: *mut vnode,
+        startname: *CChar,
+        path: *CChar,
+        flags: u32,
+        mode: u32,
+        out: *mut *mut file,
+        name: *mut CChar,
+        n: usize,
+    ) -> i32;
+    fn vfs_symlink(start: *mut vnode, path: *CChar, target: *CChar) -> i32;
+    fn vfs_link(ostart: *mut vnode, oldpath: *CChar, nstart: *mut vnode, newpath: *CChar, follow: bool) -> i32;
+    fn vfs_lookup(start: *mut vnode, path: *CChar, out: *mut *mut vnode) -> i32;
+    fn vfs_setattr(vn: *mut vnode, what: u32, mode: u32, mtimeNs: u64) -> i32;
+    fn vfs_chown(vn: *mut vnode, uid: u32, gid: u32) -> i32;
+    fn vfs_readlink(start: *mut vnode, path: *CChar, buf: *mut CChar, len: usize) -> i32;
+    fn vfs_stat(start: *mut vnode, path: *CChar, st: *mut cosmo_stat) -> i32;
+    fn vfs_lstat(start: *mut vnode, path: *CChar, st: *mut cosmo_stat) -> i32;
+    fn vfs_mkdir(start: *mut vnode, path: *CChar, mode: u32) -> i32;
+    fn vfs_mknod(start: *mut vnode, path: *CChar, mode: u32, kind: u32, out: *mut *mut vnode) -> i32;
+    fn vfs_unlink(start: *mut vnode, path: *CChar) -> i32;
+    fn vfs_rmdir(start: *mut vnode, path: *CChar) -> i32;
+    fn vfs_rename(start: *mut vnode, oldpath: *CChar, newpath: *CChar) -> i32;
+    fn vfs_sync() -> i32;
+    fn syscall_handle_stat(h: i32, st: *mut cosmo_stat) -> i32;
+}
+
+/// Safety: the dispatcher's: `a` is the call's arguments.
+unsafe fn arg(a: *mut syscall_args, i: usize) -> u64 => Ptr.toBorrow(a as *syscall_args).a[i];
+
+/// Safety: the dispatcher's.
+unsafe fn arg32(a: *mut syscall_args, i: usize) -> i32 => truncate<i32>(arg(a, i));
+
+/// The calling process's handle table.
+/// Safety: in a process's thread.
+unsafe fn handles() -> *mut handle_table {
+    let p = Ptr.toBorrowMut(process_current());
+    return borrow mut p.handles as *mut handle_table;
+}
+
+/// The calling process's file-creation mask (VFS-6): native creation takes it as the Linux door does.
+/// Safety: in a process's thread.
+unsafe fn umaskCell() -> borrow(static) AtomicU32 {
+    let p = Ptr.toBorrowMut(process_current());
+    return Ptr.toBorrow(borrow mut p.umask as *mut u32 as *AtomicU32);
+}
+
+/// A creation mode: the permission bits the caller asked for, less its mask (VFS-6).
+/// Safety: in a process's thread.
+unsafe fn creationMode(requested: u64) -> u32 =>
+    truncate<u32>(requested) & 0o7777 & (umaskCell().loadWith(LoadOrdering.Relaxed) ^ 0xFFFFFFFF);
+
+/// A path from user memory into `buf` (VFS_PATH_MAX bytes); an empty one is -ENOENT.
+/// Safety: `buf` holds VFS_PATH_MAX bytes.
+unsafe fn getPath(uptr: u64, buf: *mut CChar) -> i32 {
+    let rc = strncpy_from_user(buf, uptr, VFS_PATH_MAX);
+    if (rc < 0) {
+        return rc;
+    }
+    return if (Slice.fromRaw(buf as *u8, 1)[0] == 0) -ENOENT else 0;
+}
+
+/// The file behind handle `h` if it carries `rights`, referenced: the caller puts it.
+/// Safety: in a process's thread.
+unsafe fn fileOf(h: i32, rights: u32) -> *mut file {
+    let obj = handle_lookup(handles(), h, rights);
+    if (obj.isNull()) {
+        return 0 as *mut file;
+    }
+    let f = file_from_kobject(obj);
+    if (f.isNull()) {
+        kobject_put(obj);
+    }
+    return f;
+}
+
+/// The node `upath` names from the working directory, a final link followed.
+/// Safety: in a process's thread; `out` is writable.
+unsafe fn pathNode(upath: u64, out: *mut *mut vnode) -> i32 {
+    var path = [0u8; 1024];
+    let p = borrow mut path as *mut [u8; 1024] as *mut CChar;
+    let rc = getPath(upath, p);
+    if (rc != 0) {
+        return rc;
+    }
+    let cwd = process_cwd_get();
+    let found = vfs_lookup(cwd, p as *CChar, out);
+    vnode_put(cwd);
+    return found;
+}
+
+/// What a call does with its path or paths, from the working directory.
+enum PathOp {
+    Link,
+    Rename,
+    Unlink,
+    Rmdir,
+    Stat,
+    Lstat,
+}
+
+/// Two paths from the call's first two arguments, into one heap buffer, and `op` (Link or Rename) on them from the
+/// working directory.
+/// Safety: the dispatcher's.
+unsafe fn twoPaths(a: *mut syscall_args, op: PathOp) -> i64 {
+    let oldp = kmalloc(2 * VFS_PATH_MAX, 0) as *mut CChar; // heap: see open
+    if (oldp.isNull()) {
+        return -ENOMEM as i64;
+    }
+    let newp = (oldp as *mut u8).add(VFS_PATH_MAX) as *mut CChar;
+    var rc = getPath(arg(a, 0), oldp);
+    if (rc == 0) {
+        rc = getPath(arg(a, 1), newp);
+    }
+    if (rc == 0) {
+        let cwd = process_cwd_get();
+        // A final link is linked itself, as POSIX link().
+        rc = if (op == PathOp.Link) vfs_link(cwd, oldp as *CChar, cwd, newp as *CChar, false)
+            else vfs_rename(cwd, oldp as *CChar, newp as *CChar);
+        vnode_put(cwd);
+    }
+    kfree(oldp as *mut void);
+    return rc as i64;
+}
+
+/// One path from the call's first argument, on the stack, and `op` (Unlink or Rmdir) on it from the working directory.
+/// Safety: the dispatcher's.
+unsafe fn onePath(a: *mut syscall_args, op: PathOp) -> i64 {
+    var path = [0u8; 1024];
+    let p = borrow mut path as *mut [u8; 1024] as *mut CChar;
+    var rc = getPath(arg(a, 0), p);
+    if (rc != 0) {
+        return rc as i64;
+    }
+    let cwd = process_cwd_get();
+    rc = if (op == PathOp.Unlink) vfs_unlink(cwd, p as *CChar) else vfs_rmdir(cwd, p as *CChar);
+    vnode_put(cwd);
+    return rc as i64;
+}
+
+/// The three path buffers (3 KiB) live on the heap, not the 16 KiB kernel stack (scripts/frame-baseline.txt).
+/// Safety: the dispatcher's.
+@export("sys_open")
+unsafe fn open(a: *mut syscall_args) -> i64 {
+    let flags = truncate<u32>(arg(a, 1));
+    let known = COSMO_O_ACCMODE | COSMO_O_CREAT | COSMO_O_EXCL | COSMO_O_TRUNC | COSMO_O_APPEND | COSMO_O_DIRECTORY |
+        COSMO_O_NOFOLLOW | COSMO_O_NONBLOCK | COSMO_O_NOCTTY;
+    if ((flags & (known ^ 0xFFFFFFFF)) != 0) {
+        return -EINVAL as i64; // an unknown flag bit: see sys_mmap
+    }
+    let path = kmalloc(3 * VFS_PATH_MAX, 0) as *mut CChar;
+    if (path.isNull()) {
+        return -ENOMEM as i64;
+    }
+    let base = (path as *mut u8).add(VFS_PATH_MAX) as *mut CChar;
+    let name = (path as *mut u8).add(2 * VFS_PATH_MAX) as *mut CChar;
+    let rc = openAt(a, flags, path, base, name);
+    kfree(path as *mut void);
+    return rc;
+}
+
+/// open's work, its three buffers given.
+/// Safety: the dispatcher's; each buffer holds VFS_PATH_MAX bytes.
+unsafe fn openAt(a: *mut syscall_args, flags: u32, path: *mut CChar, base: *mut CChar, name: *mut CChar) -> i64 {
+    var rc = getPath(arg(a, 0), path);
+    if (rc != 0) {
+        return rc as i64;
+    }
+    let mode = creationMode(arg(a, 2)); // VFS-6
+    var f = 0 as *mut file;
+    let cwd = process_cwd_snapshot(base, VFS_PATH_MAX);
+    // A directory remembers the name its own walk took to it, from the same snapshot, so a Linux program handed this
+    // handle can fchdir into it (P31, P32).
+    rc = vfs_open_named(
+        cwd,
+        base as *CChar,
+        path as *CChar,
+        flags,
+        mode,
+        borrow mut f as *mut *mut file,
+        name,
+        VFS_PATH_MAX,
+    );
+    vnode_put(cwd);
+    if (rc != 0) {
+        return rc as i64;
+    }
+    let fm = Ptr.toBorrowMut(f);
+    let isDir = Ptr.toBorrow(fm.vn as *vnode).kind == VNODE_DIR;
+    if (isDir) {
+        file_set_dir_path(f, name as *CChar);
+    }
+    // The access mode decides read and write; opening a file is what makes the caller its owner, so it may also copy,
+    // pass on and administer the handle.
+    var rights = HANDLE_RIGHT_OWNER;
+    let acc = flags & COSMO_O_ACCMODE;
+    if (acc == COSMO_O_RDONLY || acc == COSMO_O_RDWR) {
+        rights = rights | HANDLE_RIGHT_READ;
+    }
+    if (acc == COSMO_O_WRONLY || acc == COSMO_O_RDWR) {
+        rights = rights | HANDLE_RIGHT_WRITE;
+    }
+    // As the Linux door: a directory handle carries WRITE, the right to change its entries through a Linux program's
+    // *at calls, which a delegation narrows by giving READ alone (P31).
+    if (isDir) {
+        rights = rights | HANDLE_RIGHT_READ | HANDLE_RIGHT_WRITE;
+    }
+    rc = handle_install(handles(), borrow mut fm.obj as *mut kobject, rights);
+    file_put(f); // the table holds its own reference
+    return rc as i64;
+}
+
+/// The three symbolic-link calls. readlink copies without a terminator, as POSIX says and as the walk wants
+/// (docs/kernel-services/vfs/api.md).
+/// Safety: the dispatcher's.
+@export("sys_symlink")
+unsafe fn symlink(a: *mut syscall_args) -> i64 {
+    let target = kmalloc(2 * VFS_PATH_MAX, 0) as *mut CChar; // heap: see open
+    if (target.isNull()) {
+        return -ENOMEM as i64;
+    }
+    let path = (target as *mut u8).add(VFS_PATH_MAX) as *mut CChar;
+    var rc = strncpy_from_user(target, arg(a, 0), VFS_PATH_MAX);
+    if (rc >= 0) {
+        rc = getPath(arg(a, 1), path);
+    }
+    if (rc >= 0) {
+        let cwd = process_cwd_get();
+        rc = vfs_symlink(cwd, path as *CChar, target as *CChar);
+        vnode_put(cwd);
+    }
+    kfree(target as *mut void);
+    return rc as i64;
+}
+
+// --- links and metadata (VFS-4, VFS-6; roadmap 1.2 A2) -------------------------------------------------------------
+
+/// Safety: the dispatcher's.
+@export("sys_link")
+unsafe fn link(a: *mut syscall_args) -> i64 => twoPaths(a, PathOp.Link);
+
+/// Safety: the dispatcher's.
+@export("sys_chmod")
+unsafe fn chmod(a: *mut syscall_args) -> i64 {
+    var vn = 0 as *mut vnode;
+    var rc = pathNode(arg(a, 0), borrow mut vn as *mut *mut vnode);
+    if (rc != 0) {
+        return rc as i64;
+    }
+    rc = vfs_setattr(vn, VFS_SET_MODE, truncate<u32>(arg(a, 1)), 0);
+    vnode_put(vn);
+    return rc as i64;
+}
+
+/// COSMO_ID_KEEP is VFS_ID_KEEP.
+/// Safety: the dispatcher's.
+@export("sys_chown")
+unsafe fn chown(a: *mut syscall_args) -> i64 {
+    var vn = 0 as *mut vnode;
+    var rc = pathNode(arg(a, 0), borrow mut vn as *mut *mut vnode);
+    if (rc != 0) {
+        return rc as i64;
+    }
+    rc = vfs_chown(vn, truncate<u32>(arg(a, 1)), truncate<u32>(arg(a, 2)));
+    vnode_put(vn);
+    return rc as i64;
+}
+
+/// Safety: the dispatcher's.
+@export("sys_utimes")
+unsafe fn utimes(a: *mut syscall_args) -> i64 {
+    var vn = 0 as *mut vnode;
+    var rc = pathNode(arg(a, 0), borrow mut vn as *mut *mut vnode);
+    if (rc != 0) {
+        return rc as i64;
+    }
+    let t = arg(a, 1);
+    rc = if (t == COSMO_UTIME_NOW) vfs_setattr(vn, VFS_SET_MTIME_NOW, 0, 0) else vfs_setattr(vn, VFS_SET_MTIME, 0, t);
+    vnode_put(vn);
+    return rc as i64;
+}
+
+/// The process's own mask, inherited by spawn and fork (struct process).
+/// Safety: the dispatcher's.
+@export("sys_umask")
+unsafe fn umask(a: *mut syscall_args) -> i64 =>
+    umaskCell().swapWith(truncate<u32>(arg(a, 0)) & 0o777, Ordering.Relaxed) as i64;
+
+/// Safety: the dispatcher's.
+@export("sys_chroot")
+unsafe fn chroot(a: *mut syscall_args) -> i64 {
+    var dir = 0 as *mut vnode;
+    var rc = pathNode(arg(a, 0), borrow mut dir as *mut *mut vnode);
+    if (rc != 0) {
+        return rc as i64;
+    }
+    rc = process_chroot(dir);
+    vnode_put(dir);
+    return rc as i64;
+}
+
+/// Safety: the dispatcher's.
+@export("sys_readlink")
+unsafe fn readlink(a: *mut syscall_args) -> i64 {
+    var path = [0u8; 1024];
+    let p = borrow mut path as *mut [u8; 1024] as *mut CChar;
+    var rc = getPath(arg(a, 0), p);
+    if (rc != 0) {
+        return rc as i64;
+    }
+    var len = arg(a, 2);
+    if (len == 0) {
+        return -EINVAL as i64;
+    }
+    if (len > VFS_PATH_MAX as u64) {
+        len = VFS_PATH_MAX as u64;
+    }
+    let n = truncate<usize>(len);
+    let buf = kmalloc(n, 0) as *mut CChar;
+    if (buf.isNull()) {
+        return -ENOMEM as i64;
+    }
+    let cwd = process_cwd_get();
+    rc = vfs_readlink(cwd, p as *CChar, buf, n);
+    vnode_put(cwd);
+    if (rc > 0 && copy_to_user(arg(a, 1), buf as *void, truncate<usize>(rc)) != 0) {
+        rc = -EFAULT;
+    }
+    kfree(buf as *mut void);
+    return rc as i64;
+}
+
+/// A stat of the path in the call's first argument, by `op` (Stat or Lstat), copied out to the second.
+/// Safety: the dispatcher's.
+unsafe fn statPath(a: *mut syscall_args, op: PathOp) -> i64 {
+    var path = [0u8; 1024];
+    let p = borrow mut path as *mut [u8; 1024] as *mut CChar;
+    var rc = getPath(arg(a, 0), p);
+    if (rc != 0) {
+        return rc as i64;
+    }
+    var st = [0u64; 7];
+    let sp = borrow mut st as *mut [u64; 7] as *mut cosmo_stat;
+    let cwd = process_cwd_get();
+    rc = if (op == PathOp.Lstat) vfs_lstat(cwd, p as *CChar, sp) else vfs_stat(cwd, p as *CChar, sp);
+    vnode_put(cwd);
+    if (rc != 0) {
+        return rc as i64;
+    }
+    return if (copy_to_user(arg(a, 1), sp as *void, 56) != 0) -EFAULT as i64 else 0;
+}
+
+/// Safety: the dispatcher's.
+@export("sys_lstat")
+unsafe fn lstat(a: *mut syscall_args) -> i64 => statPath(a, PathOp.Lstat);
+
+/// Safety: the dispatcher's.
+@export("sys_stat")
+unsafe fn stat(a: *mut syscall_args) -> i64 => statPath(a, PathOp.Stat);
+
+/// Safety: the dispatcher's.
+@export("sys_fstat")
+unsafe fn fstat(a: *mut syscall_args) -> i64 {
+    var st = [0u64; 7];
+    let sp = borrow mut st as *mut [u64; 7] as *mut cosmo_stat;
+    let rc = syscall_handle_stat(arg32(a, 0), sp);
+    if (rc != 0) {
+        return rc as i64;
+    }
+    return if (copy_to_user(arg(a, 1), sp as *void, 56) != 0) -EFAULT as i64 else 0;
+}
+
+/// Safety: the dispatcher's.
+@export("sys_lseek")
+unsafe fn lseek(a: *mut syscall_args) -> i64 {
+    let f = fileOf(arg32(a, 0), 0);
+    if (f.isNull()) {
+        return -EBADF as i64;
+    }
+    let rc = file_seek(f, truncate<i64>(arg(a, 1)), arg32(a, 2));
+    file_put(f);
+    return rc;
+}
+
+/// Safety: the dispatcher's.
+@export("sys_mkdir")
+unsafe fn mkdir(a: *mut syscall_args) -> i64 {
+    var path = [0u8; 1024];
+    let p = borrow mut path as *mut [u8; 1024] as *mut CChar;
+    var rc = getPath(arg(a, 0), p);
+    if (rc != 0) {
+        return rc as i64;
+    }
+    let cwd = process_cwd_get();
+    rc = vfs_mkdir(cwd, p as *CChar, creationMode(arg(a, 1))); // VFS-6
+    vnode_put(cwd);
+    return rc as i64;
+}
+
+/// A named pipe (the named-pipes unit): the one special node a program makes by name. A socket's name is made by bind,
+/// and a DT_SOCK node without a socket behind it is a dead name, so that is -EINVAL.
+/// Safety: the dispatcher's.
+@export("sys_mknod")
+unsafe fn mknod(a: *mut syscall_args) -> i64 {
+    if (truncate<u32>(arg(a, 2)) != COSMO_DT_FIFO) {
+        return -EINVAL as i64;
+    }
+    var path = [0u8; 1024];
+    let p = borrow mut path as *mut [u8; 1024] as *mut CChar;
+    var rc = getPath(arg(a, 0), p);
+    if (rc != 0) {
+        return rc as i64;
+    }
+    let cwd = process_cwd_get();
+    var vn = 0 as *mut vnode;
+    rc = vfs_mknod(cwd, p as *CChar, creationMode(arg(a, 1)), VNODE_FIFO, borrow mut vn as *mut *mut vnode); // VFS-6
+    vnode_put(cwd);
+    if (rc == 0) {
+        vnode_put(vn);
+    }
+    return rc as i64;
+}
+
+/// Safety: the dispatcher's.
+@export("sys_unlink")
+unsafe fn unlink(a: *mut syscall_args) -> i64 => onePath(a, PathOp.Unlink);
+
+/// Safety: the dispatcher's.
+@export("sys_rmdir")
+unsafe fn rmdir(a: *mut syscall_args) -> i64 => onePath(a, PathOp.Rmdir);
+
+/// Safety: the dispatcher's.
+@export("sys_rename")
+unsafe fn rename(a: *mut syscall_args) -> i64 => twoPaths(a, PathOp.Rename);
+
+/// Safety: the dispatcher's.
+@export("sys_getdents")
+unsafe fn getdents(a: *mut syscall_args) -> i64 {
+    let ubuf = arg(a, 1);
+    var want = arg(a, 2);
+    if (want > 65536) {
+        want = 65536;
+    }
+    let len = truncate<usize>(want);
+    if (!user_range_ok(ubuf, len)) {
+        return -EFAULT as i64;
+    }
+    let f = fileOf(arg32(a, 0), HANDLE_RIGHT_READ);
+    if (f.isNull()) {
+        return -EBADF as i64;
+    }
+    let tmp = kmalloc(len, 0);
+    if (tmp.isNull()) {
+        file_put(f);
+        return -ENOMEM as i64;
+    }
+    var n = file_readdir(f, tmp, len);
+    file_put(f);
+    if (n > 0 && copy_to_user(ubuf, tmp as *void, truncate<usize>(n)) != 0) {
+        n = -EFAULT as i64;
+    }
+    kfree(tmp);
+    return n;
+}
+
+/// Safety: the dispatcher's.
+@export("sys_sync")
+unsafe fn sync(a: *mut syscall_args) -> i64 {
+    let _ = a;
+    return vfs_sync() as i64;
+}
+
+/// Commit one file, not every mount: fsync(fd). Unlike SYS_sync, a caller (e.g. a VM owner honouring a guest's
+/// virtio-blk flush) cannot force synchronous commits of filesystems it has nothing to do with.
+/// Safety: the dispatcher's.
+@export("sys_fsync")
+unsafe fn fsync(a: *mut syscall_args) -> i64 {
+    let f = fileOf(arg32(a, 0), 0);
+    if (f.isNull()) {
+        return -EBADF as i64;
+    }
+    let rc = file_sync(f);
+    file_put(f);
+    return rc as i64;
+}

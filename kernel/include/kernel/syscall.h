@@ -92,6 +92,29 @@ int64_t sys_vcpu_run(struct syscall_args *a);
 int64_t sys_vcpu_stop(struct syscall_args *a);
 int64_t sys_vcpu_irq(struct syscall_args *a);
 
+/* The native calls on paths and open files (kernel/syscall/files.cee). */
+int64_t sys_open(struct syscall_args *a);
+int64_t sys_symlink(struct syscall_args *a);
+int64_t sys_link(struct syscall_args *a);
+int64_t sys_chmod(struct syscall_args *a);
+int64_t sys_chown(struct syscall_args *a);
+int64_t sys_utimes(struct syscall_args *a);
+int64_t sys_umask(struct syscall_args *a);
+int64_t sys_chroot(struct syscall_args *a);
+int64_t sys_readlink(struct syscall_args *a);
+int64_t sys_lstat(struct syscall_args *a);
+int64_t sys_stat(struct syscall_args *a);
+int64_t sys_fstat(struct syscall_args *a);
+int64_t sys_lseek(struct syscall_args *a);
+int64_t sys_mkdir(struct syscall_args *a);
+int64_t sys_mknod(struct syscall_args *a);
+int64_t sys_unlink(struct syscall_args *a);
+int64_t sys_rmdir(struct syscall_args *a);
+int64_t sys_rename(struct syscall_args *a);
+int64_t sys_getdents(struct syscall_args *a);
+int64_t sys_sync(struct syscall_args *a);
+int64_t sys_fsync(struct syscall_args *a);
+
 /* The native calls on processes' threads, futexes, sleeping and the
  * clocks (kernel/syscall/threads.cee). */
 int64_t sys_exit(struct syscall_args *a);
