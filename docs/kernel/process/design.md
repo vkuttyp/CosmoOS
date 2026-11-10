@@ -364,7 +364,7 @@ Native table (`uapi/cosmo/syscall.h`, numbers stable from now on):
 | 9 | `log` | `(const char *s, size_t len)` → 0; kernel log line prefixed with the pid |
 | 10 | `close` | `(int h)` → 0 or -EBADF |
 
-User copy helpers (`kernel/syscall/uaccess.c`): `user_range_ok(addr,
+User copy helpers (`kernel/syscall/uaccess.cee`): `user_range_ok(addr,
 len)` (inside `[USER_LO, USER_HI)`, no overflow), then the copy through
 `arch_copy_user_raw` inside an access window. The primitive's accesses
 carry exception-table entries: a page that is unmapped, `PROT_NONE`,
@@ -1534,7 +1534,7 @@ initial stack, so `kernel/process/process.c` names no personality.
 
 | Hook | Called | Native | Linux |
 |---|---|---|---|
-| `claims_elf` | `personality_for_elf` (`kernel/syscall/personality.c`): the kernel's own processes are native; otherwise the first personality that claims the ELF | the CosmoOS note | every ELF (the fallback, asked second) |
+| `claims_elf` | `personality_for_elf` (`kernel/syscall/personality.cee`): the kernel's own processes are native; otherwise the first personality that claims the ELF | the CosmoOS note | every ELF (the fallback, asked second) |
 | `init` | process creation, after the image is loaded, before the stack | none | `linux_process_init`: `p->linux` |
 | `release` | process release, and the failure path of creation (so it must accept a process whose `init` never ran) | none | detach SysV shm attaches, free `p->linux` |
 | `platform` | the initial-stack builder pushes it when not NULL (AT_PLATFORM) | NULL | `x86_64` / `aarch64` |

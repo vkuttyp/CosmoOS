@@ -1740,6 +1740,24 @@ and the personality's state.
   Linux self-tests pass on both architectures with no C left in
   `compat/` or `kernel/syscall/`.
 
+Progress (2026-11-10, the smallest files first). `kernel/syscall/`:
+`personality.cee`, `uaccess.cee` (`might_sleep` with the caller's
+address through `callerAddress()`), `uaccesstest.cee` (which guard is
+absent from `user.h`'s `ARCH_USER_GUARD_IS_SMAP()`: `cfg` tests a
+macro's value, and `ARCH_*` are only defined or not) and `syscall.cee`
+(the call's `struct syscall_args` a CeeSafe struct of the same layout,
+checked by the C compiler, so the dispatch allocates nothing).
+`compat/linux/`: `convert.c` joined `lxconv.cee` -- `struct stat`'s two
+fields whose widths differ between the architectures are written in
+`cfg` blocks on `linux_abi.h`'s `LX_ABI_IS_X86_64`, and
+`tests/host/test_linux.c` gained the encoders' digest from the C on
+both layouts (`0x7159817551c8dcff` AArch64, `0x15ff4a3eb99bf16f`
+x86-64) -- and `netioctl.cee` (`struct lx_ifreq` as its 40 bytes at
+checked offsets). Each step passed the builds, the analysis and both
+boot tests; the dispatcher and the encoders `test-busybox` too, the
+ioctls `test-net-login`, the self-tests `test-guard`. Left: `signal.c`,
+then `native.c` and `syscalls.c` in sections.
+
 Size: about 1.5x.
 
 ### SA9 Every driver

@@ -13,11 +13,11 @@ subsystems they translate to; the rules are in `invariants.md`.
 | `kernel/arch/x86_64/user.c` | `arch_syscall_init_cpu` (STAR, LSTAR, SFMASK), `x86_syscall_c`, `x86_syscall_return_check`, `arch_user_access_begin/end` (STAC/CLAC), `arch_user_regs_restart_syscall` |
 | `kernel/arch/aarch64/vectors.S`, `trap.c`, `user.c` | `el0_sync` vector, `handle_sync` → `handle_syscall`; PAN window; `arch_user_regs_restart_syscall` |
 | `kernel/arch/*/uaccess.S` | `arch_copy_user_raw`, the copy whose user-touching instructions carry exception-table entries |
-| `kernel/syscall/syscall.c` | `syscall_dispatch`, `syscall_allowed`, `syscall_filter_install`, the global counters |
+| `kernel/syscall/syscall.cee` | `syscall_dispatch`, `syscall_allowed`, `syscall_filter_install`, the global counters |
 | `kernel/syscall/native.c` | the native table `native_table[SYS_COUNT]`, `personality_native`, 92 of its 106 handlers, the bounce, the shared `syscall_handle_*`/`syscall_obj_*` I/O bodies |
-| `kernel/syscall/personality.c` | `personality_for_elf`: the list of personalities and the selection rule |
-| `kernel/syscall/uaccess.c` | `user_range_ok`, `copy_from_user`, `copy_to_user`, `strncpy_from_user` |
-| `kernel/syscall/uaccesstest.c` | self-tests `uaccess`, `uaccess-guard` |
+| `kernel/syscall/personality.cee` | `personality_for_elf`: the list of personalities and the selection rule |
+| `kernel/syscall/uaccess.cee` | `user_range_ok`, `copy_from_user`, `copy_to_user`, `strncpy_from_user` |
+| `kernel/syscall/uaccesstest.cee` | self-tests `uaccess`, `uaccess-guard` |
 | `kernel-services/virtualization/hvsys.c` | the ten native virtualization handlers (`sys_vm_*`, `sys_vcpu_*`) |
 | `kernel/process/native_signal.c` | the four native signal handlers and `native_signal_frame` |
 | `compat/linux/syscalls.c` | `personality_linux` and its table (`docs/compat/linux/`) |
@@ -72,7 +72,7 @@ dispatcher, reported by `procinfo` and the process dump.
 **The bounce**: `struct io_bounce { buf, cap, heap }` (`syscall.h`),
 described under "Memory".
 
-**Global counters** (`syscall.c`, `native.c`): `g_calls`, `g_unknown`,
+**Global counters** (`syscall.cee`, `native.c`): `g_calls`, `g_unknown`,
 `g_filtered`, `g_bounce_heap`, `g_bounce_fallback`, read by
 `syscall_count`, `syscall_unknown_count`, `syscall_filtered_count`,
 `syscall_bounce_heap_count`, `syscall_bounce_fallback_count`. Only the
@@ -285,7 +285,7 @@ architecture. There is no `-ERESTART*` family: any call that returns
   `api.md`. The filter has room for 512 numbers in either personality
   (`COSMO_SYSCALL_MASK_WORDS`); growing past that changes the mask ABI.
 - A third personality is an entry in `g_personalities`
-  (`personality.c`) with its own `claims_elf`, table and always-allowed
+  (`personality.cee`) with its own `claims_elf`, table and always-allowed
   list.
 - Not implemented: argument-level filtering, audit logging, tracing
   hooks, per-thread accounting, a vDSO, and readers for the

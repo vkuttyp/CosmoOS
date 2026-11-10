@@ -17,15 +17,15 @@ system calls and check each result. Commands are as in
 | Release | the boot only: `SELFTEST` is 0 for release builds, so none of the self-tests above is compiled | `make BUILD=release test` |
 | Host (ASan/UBSan) | `test_cred` (`cred_has` and the privilege rules the handlers call) | `make host-test` |
 
-There is no host test of the dispatcher, the filter or `uaccess.c`; they
+There is no host test of the dispatcher, the filter or `uaccess.cee`; they
 are exercised only in the guest.
 
 ## Kernel self-tests
 
 | Test | File | Steps | Proves |
 |---|---|---|---|
-| `uaccess` | `kernel/syscall/uaccesstest.c` | from a kernel thread (no process): every exception-table entry names kernel text and resolves to its fixup; `user_range_ok` on seven boundary cases (`USER_LO`, `USER_HI` with length 0 and 1, `USER_LO - 1`, a range straddling `USER_HI`, a kernel address, a `(size_t)-1` length); four copies at unmapped user addresses return `-EFAULT` with the `fixups` count up by exactly four; the destination is untouched or terminated; a zero-length copy and a kernel-address copy touch nothing; `strncpy_from_user(..., 0)` is `-EINVAL` | SC9, M32 |
-| `uaccess-guard` | `kernel/syscall/uaccesstest.c` | a private space maps one page; with interrupts off the page is read once inside `arch_user_access_begin/end` (must succeed) and once outside (must fault where `arch_user_guard_present()`, must succeed where not); logs which | SC10 |
+| `uaccess` | `kernel/syscall/uaccesstest.cee` | from a kernel thread (no process): every exception-table entry names kernel text and resolves to its fixup; `user_range_ok` on seven boundary cases (`USER_LO`, `USER_HI` with length 0 and 1, `USER_LO - 1`, a range straddling `USER_HI`, a kernel address, a `(size_t)-1` length); four copies at unmapped user addresses return `-EFAULT` with the `fixups` count up by exactly four; the destination is untouched or terminated; a zero-length copy and a kernel-address copy touch nothing; `strncpy_from_user(..., 0)` is `-EINVAL` | SC9, M32 |
+| `uaccess-guard` | `kernel/syscall/uaccesstest.cee` | a private space maps one page; with interrupts off the page is read once inside `arch_user_access_begin/end` (must succeed) and once outside (must fault where `arch_user_guard_present()`, must succeed where not); logs which | SC10 |
 | `read-bounce` | `kernel-services/vfs/vfstest_dev.cee` | `syscall_bounce_get` sizing (stack chunk to 1 KiB, heap to 64 KiB); an injected heap refusal takes the stack chunk and bumps `syscall_bounce_fallback_count`; a ramfs file answers a 64 KiB object call with 64 KiB, its tail with 3072; a pipe holding 300 bytes answers 300 | SC12 |
 | `read-bench` | `kernel-services/vfs/vfstest_wb.cee` | object-path read throughput of a ramfs file at 1 KiB and 64 KiB requests (figures in `architecture.md`, "The bounce") | the bounce's purpose; no assertion on speed |
 | `process-user` | `kernel/process/proctest.c` | runs `init --selftest` (below) and requires exit status 0, within a 20 000 ms budget | everything in the user-mode suite |

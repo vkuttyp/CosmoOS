@@ -116,7 +116,7 @@ test is **registered after the quiesce block** —
 which is that test's sensitivity and not this one's
 (`docs/testing/flakes.md`).
 
-### `SELFTEST: uaccess` (`selftest_uaccess`, `kernel/syscall/uaccesstest.c`)
+### `SELFTEST: uaccess` (`selftest_uaccess`, `kernel/syscall/uaccesstest.cee`)
 
 From a kernel thread (no process, so every user address is unmapped):
 the exception table has at least one entry (one on x86-64, four on
@@ -126,7 +126,7 @@ kernel-mode faults at user addresses through `copy_from_user`,
 kernel buffer untouched, and `vm_stats.fixups` rises by exactly four; a
 kernel pointer is refused by the range check without a fault.
 
-### `SELFTEST: uaccess-guard` (`selftest_uaccess_guard`, `kernel/syscall/uaccesstest.c`)
+### `SELFTEST: uaccess-guard` (`selftest_uaccess_guard`, `kernel/syscall/uaccesstest.cee`)
 
 The guard on kernel access to user memory, where the CPU has one. A
 private space maps one populated user page filled with `0x5A`; with the

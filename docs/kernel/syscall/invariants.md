@@ -26,7 +26,7 @@ AArch64 `SVC` path (`handle_syscall`, `kernel/arch/aarch64/trap.c`) are
 its only callers, and an `SVC` from EL1 panics. The counters, the
 filter, the kill check and signal delivery below all depend on there
 being one door. Check: review (the two call sites are the only
-references outside `syscall.c`); every boot's user programs reach
+references outside `syscall.cee`); every boot's user programs reach
 handlers only this way. Gap: nothing mechanical stops a third caller.
 
 **SC2. A handler runs with interrupts enabled, `irq_depth == 0`,
@@ -121,7 +121,7 @@ destination untouched or terminated, zero length is no access);
 
 **SC10. User memory is touched only inside
 `arch_user_access_begin`/`arch_user_access_end`.** The only such
-bracket in `kernel/syscall/` is `raw_copy` in `uaccess.c`. Where the
+bracket in `kernel/syscall/` is `raw_copy` in `uaccess.cee`. Where the
 CPU has the guard (SMAP, PAN), an access outside the bracket faults.
 Check: `uaccess-guard` (the bracketed read succeeds; the unbracketed
 one faults where the guard exists); `make test-guard` boots a CPU model

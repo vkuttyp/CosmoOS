@@ -541,7 +541,7 @@ so a string that ends before an unmapped page is accepted and one that
 runs into it is `-EFAULT`, as before, without the region walk.
 
 What the fixup does not cover: direct dereferences of user pointers
-outside `uaccess.c` (there are none, invariant P14), and faults at kernel
+outside `uaccess.cee` (there are none, invariant P14), and faults at kernel
 addresses (no entry ever names one; a kernel-address fault with a
 fixup-table PC still panics).
 

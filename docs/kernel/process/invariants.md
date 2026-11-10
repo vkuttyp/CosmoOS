@@ -115,7 +115,7 @@ whose accesses carry exception fixups; `sys_read`/`sys_write` bounce
 through a 1024-byte kernel buffer. Check: test `process-user` (kernel
 pointer, below-window, top-of-window, unmapped, and overflowing lengths
 all `-EFAULT`), `process-efault` (PROT_NONE, read-only, torn ranges),
-`uaccess`; grep for casts of user addresses outside `uaccess.c` finds
+`uaccess`; grep for casts of user addresses outside `uaccess.cee` finds
 none (review).
 
 **P15. A user-mode fault never panics the kernel, and a kernel-mode

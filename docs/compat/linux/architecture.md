@@ -23,7 +23,7 @@ as gaps, not attempted.
    Linux program (static ELF, e.g. built with musl-gcc -static)   tests/linux/*.c (freestanding, raw Linux ABI)
         │  SYSCALL: rax = Linux number, rdi rsi rdx r10 r8 r9
         ▼
-   kernel/arch/x86_64/syscall_entry.S  ─►  kernel/syscall/syscall.c: pers->table[nr]
+   kernel/arch/x86_64/syscall_entry.S  ─►  kernel/syscall/syscall.cee: pers->table[nr]
         │                                   (the same entry and dispatcher as the native personality)
         ▼
    compat/linux/syscalls.c        personality_linux: 87 translated Linux calls, each translating arguments,

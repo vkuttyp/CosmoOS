@@ -13,7 +13,7 @@ maps a number to a function through the calling process's personality.
    user code ── SYSCALL ──► kernel/arch/x86_64/syscall_entry.S
                                   │ struct syscall_frame on the kernel stack
                                   ▼
-                            kernel/syscall/syscall.c   syscall_dispatch()
+                            kernel/syscall/syscall.cee   syscall_dispatch()
                                   │ personality->table[nr]
                                   ▼
                             kernel/syscall/native.c    sys_write, sys_mmap, ...
