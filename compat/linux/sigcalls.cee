@@ -1,15 +1,19 @@
 // sigcalls.cee - Linux's signal system calls over the kernel's signal core (docs/compat/linux/design.md, stage 2;
 // kernel/process/signal.c), in CeeSafe (roadmap 2.0 SA8): rt_sigaction, rt_sigprocmask, rt_sigpending,
-// rt_sigsuspend, pause, sigaltstack, kill, tgkill, tkill, gettid, set_tid_address, exit and exit_group. The handler
-// frames and rt_sigreturn are signal.c's.
+// rt_sigsuspend, pause, sigaltstack, kill, tgkill, tkill, gettid, set_tid_address, exit and exit_group; and the Linux
+// view of delivery: the rt_sigframe a handler runs on (the x86-64 and AArch64 layouts of Linux, so that musl's and
+// glibc's restorers and any hand-written handler work), the return through rt_sigreturn, and the trampoline page a
+// handler without SA_RESTORER returns through on AArch64.
 //
-// The core's records a call builds or copies -- struct sigaction_k, struct signal_info, the guest's stack_t -- are
-// CeeSafe structs of the same layout, which the C compiler checks (the extern block), and a struct arch_user_regs is
-// a local of the larger architecture's size, which it checks too.
+// The core's records a call builds or copies -- struct sigaction_k, struct signal_info, the guest's stack_t and
+// siginfo, the AArch64 context records -- are CeeSafe structs of the same layout, which the C compiler checks (the
+// extern block); a struct arch_user_regs, an x86-64 frame and its ucontext are locals of words, sized by the C
+// compiler too, seen through the imported structs. Each architecture's frame code is its build's alone (`@cfg`).
 
 @header(
-    "arch/user.h", "kernel/errno.h", "kernel/process.h", "kernel/signal.h", "kernel/syscall.h", "kernel/thread.h",
-    "kernel/uaccess.h", "linux_abi.h", "linux_internal.h",
+    "arch/mmu.h", "arch/user.h", "kernel/errno.h", "kernel/page.h", "kernel/process.h", "kernel/random.h",
+    "kernel/signal.h", "kernel/syscall.h", "kernel/thread.h", "kernel/uaccess.h", "kernel/vmm.h", "linux_abi.h",
+    "linux_internal.h",
 )
 extern "C" {
     struct syscall_args {
@@ -25,18 +29,189 @@ extern "C" {
         altstack: sigaltstack_k;
         clear_child_tid: u64;
         user_tid: u32;
+        syscall_nr: u64;
     }
     struct credentials {
         ruid: u32;
     }
+    struct vm_space;
+    struct arch_mmu_context;
+    @ctype("vm_cache_t")
+    struct vm_cache_t;
     struct process {
         pid: u32;
         cred: credentials;
+        space: *mut vm_space;
     }
     struct sigaction_k;
     struct signal_info;
-    struct arch_user_regs;
     enum signal_source: u32;
+    /// The interrupted registers, each architecture's own.
+    struct arch_user_regs {
+        @cfg("LX_ABI_IS_X86_64")
+        rax: u64;
+        @cfg("LX_ABI_IS_X86_64")
+        rbx: u64;
+        @cfg("LX_ABI_IS_X86_64")
+        rcx: u64;
+        @cfg("LX_ABI_IS_X86_64")
+        rdx: u64;
+        @cfg("LX_ABI_IS_X86_64")
+        rsi: u64;
+        @cfg("LX_ABI_IS_X86_64")
+        rdi: u64;
+        @cfg("LX_ABI_IS_X86_64")
+        rbp: u64;
+        @cfg("LX_ABI_IS_X86_64")
+        rsp: u64;
+        @cfg("LX_ABI_IS_X86_64")
+        r8: u64;
+        @cfg("LX_ABI_IS_X86_64")
+        r9: u64;
+        @cfg("LX_ABI_IS_X86_64")
+        r10: u64;
+        @cfg("LX_ABI_IS_X86_64")
+        r11: u64;
+        @cfg("LX_ABI_IS_X86_64")
+        r12: u64;
+        @cfg("LX_ABI_IS_X86_64")
+        r13: u64;
+        @cfg("LX_ABI_IS_X86_64")
+        r14: u64;
+        @cfg("LX_ABI_IS_X86_64")
+        r15: u64;
+        @cfg("LX_ABI_IS_X86_64")
+        rip: u64;
+        @cfg("LX_ABI_IS_X86_64")
+        rflags: u64;
+        @cfg("!LX_ABI_IS_X86_64")
+        x: [u64; 31];
+        @cfg("!LX_ABI_IS_X86_64")
+        sp: u64;
+        @cfg("!LX_ABI_IS_X86_64")
+        pc: u64;
+        @cfg("!LX_ABI_IS_X86_64")
+        pstate: u64;
+    }
+    /// The x86-64 frame, as the handler sees it (rsp points at pretcode); its siginfo is `SigInfo` at X86_INFO_AT.
+    struct lx_stack_t {
+        ss_sp: u64;
+        ss_flags: i32;
+        ss_size: u64;
+    }
+    struct lx_sigcontext_x86 {
+        r8: u64;
+        r9: u64;
+        r10: u64;
+        r11: u64;
+        r12: u64;
+        r13: u64;
+        r14: u64;
+        r15: u64;
+        rdi: u64;
+        rsi: u64;
+        rbp: u64;
+        rbx: u64;
+        rdx: u64;
+        rax: u64;
+        rcx: u64;
+        rsp: u64;
+        rip: u64;
+        eflags: u64;
+        trapno: u64;
+        oldmask: u64;
+        cr2: u64;
+        fpstate: u64;
+    }
+    struct lx_ucontext_x86 {
+        uc_flags: u64;
+        uc_stack: lx_stack_t;
+        uc_mcontext: lx_sigcontext_x86;
+        uc_sigmask: u64;
+    }
+    struct lx_rt_sigframe_x86 {
+        pretcode: u64;
+        uc: lx_ucontext_x86;
+    }
+    @cvalue("sizeof(struct lx_rt_sigframe_x86)")
+    const X86_FRAME_SIZE: u64 = 440;
+    @cvalue("sizeof(struct lx_rt_sigframe_x86) / sizeof(uint64_t)")
+    const X86_FRAME_WORDS: usize = 55;
+    @cvalue("offsetof(struct lx_rt_sigframe_x86, uc)")
+    const X86_UC_AT: u64 = 8;
+    @cvalue("offsetof(struct lx_rt_sigframe_x86, info)")
+    const X86_INFO_AT: u64 = 312;
+    @cvalue("sizeof(struct lx_ucontext_x86)")
+    const X86_UC_SIZE: usize = 304;
+    @cvalue("sizeof(struct lx_ucontext_x86) / sizeof(uint64_t)")
+    const X86_UC_WORDS: usize = 38;
+    const LX_UC_SIGCONTEXT_SS: u64 = 0x2;
+    const LX_UC_STRICT_RESTORE_SS: u64 = 0x4;
+
+    /// The AArch64 frame (sp points at it; a frame record lies below), written in place at these offsets.
+    @cvalue("sizeof(struct lx_rt_sigframe_a64)")
+    const A64_FRAME_SIZE: u64 = 4688;
+    @cvalue("offsetof(struct lx_rt_sigframe_a64, info)")
+    const A64_INFO_AT: u64 = 0;
+    @cvalue("offsetof(struct lx_rt_sigframe_a64, uc)")
+    const A64_UC_AT: u64 = 128;
+    @cvalue("sizeof(struct lx_ucontext_a64)")
+    const A64_UC_SIZE: u64 = 4560;
+    @cvalue("offsetof(struct lx_rt_sigframe_a64, uc.uc_stack)")
+    const A64_STACK_AT: u64 = 144;
+    @cvalue("offsetof(struct lx_rt_sigframe_a64, uc.uc_sigmask)")
+    const A64_MASK_AT: u64 = 168;
+    @cvalue("offsetof(struct lx_rt_sigframe_a64, uc.uc_mcontext.fault_address)")
+    const A64_FAULT_AT: u64 = 304;
+    @cvalue("offsetof(struct lx_rt_sigframe_a64, uc.uc_mcontext.regs)")
+    const A64_REGS_AT: u64 = 312;
+    @cvalue("offsetof(struct lx_rt_sigframe_a64, uc.uc_mcontext.sp)")
+    const A64_SP_AT: u64 = 560;
+    @cvalue("offsetof(struct lx_rt_sigframe_a64, uc.uc_mcontext.pc)")
+    const A64_PC_AT: u64 = 568;
+    @cvalue("offsetof(struct lx_rt_sigframe_a64, uc.uc_mcontext.pstate)")
+    const A64_PSTATE_AT: u64 = 576;
+    @cvalue("offsetof(struct lx_rt_sigframe_a64, uc.uc_mcontext.reserved)")
+    const A64_RSV_AT: u64 = 592;
+    @cvalue("sizeof(((struct lx_sigcontext_a64 *)0)->reserved)")
+    const A64_RSV_LEN: u64 = 4096;
+    /// The reserved area's records, as `Fpsimd` and `Esr` lay them out, and its terminator's header.
+    @cvalue(
+        "sizeof(struct lx_fpsimd_context) == 528 && offsetof(struct lx_fpsimd_context, fpsr) == 8 && offsetof(struct lx_fpsimd_context, vregs) == 16 && sizeof(struct lx_esr_context) == 16 && offsetof(struct lx_esr_context, esr) == 8 && sizeof(struct lx_ctx_terminator) == 8",
+    )
+    const A64_RECORDS_LAYOUT: bool = true;
+    const LX_FPSIMD_MAGIC: u32 = 0x46508001;
+    const LX_ESR_MAGIC: u32 = 0x45535201;
+
+    /// The guest's siginfo, as `SigInfo` lays it out: the union's words from offset 16.
+    @cvalue(
+        "sizeof(struct lx_siginfo) == 128 && offsetof(struct lx_siginfo, si_code) == 8 && offsetof(struct lx_siginfo, u.kill.pid) == 16 && offsetof(struct lx_siginfo, u.kill.uid) == 20 && offsetof(struct lx_siginfo, u.fault.addr) == 16 && offsetof(struct lx_siginfo, u.child.pid) == 16 && offsetof(struct lx_siginfo, u.child.uid) == 20 && offsetof(struct lx_siginfo, u.child.status) == 24",
+    )
+    const SIGINFO_LAYOUT: bool = true;
+    @cvalue("sizeof(struct lx_siginfo)")
+    const SIGINFO_SIZE: usize = 128;
+    const LX_SI_USER: i32 = 0;
+    const LX_SI_KERNEL: i32 = 0x80;
+    const LX_SI_TKILL: i32 = -6;
+    const SIGSRC_FAULT: u32 = 2;
+    const SIGSRC_KERNEL: u32 = 3;
+    const SIGSRC_CHILD: u32 = 4;
+    const SA_ONSTACK: u64 = 0x08000000;
+    const SA_RESTORER: u64 = 0x04000000;
+    const SIGSEGV: i32 = 11;
+    const SIGNAL_NO_RESTART: u64 = 0xFFFFFFFFFFFFFFFF;
+
+    // The trampoline page: process.h's mmap range, types.h's page, mmu.h's protections, vmm.h's flag.
+    const USER_MMAP_BASE: u64 = 0x0000100000000000;
+    const ASLR_MMAP_BITS: u32 = 28;
+    const PAGE_SHIFT: u32 = 12;
+    const PAGE_SIZE: usize = 4096;
+    const VM_PROT_RW: u32 = 3;
+    const VM_PROT_RX: u32 = 5;
+    const VM_REGION_POPULATED: u32 = 4;
+    /// vm_space's page tables are its first member: a space's address is its mmu context's.
+    @cvalue("offsetof(struct vm_space, mmu)")
+    const MMU_AT: usize = 0;
 
     // The records built here, as `Act`, `Info` and `Stack` lay them out.
     @cvalue("sizeof(struct sigaction_k)")
@@ -96,6 +271,24 @@ extern "C" {
     fn process_exit(status: i32);        // __noreturn
     fn arch_user_regs_from_syscall(frame: *void, r: *mut arch_user_regs);
     fn arch_user_regs_sp(r: *arch_user_regs) -> usize;
+    fn arch_user_fpu_image_size() -> usize;
+    fn arch_user_fpu_image_save(buf: *mut void) -> bool;
+    fn arch_user_fpu_image_restore(buf: *void) -> bool;
+    fn signal_return(syscallFrame: *mut void, regs: *arch_user_regs, blocked: u64);
+    fn linux_sigtramp_addr(p: *process) -> u64;
+    fn random_u64() -> u64;
+    fn vm_user_find_free(space: *mut vm_space, from: u64, size: usize) -> u64;
+    fn vm_user_map_anon(space: *mut vm_space, base: u64, size: usize, prot: u32, flags: u32, name: *CChar) -> i32;
+    fn vm_user_protect(space: *mut vm_space, base: u64, size: usize, prot: u32) -> i32;
+    fn arch_mmu_query(
+        ctx: *arch_mmu_context,
+        va: usize,
+        pa: *mut u64,
+        prot: *mut u32,
+        cache: *mut vm_cache_t,
+        pageSize: *mut usize,
+    ) -> bool;
+    fn phys_to_virt(pa: u64) -> *mut void;
 }
 
 /// A struct sigaction_k: the handler, the flags, the restorer, the mask.
@@ -134,7 +327,7 @@ unsafe fn arg32(a: *mut syscall_args, i: usize) -> i32 => truncate<i32>(Ptr.toBo
 /// Safety: `a` is the dispatcher's.
 unsafe fn arg(a: *mut syscall_args, i: usize) -> u64 => Ptr.toBorrow(a as *syscall_args).a[i];
 
-// --- the alternate stack (signal.c's frames keep their own copy of these three) -----------------------------------
+// --- the alternate stack ---------------------------------------------------------------------------------------------
 
 fn altstackEnabled(t: borrow thread) -> bool => t.altstack.size != 0 && (t.altstack.flags & LX_SS_DISABLE) == 0;
 
@@ -467,4 +660,477 @@ unsafe fn exit(a: *mut syscall_args) -> i64 {
 unsafe fn exitGroup(a: *mut syscall_args) -> i64 {
     process_exit(status(a));
     return 0; // not reached: process_exit does not return
+}
+
+// --- the handler frame ---------------------------------------------------------------------------------------------
+
+const ALIGN16: u64 = 0xFFFFFFFFFFFFFFF0;
+const ALIGN64: u64 = 0xFFFFFFFFFFFFFFC0;
+
+/// The guest's siginfo (SIGINFO_LAYOUT): its union is words from offset 16, little-endian on both architectures.
+struct SigInfo {
+    signo: i32;
+    errno: i32;
+    code: i32;
+    pad: i32;
+    u: [u32; 28];
+}
+
+/// AArch64's FP/SIMD record: the two status words then Q0-Q31, behind an eight-byte header (A64_RECORDS_LAYOUT).
+struct Fpsimd {
+    magic: u32;
+    size: u32;
+    fpsr: u32;
+    fpcr: u32;
+    vregs: [u8; 512];
+}
+
+/// AArch64's esr_context record (syndrome 0: not carried yet).
+struct Esr {
+    magic: u32;
+    size: u32;
+    esr: u64;
+}
+
+const FPSIMD_SIZE: usize = 528;
+/// The FXSAVE image an x86-64 frame points at.
+const X86_FX_SIZE: usize = 512;
+
+fn fillSiginfo(info: borrow Info) -> SigInfo {
+    var si = SigInfo { signo: info.sig, errno: 0, code: LX_SI_KERNEL, pad: 0, u: [0u32; 28] };
+    if (info.source == SIGSRC_USER || info.source == SIGSRC_TKILL) {
+        si.code = if (info.source == SIGSRC_USER) LX_SI_USER else LX_SI_TKILL;
+        si.u[0] = info.senderPid;
+        si.u[1] = info.senderUid;
+    } else if (info.source == SIGSRC_FAULT) {
+        // SEGV_MAPERR/ACCERR, ILL_ILLOPC, FPE_INTDIV, TRAP_BRKPT are all 1; the core's `code` is the MAPERR/ACCERR
+        // distinction.
+        si.code = if (info.code != 0) truncate<i32>(info.code) else 1;
+        si.u[0] = truncate<u32>(info.faultAddr);
+        si.u[1] = truncate<u32>(info.faultAddr >> 32);
+    } else if (info.source == SIGSRC_CHILD) {
+        // SIGCHLD: the CLD_* cause (SI_CLD_* match the Linux values), the child's pid/uid and its exit code or
+        // killing/stop signal.
+        si.code = truncate<i32>(info.code);
+        si.u[0] = info.senderPid;
+        si.u[1] = info.senderUid;
+        si.u[2] = truncate<u32>(info.status);
+    }
+    return si;
+}
+
+/// Where the frame goes: the alternate stack when the action asks for it and the thread is not already on it, else
+/// below the current stack.
+fn frameBase(t: borrow thread, act: borrow Act, sp: u64) -> u64 {
+    if ((act.flags & SA_ONSTACK) != 0 && altstackEnabled(t) && !onAltstack(t, sp)) {
+        return t.altstack.sp + t.altstack.size;
+    }
+    return sp;
+}
+
+/// A frame that cannot be read is a SIGSEGV on the thread, delivered at this call's exit.
+/// Safety: `t` is the calling thread.
+unsafe fn sigreturnFault(t: *mut thread, addr: u64) -> i64 {
+    let info = Info {
+        sig: SIGSEGV,
+        source: SIGSRC_FAULT,
+        faultAddr: addr,
+        code: 1,
+        senderPid: 0,
+        senderUid: 0,
+        status: 0,
+    };
+    let _ = signal_send_thread(t, SIGSEGV, borrow info as *Info as *signal_info);
+    let tm = Ptr.toBorrowMut(t);
+    tm.syscall_nr = SIGNAL_NO_RESTART;
+    return -EFAULT as i64;
+}
+
+/// Safety: the dispatcher's.
+unsafe fn syscallFrame(a: *mut syscall_args) -> *mut void => Ptr.toBorrow(a as *syscall_args).frame;
+
+// x86-64: a frame needs SA_RESTORER, as on Linux; it is built whole here and copied out.
+
+fn fillMcontextX86(mc: borrow mut lx_sigcontext_x86, r: borrow arch_user_regs) {
+    if (cfg("LX_ABI_IS_X86_64")) {
+        mc.r8 = r.r8;
+        mc.r9 = r.r9;
+        mc.r10 = r.r10;
+        mc.r11 = r.r11;
+        mc.r12 = r.r12;
+        mc.r13 = r.r13;
+        mc.r14 = r.r14;
+        mc.r15 = r.r15;
+        mc.rdi = r.rdi;
+        mc.rsi = r.rsi;
+        mc.rbp = r.rbp;
+        mc.rbx = r.rbx;
+        mc.rdx = r.rdx;
+        mc.rax = r.rax;
+        mc.rcx = r.rcx;
+        mc.rsp = r.rsp;
+        mc.rip = r.rip;
+        mc.eflags = r.rflags;
+    }
+}
+
+fn restoreMcontextX86(r: borrow mut arch_user_regs, mc: borrow lx_sigcontext_x86) {
+    if (cfg("LX_ABI_IS_X86_64")) {
+        r.r8 = mc.r8;
+        r.r9 = mc.r9;
+        r.r10 = mc.r10;
+        r.r11 = mc.r11;
+        r.r12 = mc.r12;
+        r.r13 = mc.r13;
+        r.r14 = mc.r14;
+        r.r15 = mc.r15;
+        r.rdi = mc.rdi;
+        r.rsi = mc.rsi;
+        r.rbp = mc.rbp;
+        r.rbx = mc.rbx;
+        r.rdx = mc.rdx;
+        r.rax = mc.rax;
+        r.rcx = mc.rcx;
+        r.rsp = mc.rsp;
+        r.rip = mc.rip;
+        r.rflags = mc.eflags;
+    }
+}
+
+fn fillFrameX86(
+    f: borrow mut lx_rt_sigframe_x86,
+    r: borrow arch_user_regs,
+    act: borrow Act,
+    info: borrow Info,
+    st: Stack,
+    blockedBefore: u64,
+    fpstate: u64,
+) {
+    if (cfg("LX_ABI_IS_X86_64")) {
+        f.pretcode = act.restorer;
+        f.uc.uc_flags = LX_UC_SIGCONTEXT_SS | LX_UC_STRICT_RESTORE_SS;
+        f.uc.uc_stack.ss_sp = st.sp;
+        f.uc.uc_stack.ss_flags = st.flags;
+        f.uc.uc_stack.ss_size = st.size;
+        f.uc.uc_sigmask = blockedBefore;
+        fillMcontextX86(mut f.uc.uc_mcontext, r);
+        f.uc.uc_mcontext.oldmask = blockedBefore;
+        let fault = info.source == SIGSRC_FAULT;
+        f.uc.uc_mcontext.cr2 = if (fault) info.faultAddr else 0;
+        f.uc.uc_mcontext.trapno = if (fault && info.sig == SIGSEGV) 14 else 0;
+        f.uc.uc_mcontext.fpstate = fpstate;
+    }
+}
+
+/// Safety: the core's, at delivery: `r` is the interrupted registers, `act` and `info` are readable.
+unsafe fn signalFrameX86(r: *mut arch_user_regs, act: *sigaction_k, info: *signal_info, blockedBefore: u64) -> i32 {
+    if (cfg("LX_ABI_IS_X86_64")) {
+        let t = Ptr.toBorrow(thread_current() as *thread);
+        let a = Ptr.toBorrow(act as *Act);
+        let i = Ptr.toBorrow(info as *Info);
+        // Linux refuses a frame for a handler without a restorer: SIGSEGV. The libcs always set one; the trampoline page
+        // exists for AArch64.
+        if ((a.flags & SA_RESTORER) == 0) {
+            return -EFAULT;
+        }
+        let userSp = Ptr.toBorrow(r as *arch_user_regs).rsp;
+        var sp = frameBase(t, a, userSp);
+        if (sp == userSp) {
+            sp = sp - 128; // the red zone the ABI grants leaf functions
+        }
+        var fx = [0u8; 512];
+        var fpstate: u64 = 0;
+        if (arch_user_fpu_image_size() == X86_FX_SIZE && arch_user_fpu_image_save(
+            borrow mut fx as *mut [u8; 512] as *mut void,
+        )) {
+            sp = (sp - X86_FX_SIZE as u64) & ALIGN64;
+            fpstate = sp;
+        }
+        sp = ((sp - X86_FRAME_SIZE) & ALIGN16) - 8; // as after a CALL: rsp = 8 mod 16
+
+        var words = [0u64; 55]; // X86_FRAME_WORDS
+        let f = borrow mut words as *mut [u64; 55] as *mut lx_rt_sigframe_x86;
+        fillFrameX86(
+            Ptr.toBorrowMut(f),
+            Ptr.toBorrow(r as *arch_user_regs),
+            a,
+            i,
+            altstackOut(t, userSp),
+            blockedBefore,
+            fpstate,
+        );
+        ((f as *mut u8).add(X86_INFO_AT as usize) as *mut SigInfo).write(fillSiginfo(i));
+
+        if (fpstate != 0 && copy_to_user(fpstate, borrow fx as *[u8; 512] as *void, X86_FX_SIZE) != 0) {
+            return -EFAULT;
+        }
+        if (copy_to_user(sp, f as *void, X86_FRAME_SIZE as usize) != 0) {
+            return -EFAULT;
+        }
+        let w = Ptr.toBorrowMut(r);
+        w.rdi = truncate<u64>(i.sig as i64);
+        w.rsi = sp + X86_INFO_AT;
+        w.rdx = sp + X86_UC_AT;
+        w.rax = 0;
+        w.rsp = sp;
+        w.rip = a.handler;
+        w.rflags = w.rflags & (0x10500u64 ^ 0xFFFFFFFFFFFFFFFF); // DF, TF, RF
+        return 0;
+    }
+    return -EFAULT; // not reached: x86-64 builds return above
+}
+
+/// The handler returned through the restorer: rsp points at `uc` (the RET popped pretcode).
+/// Safety: the dispatcher's.
+unsafe fn rtSigreturnX86(a: *mut syscall_args) -> i64 {
+    if (cfg("LX_ABI_IS_X86_64")) {
+        let t = thread_current();
+        var regs = [0u64; 34];
+        let rp = borrow mut regs as *mut [u64; 34] as *mut arch_user_regs;
+        arch_user_regs_from_syscall(syscallFrame(a) as *void, rp);
+        let r = Ptr.toBorrowMut(rp);
+        var ucWords = [0u64; 38]; // X86_UC_WORDS
+        let ucp = borrow mut ucWords as *mut [u64; 38] as *mut lx_ucontext_x86;
+        var fx = [0u8; 512];
+        if (copy_from_user(ucp as *mut void, r.rsp, X86_UC_SIZE) != 0) {
+            return sigreturnFault(t, r.rsp);
+        }
+        let uc = Ptr.toBorrow(ucp as *lx_ucontext_x86);
+        let fpstate = uc.uc_mcontext.fpstate;
+        if (fpstate != 0 && copy_from_user(borrow mut fx as *mut [u8; 512] as *mut void, fpstate, X86_FX_SIZE) != 0) {
+            return sigreturnFault(t, r.rsp);
+        }
+        restoreMcontextX86(r, uc.uc_mcontext);
+        if (fpstate != 0) {
+            let _ = arch_user_fpu_image_restore(borrow fx as *[u8; 512] as *void);
+        }
+        // The core sanitises rflags and marks the frame for the full IRETQ restore, which also catches a non-canonical
+        // rip (the SYSRET guard).
+        let rax = r.rax;
+        signal_return(syscallFrame(a), rp as *arch_user_regs, uc.uc_sigmask);
+        let tm = Ptr.toBorrowMut(t);
+        tm.syscall_nr = SIGNAL_NO_RESTART; // the restored rax is not a result to restart
+        return truncate<i64>(rax);
+    }
+    return -EFAULT as i64; // not reached
+}
+
+// AArch64: the frame is about 4.7 KiB, 4 KiB of it the reserved area that holds the context records, so it is never
+// assembled on the 16 KiB kernel stack (scripts/frame-baseline.txt): delivery zeroes the frame in user memory and
+// writes each part at its offset, and the return reads back only the parts it uses. What the handler finds, and what
+// the return accepts and refuses, are the same as when the frame was built whole.
+
+/// Zero `len` user bytes at `dst`; whether a write faulted.
+/// Safety: in the thread whose memory `dst` is.
+unsafe fn zeroUser(dst: u64, len: u64) -> bool {
+    let zero = [0u8; 256];
+    var at = dst;
+    var left = len;
+    while (left != 0) {
+        let n = if (left < 256) left else 256;
+        if (copy_to_user(at, borrow zero as *[u8; 256] as *void, truncate<usize>(n)) != 0) {
+            return true;
+        }
+        at = at + n;
+        left = left - n;
+    }
+    return false;
+}
+
+/// Fault exactly where a copy of all `len` bytes would have; whether it did.
+/// Safety: in the thread whose memory `src` is.
+unsafe fn probeUser(src: u64, len: u64) -> bool {
+    var buf = [0u8; 256];
+    var at = src;
+    var left = len;
+    while (left != 0) {
+        let n = if (left < 256) left else 256;
+        if (copy_from_user(borrow mut buf as *mut [u8; 256] as *mut void, at, truncate<usize>(n)) != 0) {
+            return true;
+        }
+        at = at + n;
+        left = left - n;
+    }
+    return false;
+}
+
+/// Copy `len` bytes at `src` out to `dst`; whether it faulted.
+/// Safety: `src` is readable, in the thread whose memory `dst` is.
+unsafe fn put(dst: u64, src: *void, len: usize) -> bool => copy_to_user(dst, src, len) != 0;
+
+/// Copy `len` user bytes at `src` in to `dst`; whether it faulted.
+/// Safety: `dst` is writable, in the thread whose memory `src` is.
+unsafe fn get(dst: *mut void, src: u64, len: usize) -> bool => copy_from_user(dst, src, len) != 0;
+
+/// Safety: the core's, at delivery: `r` is the interrupted registers, `act` and `info` are readable.
+unsafe fn signalFrameA64(r: *mut arch_user_regs, act: *sigaction_k, info: *signal_info, blockedBefore: u64) -> i32 {
+    if (cfg("!LX_ABI_IS_X86_64")) {
+        let t = Ptr.toBorrow(thread_current() as *thread);
+        let a = Ptr.toBorrow(act as *Act);
+        let i = Ptr.toBorrow(info as *Info);
+        let regs = Ptr.toBorrow(r as *arch_user_regs);
+        let userSp = regs.sp;
+        let frame = (frameBase(t, a, userSp) - A64_FRAME_SIZE) & ALIGN16;
+        let sp = frame - 16; // the frame record: the interrupted fp and lr
+
+        let si = fillSiginfo(i);
+        let ss = altstackOut(t, userSp);
+        let fault = if (i.source == SIGSRC_FAULT) i.faultAddr else 0;
+        // The reserved area holds a list of records: the FP/SIMD state, then an esr_context, then the terminator. A
+        // handler that uses vector registers -- which is every handler in a program built by an ordinary toolchain --
+        // would otherwise return into an interrupted function whose registers it had overwritten.
+        var fp = Fpsimd { magic: LX_FPSIMD_MAGIC, size: 528, fpsr: 0, fpcr: 0, vregs: [0u8; 512] };
+        let haveFp = arch_user_fpu_image_size() == FPSIMD_SIZE - 8 &&
+            arch_user_fpu_image_save(borrow mut fp.fpsr as *mut u32 as *mut void);
+        let esr = Esr { magic: LX_ESR_MAGIC, size: 16, esr: 0 };
+        let rsv = frame + A64_RSV_AT;
+        let esrAt = rsv + (if (haveFp) FPSIMD_SIZE as u64 else 0);
+        // The terminator is eight zero bytes after the last record, which the zeroing already wrote.
+        let record = [regs.x[29], regs.x[30]];
+        if (zeroUser(frame, A64_FRAME_SIZE) ||
+            put(frame + A64_INFO_AT, borrow si as *SigInfo as *void, SIGINFO_SIZE) ||
+            put(frame + A64_STACK_AT, borrow ss as *Stack as *void, STACK_SIZE) ||
+            put(frame + A64_MASK_AT, borrow blockedBefore as *u64 as *void, 8) ||
+            put(frame + A64_FAULT_AT, borrow fault as *u64 as *void, 8) ||
+            put(frame + A64_REGS_AT, borrow regs.x as *[u64; 31] as *void, 248) ||
+            put(frame + A64_SP_AT, borrow regs.sp as *u64 as *void, 8) ||
+            put(frame + A64_PC_AT, borrow regs.pc as *u64 as *void, 8) ||
+            put(frame + A64_PSTATE_AT, borrow regs.pstate as *u64 as *void, 8) ||
+            (haveFp && put(rsv, borrow fp as *Fpsimd as *void, FPSIMD_SIZE)) ||
+            put(esrAt, borrow esr as *Esr as *void, 16) ||
+            put(sp, borrow record as *[u64; 2] as *void, 16)) {
+            return -EFAULT;
+        }
+
+        let w = Ptr.toBorrowMut(r);
+        w.x[0] = truncate<u64>(i.sig as i64);
+        w.x[1] = frame + A64_INFO_AT;
+        w.x[2] = frame + A64_UC_AT;
+        w.x[29] = sp;
+        w.x[30] = if ((a.flags & SA_RESTORER) != 0) a.restorer else linux_sigtramp_addr(process_current() as *process);
+        w.sp = sp;
+        w.pc = a.handler;
+        return 0;
+    }
+    return -EFAULT; // not reached: AArch64 builds return above
+}
+
+/// Put the interrupted code's vector registers back, if the frame still carries them: a handler is free to have used
+/// its own. The records are walked rather than assumed, because a program may build its own frame. A record that
+/// cannot be read ends the walk, as a malformed one does.
+/// Safety: in the thread whose memory `rsv` is.
+unsafe fn restoreFpsimd(rsv: u64) {
+    var off: u64 = 0;
+    while (off + 8 <= A64_RSV_LEN) {
+        var head = [0u32; 2];
+        if (get(borrow mut head as *mut [u32; 2] as *mut void, rsv + off, 8)) {
+            return;
+        }
+        let size = head[1] as u64;
+        if (head[0] == 0 || size < 8 || size > A64_RSV_LEN - off) {
+            return;
+        }
+        if (head[0] == LX_FPSIMD_MAGIC && size == FPSIMD_SIZE as u64) {
+            var fp = Fpsimd { magic: 0, size: 0, fpsr: 0, fpcr: 0, vregs: [0u8; 512] };
+            if (!get(borrow mut fp as *mut Fpsimd as *mut void, rsv + off, FPSIMD_SIZE)) {
+                let _ = arch_user_fpu_image_restore(borrow fp.fpsr as *u32 as *void);
+            }
+            return;
+        }
+        off = off + size;
+    }
+}
+
+/// The restorer runs with sp at the frame record.
+/// Safety: the dispatcher's.
+unsafe fn rtSigreturnA64(a: *mut syscall_args) -> i64 {
+    if (cfg("!LX_ABI_IS_X86_64")) {
+        let t = thread_current();
+        var regs = [0u64; 34];
+        let rp = borrow mut regs as *mut [u64; 34] as *mut arch_user_regs;
+        arch_user_regs_from_syscall(syscallFrame(a) as *void, rp);
+        let r = Ptr.toBorrowMut(rp);
+        let frame = r.sp + 16;
+        var mask: u64 = 0;
+        if (probeUser(frame + A64_UC_AT, A64_UC_SIZE) ||
+            get(borrow mut mask as *mut u64 as *mut void, frame + A64_MASK_AT, 8) ||
+            get(borrow mut r.x as *mut [u64; 31] as *mut void, frame + A64_REGS_AT, 248) ||
+            get(borrow mut r.sp as *mut u64 as *mut void, frame + A64_SP_AT, 8) ||
+            get(borrow mut r.pc as *mut u64 as *mut void, frame + A64_PC_AT, 8) ||
+            get(borrow mut r.pstate as *mut u64 as *mut void, frame + A64_PSTATE_AT, 8)) {
+            return sigreturnFault(t, frame);
+        }
+        restoreFpsimd(frame + A64_RSV_AT);
+        let x0 = r.x[0];
+        signal_return(syscallFrame(a), rp as *arch_user_regs, mask);
+        let tm = Ptr.toBorrowMut(t);
+        tm.syscall_nr = SIGNAL_NO_RESTART;
+        return truncate<i64>(x0);
+    }
+    return -EFAULT as i64; // not reached
+}
+
+/// Write the handler's frame for `info` and point `r` at the handler: each architecture's own.
+/// Safety: the core's, at delivery: `r` is the interrupted registers, `act` and `info` are readable.
+@export("linux_signal_frame")
+unsafe fn signalFrame(r: *mut arch_user_regs, act: *sigaction_k, info: *signal_info, blockedBefore: u64) -> i32 {
+    if (cfg("LX_ABI_IS_X86_64")) {
+        return signalFrameX86(r, act, info, blockedBefore);
+    }
+    return signalFrameA64(r, act, info, blockedBefore);
+}
+
+/// Safety: the dispatcher's.
+@export("lx_rt_sigreturn")
+unsafe fn rtSigreturn(a: *mut syscall_args) -> i64 {
+    if (cfg("LX_ABI_IS_X86_64")) {
+        return rtSigreturnX86(a);
+    }
+    return rtSigreturnA64(a);
+}
+
+// --- the trampoline page -------------------------------------------------------------------------------------------
+
+/// The signal-return trampoline (SEC-4). x86-64 has none: a frame needs SA_RESTORER, as on Linux, so nothing is
+/// mapped. AArch64 returns a handler without SA_RESTORER through it -- Linux's arm64 counterpart is the vDSO's
+/// sigreturn, randomised with the vDSO -- so it goes at a random page of the mmap range (the first free page at or
+/// above a random page offset from USER_MMAP_BASE, ASLR_MMAP_BITS of them), drawn at every exec and kept by fork. It
+/// used to sit at the fixed LX_SIGTRAMP in every process: a known executable address in an otherwise randomised
+/// layout.
+/// Safety: `p` is the process being built, and `out` is writable.
+@export("linux_sigtramp_map")
+unsafe fn sigtrampMap(p: *mut process, out: *mut u64) -> i32 {
+    out.write(0);
+    if (cfg("LX_ABI_IS_X86_64")) {
+        return 0;
+    }
+    let code: [u8; 8] = [0x68, 0x11, 0x80, 0xd2, 0x01, 0x00, 0x00, 0xd4]; // mov x8,#139; svc #0
+    let hint = USER_MMAP_BASE + ((random_u64() & ((1u64 << ASLR_MMAP_BITS) - 1)) << PAGE_SHIFT);
+    let space = Ptr.toBorrow(p as *process).space;
+    let at = vm_user_find_free(space, hint, PAGE_SIZE);
+    if (at == 0) {
+        return -ENOMEM;
+    }
+    var rc = vm_user_map_anon(space, at, PAGE_SIZE, VM_PROT_RW, VM_REGION_POPULATED, "sigtramp\0".ptr as *CChar);
+    if (rc != 0) {
+        return rc;
+    }
+    var pa: u64 = 0;
+    let mmu = (space as *mut u8).add(MMU_AT) as *arch_mmu_context;
+    if (!arch_mmu_query(
+        mmu,
+        truncate<usize>(at),
+        borrow mut pa as *mut u64,
+        0 as *mut u32,
+        0 as *mut vm_cache_t,
+        0 as *mut usize,
+    )) {
+        return -EFAULT; // populated: cannot happen
+    }
+    SliceMut.fromRaw(phys_to_virt(pa) as *mut u8, 8).copyFrom(code[..]);
+    rc = vm_user_protect(space, at, PAGE_SIZE, VM_PROT_RX);
+    if (rc == 0) {
+        out.write(at);
+    }
+    return rc;
 }

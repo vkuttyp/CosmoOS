@@ -197,7 +197,7 @@ pragma) and listed with its measured frame in `scripts/frame-baseline.txt`.
 The kernel link runs `scripts/check-frame-baseline.py`, which fails when the
 wrapped set and the list differ, so an exemption is never added or left
 behind silently. A fix removes both. Where the two architectures differ
-(`compat/linux/signal.c`'s frame builders are large only on AArch64), only
+(the AArch64 Linux signal frame was large only there), only
 the large definition is wrapped.
 
 ## CeeSafe sources

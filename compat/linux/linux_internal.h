@@ -13,8 +13,8 @@
 struct signal_info;
 struct sigaction_k;
 
-/* signal.c: the frame builder the process core calls, the exit hook, the
- * trampoline page, and the signal-related system calls. */
+/* sigcalls.cee: the frame builder the process core calls, the trampoline
+ * page, and the signal-related system calls. */
 int linux_signal_frame(struct arch_user_regs *regs, const struct sigaction_k *act, const struct signal_info *info,
                        uint64_t blocked_before);
 /* The trampoline page (SEC-4): mapped at a random page on AArch64 and its

@@ -120,7 +120,7 @@ number) pointing at the same 16 random bytes the Linux vector names
 stack pages (`INITIAL_STACK_PAGES` 2) and up to 300 argument and
 environment strings (`INITIAL_STRINGS_MAX`).
 
-### `int linux_signal_frame(struct arch_user_regs *, const struct sigaction_k *, const struct signal_info *, uint64_t blocked_before)`, `void linux_thread_exit(struct thread *)` (`compat/linux/signal.c`, milestone 10)
+### `int linux_signal_frame(struct arch_user_regs *, const struct sigaction_k *, const struct signal_info *, uint64_t blocked_before)`, `void linux_thread_exit(struct thread *)` (`compat/linux/sigcalls.cee`, milestone 10)
 The personality's two hooks: the `rt_sigframe` builder the signal core
 calls (`design.md`, "Signals": the x86-64 and AArch64 layouts, the
 alternate stack, `-EFAULT` for an unwritable stack or an x86-64 handler
@@ -438,7 +438,7 @@ loads the incoming one's (milestone 10). A clone's thread pointer is
 | `compat/linux/nr_x86_64.h`, `nr_aarch64.h` | the system-call numbers (milestone 10) |
 | `compat/linux/convert.h`, `lxconv.cee` | the pure conversions above, in CeeSafe |
 | `compat/linux/syscalls.c` | `struct linux_state`, the hooks, the `lx_*` handlers, the table, `personality_linux` |
-| `compat/linux/signal.c`, `linux_internal.h` | signals: the frame builders, `rt_sigreturn`, the trampoline page, the exit hook, `kill`/`tgkill`/`tkill`, `exit`/`exit_group`, `gettid`/`set_tid_address` (milestone 10) |
+| `compat/linux/sigcalls.cee`, `linux_internal.h` | signals, in CeeSafe: the frame builders, `rt_sigreturn`, the trampoline page, the exit hook, `kill`/`tgkill`/`tkill`, `exit`/`exit_group`, `gettid`/`set_tid_address` (milestone 10) |
 | `kernel/ipc/futex.c`, `kernel/include/kernel/futex.h` | the futex primitive |
 | `kernel/io/poll.c`, `kernel/include/kernel/poll.h` | `io_poll`, behind `poll`/`ppoll` and `select`/`pselect6` |
 | `tests/linux/linux.mk` | `make linux-tests` (both architectures): `lxhello`, `lxtest`, `lxsig`, `lxnointerp` (a `PT_INTERP` naming no file), and `hello_musl` on x86-64 when `MUSL_GCC` is set or `musl-gcc` is found; `HAVE_MUSL` (0/1) is passed to the boot harness by `make test` |

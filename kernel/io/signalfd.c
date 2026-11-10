@@ -46,7 +46,7 @@ static struct signalfd_obj *signalfd_of(struct kobject *obj)
 }
 
 /* Build one signalfd_siginfo record from a consumed signal_info, mirroring the
- * lx_siginfo mapping in compat/linux/signal.c. */
+ * lx_siginfo mapping in compat/linux/sigcalls.cee. */
 static void fill_ssi(struct lx_signalfd_siginfo *ssi, const struct signal_info *info)
 {
     memset(ssi, 0, sizeof(*ssi));

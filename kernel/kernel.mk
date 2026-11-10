@@ -99,7 +99,6 @@ KERNEL_GENERIC_SRCS := \
 	kernel/io/epolltest.c \
 	compat/linux/lxconv.c \
 	compat/linux/syscalls.c \
-	compat/linux/signal.c \
 	compat/linux/netioctl.c \
 	compat/linux/sigcalls.c \
 	kernel-services/virtualization/vmm.c \

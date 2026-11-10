@@ -825,7 +825,7 @@ struct process { ... struct sigaction_k *sigactions; uint64_t shared_pending; ..
   signal was taken by another thread, or ignored) the return to user
   mode restores it. Linux's `TIF_RESTORE_SIGMASK`.
 - **Where the code lives.** `kernel/process/signal.c` is the core;
-  `compat/linux/signal.c` the Linux view (frames, `rt_sigreturn`, the
+  `compat/linux/sigcalls.cee` the Linux view (frames, `rt_sigreturn`, the
   trampoline page, every signal system call). The native personality has
   no frame builder: a handler can never run there, so every non-ignored
   signal terminates, as before.

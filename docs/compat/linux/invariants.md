@@ -73,7 +73,7 @@ never delivered" is retired.) `rt_sigaction`, `rt_sigprocmask`,
 `sigaltstack`, `rt_sigpending`, `rt_sigsuspend`, `pause`, `kill`,
 `tgkill` and `tkill` are thin translations onto `kernel/signal.h`; the
 personality's only other signal code is the frame builder and
-`rt_sigreturn` (`compat/linux/signal.c`). A handler runs on Linux's
+`rt_sigreturn` (`compat/linux/sigcalls.cee`). A handler runs on Linux's
 `rt_sigframe` (x86-64 440 bytes plus the FXSAVE image; AArch64 4688 bytes
 plus a frame record) with `siginfo` naming the sender or the fault
 address, the signal and the action's mask blocked while it runs, the
