@@ -30,7 +30,7 @@ One commit per file, each moving functions out of the C and naming them in `kern
 | `c10d4c08` | `kernel/syscall/sockets.cee` | 924 | the thirteen native socket calls |
 | `661d247a` | `kernel/syscall/procs.cee` | 955 | spawn, exec, wait, kill, aio, timer, pipe, dup, cwd, procinfo, klog, the filter, hostname, `syscall_handle_stat` |
 | `0b8fe981` | `kernel/syscall/sysctl.cee` | 556 | sysctl, sysctl_set, reboot, getrandom |
-| `0bee38e0` | `kernel/syscall/personality.cee` | +39 | `native_claims_elf`, `native_auxv` |
+| `0bee38e0` | `kernel/syscall/personality.cee` | 108, from 45 | `native_claims_elf`, `native_auxv` |
 | `d3e4d51e` | `compat/linux/lxsock.cee` | 1,201 | the fifteen Linux socket calls, `sock_of`, `sock_of_err` |
 
 `native.c` is 224 lines: the table, the always-allowed list and the record. `syscalls.c` is 4,223.
