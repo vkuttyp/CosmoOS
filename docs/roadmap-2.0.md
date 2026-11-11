@@ -1,5 +1,10 @@
 # CosmoOS 2.0 roadmap (proposed)
 
+> **2026-11-11:** a shorter roadmap that releases first is proposed in
+> [roadmap-1.3.md](roadmap-1.3.md). If it is adopted it replaces this
+> document's order; the milestones below stay as the record of the longer
+> work.
+
 Written 2026-10-29 at v1.0.14, on main at `f073ad71`; the MS track
 (messaging at scale) added the same day on `4b1c55ec`. **Proposed, not
 adopted.**
