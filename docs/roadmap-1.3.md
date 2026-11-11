@@ -205,6 +205,12 @@ The two call tables are arrays of C functions, which CeeSafe cannot write
 until C2, so K1 leaves them in C and names them in the floor list; C2
 moves them later.
 
+Progress: the first PR (#512, 2026-11-11) was those seven commits. The
+second moves the native table, the always-allowed list and the native
+personality's record to `kernel/syscall/native.cee` (ceesafec 0.37.0),
+and `native.c` is gone. Left: `compat/linux/syscalls.c` (4,223 lines)
+with its table and record.
+
 - [ ] **Acceptance:** 2.0's SA8 acceptance with that one exception: no C
   left in `compat/` or `kernel/syscall/` but the two tables and the
   personality records that hold them. SA8's box is ticked with the
