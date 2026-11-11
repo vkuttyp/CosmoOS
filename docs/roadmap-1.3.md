@@ -25,7 +25,7 @@ Facts on 2026-11-11:
   and one Parallels VM. It has BusyBox, dropbear and tcc. It has never
   run on another hypervisor, a cloud or a physical machine, and the user
   guide ([`docs/guide/`](guide/README.md)) tells how to install it under
-  QEMU only.
+  QEMU, with a page for Parallels, and nowhere else.
 - CeeSafe released 0.8.0 to 0.31.0 in ten days. CosmoOS pins 0.24.2.
 
 So the kernel is getting safer and nobody can use it. This roadmap puts
@@ -50,7 +50,7 @@ report:
 | Software | BusyBox, dropbear, tcc | also OpenSSH, curl, git, nano as packages | `make test-ports` (R3) |
 | Upgrades | `cosmo-upgrade`, `pkg` | unchanged, proven from v1.0.14 to every 1.x release | `test-upgrade` |
 | Kernel | 49.5% of ring 0 in CeeSafe | ring 0 in CeeSafe except a named floor; no conversion after the freeze | `cee-share.py`, K3's soak |
-| Documentation | a user guide (`docs/guide/`) whose install page covers QEMU | the guide's install page per platform, a download page, a first-hour page, the limits brought up to date | R5 |
+| Documentation | a user guide (`docs/guide/`) that covers QEMU and Parallels | the guide's install page per platform, a download page, a first-hour page, the limits brought up to date | R5 |
 
 **Not in 1.3** (each stays where 2.0 describes it): physical machines,
 benchmarks against Linux and FreeBSD, glibc, containers, the messaging
