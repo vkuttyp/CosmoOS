@@ -98,6 +98,12 @@ int64_t lx_clone(struct syscall_args *a);
 int64_t lx_sched_setaffinity(struct syscall_args *a);
 int64_t lx_sched_getaffinity(struct syscall_args *a);
 
+/* lxsys.cee: sysinfo, uname, the host name and getrandom. */
+int64_t lx_sysinfo(struct syscall_args *a);
+int64_t lx_getrandom(struct syscall_args *a);
+int64_t lx_uname(struct syscall_args *a);
+int64_t lx_sethostname(struct syscall_args *a);
+
 /* lxsock.cee: the socket calls. lx_accept is accept4 too (its fourth
  * argument, the flags, is 0 from accept). */
 int64_t lx_socket(struct syscall_args *a);

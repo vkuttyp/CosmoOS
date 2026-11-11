@@ -2467,7 +2467,12 @@ static int64_t lx_madvise(struct syscall_args *a) { (void)a; return 0; }
  * and reboot are CeeSafe's (compat/linux/lxtime.cee, roadmap 1.3 K1;
  * linux_internal.h). */
 
-/* --- mounting, statfs, sysinfo, getrandom, uname and the host name ------------ */
+/* --- the system (lxsys.cee) ---------------------------------------------------
+ *
+ * sysinfo, uname, sethostname and getrandom are CeeSafe's
+ * (compat/linux/lxsys.cee, roadmap 1.3 K1; linux_internal.h). */
+
+/* --- mounting and statfs ------------------------------------------------------ */
 
 /*
  * mount(2) and umount2(2) (shell completeness S6; docs/compat/linux/
@@ -2604,97 +2609,6 @@ static int64_t lx_fstatfs(struct syscall_args *a)
     int rc = f != NULL && f->vn != NULL ? put_statfs(a->a[1], f->vn) : -EINVAL;
     kobject_put(obj);
     return rc;
-}
-
-/* sysinfo(2): uptime and a coarse memory/process snapshot, marshalled from the
- * stats the kernel already keeps. See docs/audit/next-subsystem-sysinfo.md. */
-static int64_t lx_sysinfo(struct syscall_args *a)
-{
-    struct pmm_stats st;
-    pmm_get_stats(&st);
-    struct lx_sysinfo si;
-    memset(&si, 0, sizeof(si));   /* swap, shared/buffer, high, pad: none here, so zero */
-    si.uptime = (int64_t)(clock_now_ns() / 1000000000ull);
-    unsigned long loads[3];
-    sched_loadavg(loads, 16);   /* Linux's SI_LOAD_SHIFT */
-    for (unsigned i = 0; i < 3; i++)
-        si.loads[i] = loads[i];
-    si.mem_unit = 1;              /* report bytes */
-    si.totalram = st.total_pages * PAGE_SIZE;
-    si.freeram = st.free_pages * PAGE_SIZE;
-    si.procs = (uint16_t)process_count();
-    return copy_to_user(a->a[0], &si, sizeof(si)) ? -EFAULT : 0;
-}
-
-/*
- * Linux's semantics (docs/kernel/security/design.md §6): block until the
- * pool is seeded, unless GRND_NONBLOCK (-EAGAIN) or GRND_INSECURE (never
- * waits). GRND_RANDOM is the default. The wait comes before the length
- * is looked at, as in Linux.
- */
-static int64_t lx_getrandom(struct syscall_args *a)
-{
-    unsigned flags = (unsigned)a->a[2];
-    if ((flags & ~(unsigned)(LX_GRND_NONBLOCK | LX_GRND_RANDOM | LX_GRND_INSECURE)) != 0 ||
-        (flags & (LX_GRND_INSECURE | LX_GRND_RANDOM)) == (LX_GRND_INSECURE | LX_GRND_RANDOM))
-        return -EINVAL;
-    if (!(flags & LX_GRND_INSECURE) && !random_ready()) {
-        if (flags & LX_GRND_NONBLOCK)
-            return -EAGAIN;
-        int rc = random_wait_ready(RANDOM_WAIT_FOREVER);
-        if (rc)
-            return rc;
-    }
-    size_t len = (size_t)a->a[1];
-    if (len > 256 * 1024)
-        len = 256 * 1024;
-    if (!user_range_ok(a->a[0], len))
-        return -EFAULT;
-    uint8_t tmp[256];
-    size_t done = 0;
-    while (done < len) {
-        size_t n = len - done < sizeof(tmp) ? len - done : sizeof(tmp);
-        random_get_bytes(tmp, n);
-        if (copy_to_user(a->a[0] + done, tmp, n))
-            return -EFAULT;
-        done += n;
-    }
-    return (int64_t)len;
-}
-
-static int64_t lx_uname(struct syscall_args *a)
-{
-    struct lx_utsname u;
-    memset(&u, 0, sizeof(u));
-    strlcpy(u.sysname, "Linux", sizeof(u.sysname));
-    /* From the caller's uts namespace: a contained process asking the
-     * machine its name must be told its container's
-     * (docs/kernel/security/design.md §1e). */
-    utsns_gethostname(utsns_current(), u.nodename, sizeof(u.nodename));
-    strlcpy(u.release, KERNEL_LINUX_RELEASE, sizeof(u.release));
-    ksnprintf(u.version, sizeof(u.version), "%s %s %s", KERNEL_NAME, KERNEL_VERSION, COSMO_BUILD_ID);
-    strlcpy(u.machine, LX_MACHINE, sizeof(u.machine));
-    strlcpy(u.domainname, "(none)", sizeof(u.domainname));
-    return copy_to_user(a->a[0], &u, sizeof(u)) ? -EFAULT : 0;
-}
-
-/* sethostname (shell completeness S1): the caller's uts namespace's name,
- * as the native call sets it and under its rule (PRIV_SYS_ADMIN: a name is
- * not a secret, but who can rename the machine can make another's logs say
- * what it likes). Linux has no gethostname call on these architectures:
- * musl reads the name from uname's nodename. Linux takes a name of up to
- * 64 bytes (__NEW_UTS_LEN); this kernel keeps 63 and a NUL. */
-static int64_t lx_sethostname(struct syscall_args *a)
-{
-    if (!cred_has(cred_current(), PRIV_SYS_ADMIN))
-        return -EPERM;
-    size_t len = (size_t)a->a[1];
-    if (len >= COSMO_HOST_NAME_MAX)
-        return -EINVAL;
-    char buf[COSMO_HOST_NAME_MAX];
-    if (copy_from_user(buf, a->a[0], len))
-        return -EFAULT;
-    return utsns_sethostname(utsns_current(), buf, len);
 }
 
 /* --- poll, ppoll (kernel/io/poll.c) ------------------------------------------- */
