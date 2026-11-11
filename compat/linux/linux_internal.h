@@ -89,6 +89,14 @@ int64_t lx_alarm(struct syscall_args *a);
 int64_t lx_setpriority(struct syscall_args *a);
 int64_t lx_getpriority(struct syscall_args *a);
 
+/* lxproc.cee: making processes and threads. */
+int64_t lx_execve(struct syscall_args *a);
+int64_t lx_fork(struct syscall_args *a);
+int64_t lx_vfork(struct syscall_args *a);
+int64_t lx_clone(struct syscall_args *a);
+int64_t lx_sched_setaffinity(struct syscall_args *a);
+int64_t lx_sched_getaffinity(struct syscall_args *a);
+
 /* lxsock.cee: the socket calls. lx_accept is accept4 too (its fourth
  * argument, the flags, is 0 from accept). */
 int64_t lx_socket(struct syscall_args *a);
