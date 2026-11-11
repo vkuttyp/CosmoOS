@@ -39,6 +39,39 @@ int64_t lx_set_tid_address(struct syscall_args *a);
 int64_t lx_exit(struct syscall_args *a);
 int64_t lx_exit_group(struct syscall_args *a);
 
+/* lxident.cee: a process's identity, limits, credentials, groups and
+ * sessions; arch_prctl and wait4; and the two answers the table gives calls
+ * it does not build. */
+int64_t lx_getpid(struct syscall_args *a);
+int64_t lx_getppid(struct syscall_args *a);
+int64_t lx_getuid(struct syscall_args *a);
+int64_t lx_getgid(struct syscall_args *a);
+int64_t lx_geteuid(struct syscall_args *a);
+int64_t lx_getegid(struct syscall_args *a);
+int64_t lx_getrlimit(struct syscall_args *a);
+int64_t lx_setrlimit(struct syscall_args *a);
+int64_t lx_prlimit64(struct syscall_args *a);
+int64_t lx_setresuid(struct syscall_args *a);
+int64_t lx_setresgid(struct syscall_args *a);
+int64_t lx_setuid(struct syscall_args *a);
+int64_t lx_setgid(struct syscall_args *a);
+int64_t lx_setreuid(struct syscall_args *a);
+int64_t lx_setregid(struct syscall_args *a);
+int64_t lx_getresuid(struct syscall_args *a);
+int64_t lx_getresgid(struct syscall_args *a);
+int64_t lx_getgroups(struct syscall_args *a);
+int64_t lx_setgroups(struct syscall_args *a);
+int64_t lx_zero(struct syscall_args *a);
+int64_t lx_nosys(struct syscall_args *a);
+int64_t lx_getpgrp(struct syscall_args *a);
+int64_t lx_setpgid(struct syscall_args *a);
+int64_t lx_getpgid(struct syscall_args *a);
+int64_t lx_setsid(struct syscall_args *a);
+int64_t lx_getsid(struct syscall_args *a);
+int64_t lx_arch_prctl(struct syscall_args *a);
+int64_t lx_wait4(struct syscall_args *a);
+int64_t lx_getrusage(struct syscall_args *a);
+
 /* lxsock.cee: the socket calls. lx_accept is accept4 too (its fourth
  * argument, the flags, is 0 from accept). */
 int64_t lx_socket(struct syscall_args *a);
