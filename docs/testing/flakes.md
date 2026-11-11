@@ -5424,3 +5424,29 @@ five-minute figure 24.90 when it ended (1.86 after the rerun); what
 loaded the host was not identified. The matrix's boots before and after
 it (`QEMU_SMP=1`, 165485 ms of self-tests; `QEMU_SMP=4`, 184036 ms)
 passed. Nothing was changed.
+
+## `net-firewall`: A's frame after B's reply was not from B, 2026-11-11
+
+One sighting, on a developer's Mac, x86-64 debug, in `make test-net-login`'s
+net boot, with `kernel/syscall/` and `compat/linux/` as K1's first PR has
+them (`lxsock.cee` included), built with ceesafec 0.24.2:
+
+```
+SELFTEST: net-firewall     ... FAIL: check failed: net-firewall: from B (415 ms)
+test-net-login: FAIL: net boot: QEMU exit code 35
+```
+
+The check is step 4 of `fwdFirewall` (`kernel-services/network/nettest_fwd.cee`):
+B answers the flow A opened, `reaches(FA, 40)` reports a frame at A, and
+the frame's source address (bytes 26-29 of the receive buffer) is then
+compared with B's. The frame was there and its source was not B's; the
+log does not say whose it was. The three checks of step 3 before it,
+which read the same buffer for A's frame at B, passed in the same run.
+
+Not explained. The same tree passed `make test` on both architectures,
+and `test-net-login` passed on a Linux host (742 s). Four further runs on the Mac that afternoon are not
+evidence either way: the load average was 57 to 142 (other builds), and
+they failed earlier, on timing bounds. What would name the cause: print
+the source address and the frame's first 42 bytes when this check fails.
+Not on the list: one sighting, no mechanism.
+
