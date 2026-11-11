@@ -72,6 +72,20 @@ int64_t lx_arch_prctl(struct syscall_args *a);
 int64_t lx_wait4(struct syscall_args *a);
 int64_t lx_getrusage(struct syscall_args *a);
 
+/* lxtime.cee: the clocks, sleeping, nice values and rebooting. */
+int64_t lx_clock_gettime(struct syscall_args *a);
+int64_t lx_times(struct syscall_args *a);
+int64_t lx_gettimeofday(struct syscall_args *a);
+int64_t lx_time(struct syscall_args *a);
+int64_t lx_settimeofday(struct syscall_args *a);
+int64_t lx_clock_settime(struct syscall_args *a);
+int64_t lx_reboot(struct syscall_args *a);
+int64_t lx_nanosleep(struct syscall_args *a);
+int64_t lx_clock_nanosleep(struct syscall_args *a);
+int64_t lx_sched_yield(struct syscall_args *a);
+int64_t lx_setpriority(struct syscall_args *a);
+int64_t lx_getpriority(struct syscall_args *a);
+
 /* lxsock.cee: the socket calls. lx_accept is accept4 too (its fourth
  * argument, the flags, is 0 from accept). */
 int64_t lx_socket(struct syscall_args *a);

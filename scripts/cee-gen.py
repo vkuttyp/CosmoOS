@@ -289,6 +289,8 @@ PORTS = [
     ("compat/linux/sigcalls.cee", "compat/linux/sigcalls.c",
      "Linux's signal system calls (linux_internal.h)", None, True),
     ("compat/linux/lxsock.cee", "compat/linux/lxsock.c", "Linux's socket system calls (linux_internal.h)", None, False),
+    ("compat/linux/lxtime.cee", "compat/linux/lxtime.c",
+     "Linux's calls on the clocks, sleeping, nice values and rebooting (linux_internal.h)", None, False),
     ("compat/linux/lxident.cee", "compat/linux/lxident.c",
      "Linux's calls on a process's identity, limits, credentials and sessions, and wait4 (linux_internal.h)", None,
      False),
