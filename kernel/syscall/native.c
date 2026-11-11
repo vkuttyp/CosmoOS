@@ -1,55 +1,13 @@
 /*
- * native.c - The CosmoOS native personality: system-call table and
- * implementations. Numbers come from uapi/cosmo/syscall.h.
- *
- * Every function validates its arguments first and returns a negative
- * errno on failure. User memory is touched only through uaccess.h.
+ * native.c - The CosmoOS native personality: its system-call table and its
+ * record. Numbers come from uapi/cosmo/syscall.h; the calls are CeeSafe's,
+ * in the files the notes below name (roadmap 2.0 SA8).
  */
 
 #include <kernel/compiler.h>
-#include <kernel/aio.h>
-#include <kernel/timerobj.h>
-#include <kernel/blk.h>
-#include <kernel/mountns.h>
-#include <kernel/bootfs.h>
-#include <kernel/bootinfo.h>
-#include <kernel/cosmofs.h>   /* g_cosmofs_scrub_rate: sysctl fs.scrub_rate */
-#include <kernel/storage.h>   /* g_pool_fault_errors: sysctl fs.fault_errors */
-#include <kernel/elf.h>
-#include <kernel/errno.h>
-#include <kernel/faultinject.h>
-#include <kernel/hv.h>
-#include <arch/cpu.h>
-#include <kernel/handle.h>
-#include <kernel/kmalloc.h>
-#include <kernel/log.h>
-#include <kernel/object.h>
-#include <kernel/panic.h>
-#include <kernel/percpu.h>
-#include <kernel/pipe.h>
-#include <kernel/pmm.h>
-#include <kernel/printf.h>
 #include <kernel/process.h>
-#include <kernel/netif.h>
-#include <kernel/sched.h>
-#include <kernel/selftest.h>
-#include <kernel/shutdown.h>
-#include <kernel/signal.h>
-#include <kernel/socket.h>
-#include <kernel/unix.h>
-#include <arch/user.h>
-#include <kernel/futex.h>
-#include <kernel/random.h>
-#include <kernel/string.h>
 #include <kernel/syscall.h>
-#include <kernel/timer.h>
-#include <kernel/tty.h>
-#include <kernel/uaccess.h>
-#include <kernel/version.h>
 #include <kernel/vfs.h>
-#include <kernel/vmm.h>
-#include <kernel/wait.h>
-#include <kernel/utsns.h>
 
 #include <uapi/cosmo/syscall.h>
 
@@ -249,42 +207,10 @@ static const uint16_t native_always_allowed[] = { SYS_exit, SYS_sigreturn, SYS_t
  * in startup instead of on the call the test was about, and the status was
  * the same either way, so nothing failed. */
 
-static bool native_claims_elf(const struct elf_info *info)
-{
-    return info->cosmo_note;
-}
-
-/*
- * The native auxiliary vector. The program header table, so a program can
- * read its own headers -- which is how it finds its own PT_TLS, and why
- * nothing in this kernel knows what thread-local storage is. The values
- * are the ones the Linux door also passes as AT_PHDR/AT_PHENT; zero when
- * the headers are not inside a mapped segment.
+/* --- what the native personality claims, and its auxiliary vector ----------
  *
- * Zero is "the headers are not readable", **not** "the program has no
- * thread-local storage** -- and a reader must not collapse the two. libc
- * refuses to start a program it cannot answer that question for
- * (libc/src/tlsscan.c), because the other answer is a process whose
- * `__thread` variables were never initialised and whose per-thread
- * storage was sized as though it had none. Every native program links
- * with the one userland/user.ld, which keeps the header table in the text
- * segment, so this stays zero only for an image built some other way.
- */
-static unsigned native_auxv(struct process *p, const struct elf_info *info, const struct personality_auxv_args *x,
-                            uint64_t *w, unsigned max)
-{
-    (void)p;
-    unsigned k = 0;
-    KASSERT(max >= 14);
-    w[k++] = COSMO_AT_PHDR;   w[k++] = info->phdr_vaddr;
-    w[k++] = COSMO_AT_PHENT;  w[k++] = info->phent;
-    w[k++] = COSMO_AT_PHNUM;  w[k++] = info->phnum;
-    w[k++] = COSMO_AT_PAGESZ; w[k++] = PAGE_SIZE;
-    w[k++] = COSMO_AT_ENTRY;  w[k++] = info->entry;
-    w[k++] = COSMO_AT_RANDOM; w[k++] = x->random_addr;
-    w[k++] = COSMO_AT_NULL;   w[k++] = 0;
-    return k;
-}
+ * native_claims_elf and native_auxv are CeeSafe's
+ * (kernel/syscall/personality.cee, roadmap 2.0 SA8; syscall.h). */
 
 const struct personality personality_native = {
     .name = "native",

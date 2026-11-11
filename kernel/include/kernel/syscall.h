@@ -128,6 +128,15 @@ int64_t sys_sysctl_set(struct syscall_args *a);
 int64_t sys_reboot(struct syscall_args *a);
 int64_t sys_getrandom(struct syscall_args *a);
 
+/* The native personality's claim on a program (the CosmoOS note) and the
+ * auxiliary vector it starts one with: at least 14 words, the count
+ * returned (kernel/syscall/personality.cee). */
+struct elf_info;
+struct personality_auxv_args;
+bool native_claims_elf(const struct elf_info *info);
+unsigned native_auxv(struct process *p, const struct elf_info *info, const struct personality_auxv_args *x,
+                     uint64_t *w, unsigned max);
+
 /* The native calls on sockets (kernel/syscall/sockets.cee). */
 int64_t sys_socket(struct syscall_args *a);
 int64_t sys_bind(struct syscall_args *a);

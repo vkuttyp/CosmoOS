@@ -3,11 +3,30 @@
 //
 // The one place that lists the personalities, so the process code names none of them: a process the kernel creates is
 // native; any other ELF runs under the first personality that claims it -- native claims the CosmoOS note, Linux takes
-// every ELF without one.
+// every ELF without one. The native personality's own two answers are here too: whether it claims a program, and the
+// auxiliary vector it starts one with (native.c's record names them; syscall.h).
 
-@header("kernel/elf.h", "kernel/process.h")
+@header("kernel/elf.h", "kernel/process.h", "kernel/syscall.h", "uapi/cosmo/syscall.h")
 extern "C" {
-    struct elf_info;
+    struct elf_info {
+        entry: u64;
+        cosmo_note: bool; // PT_NOTE "CosmoOS" type 1: a native program
+        phdr_vaddr: u64;  // the program header table's address in the image, 0 when not loaded
+        phnum: u16;
+        phent: u16;
+    }
+    struct process;
+    struct personality_auxv_args {
+        random_addr: u64; // 16 random bytes on the stack
+    }
+    const COSMO_AT_NULL: u64 = 0;
+    const COSMO_AT_PHDR: u64 = 3;
+    const COSMO_AT_PHENT: u64 = 4;
+    const COSMO_AT_PHNUM: u64 = 5;
+    const COSMO_AT_PAGESZ: u64 = 6;
+    const COSMO_AT_ENTRY: u64 = 9;
+    const COSMO_AT_RANDOM: u64 = 25;
+    const PAGE_SIZE: u64 = 4096;
     struct personality {
         claims_elf: extern "C" fn(*elf_info) -> bool;
     }
@@ -42,4 +61,48 @@ unsafe fn personalityForElf(info: *elf_info, kernelCreated: bool) -> *personalit
     line.text("process: no personality claims an ELF the loader accepted");
     KernelLog.panic(line);
     return linux; // not reached: the panic does not return
+}
+
+/// The native personality claims a program that carries the CosmoOS note.
+/// Safety: `info` is the loader's description of an ELF it accepted.
+@export("native_claims_elf")
+unsafe fn nativeClaimsElf(info: *elf_info) -> bool => Ptr.toBorrow(info).cosmo_note;
+
+/// The native auxiliary vector, into `w` (`max` words, at least 14): the words written. The program header table, so
+/// a program can read its own headers -- which is how it finds its own PT_TLS, and why nothing in this kernel knows
+/// what thread-local storage is. The values are the ones the Linux door also passes as AT_PHDR/AT_PHENT; zero when the
+/// headers are not inside a mapped segment.
+///
+/// Zero is "the headers are not readable", **not** "the program has no thread-local storage" -- and a reader must not
+/// collapse the two. libc refuses to start a program it cannot answer that question for (libc/src/tlsscan.c), because
+/// the other answer is a process whose `__thread` variables were never initialised and whose per-thread storage was
+/// sized as though it had none. Every native program links with the one userland/user.ld, which keeps the header table
+/// in the text segment, so this stays zero only for an image built some other way.
+/// Safety: `info` and `x` are the loader's; `w` holds `max` words.
+@export("native_auxv")
+unsafe fn nativeAuxv(p: *mut process, info: *elf_info, x: *personality_auxv_args, w: *mut u64, max: u32) -> u32 {
+    if (max < 14) {
+        var buffer: [u8; 96] = [0; 96];
+        var line = TextWriter.create(mut buffer[..]);
+        line.text("assertion failed: max >= 14 at kernel/syscall/personality.cee");
+        KernelLog.panic(line);
+        return 0; // not reached: the panic does not return
+    }
+    let e = Ptr.toBorrow(info);
+    let out = SliceMut.fromRaw(w, 14);
+    out[0] = COSMO_AT_PHDR;
+    out[1] = e.phdr_vaddr;
+    out[2] = COSMO_AT_PHENT;
+    out[3] = e.phent as u64;
+    out[4] = COSMO_AT_PHNUM;
+    out[5] = e.phnum as u64;
+    out[6] = COSMO_AT_PAGESZ;
+    out[7] = PAGE_SIZE;
+    out[8] = COSMO_AT_ENTRY;
+    out[9] = e.entry;
+    out[10] = COSMO_AT_RANDOM;
+    out[11] = Ptr.toBorrow(x).random_addr;
+    out[12] = COSMO_AT_NULL;
+    out[13] = 0;
+    return 14;
 }
