@@ -23,8 +23,9 @@ Facts on 2026-11-11:
   system gets.
 - A release today is a raw disk image per architecture, proven on QEMU
   and one Parallels VM. It has BusyBox, dropbear and tcc. It has never
-  run on another hypervisor, a cloud or a physical machine, and there is
-  no page that tells a stranger how to install it.
+  run on another hypervisor, a cloud or a physical machine, and the user
+  guide ([`docs/guide/`](guide/README.md)) tells how to install it under
+  QEMU only.
 - CeeSafe released 0.8.0 to 0.31.0 in ten days. CosmoOS pins 0.24.2.
 
 So the kernel is getting safer and nobody can use it. This roadmap puts
@@ -49,7 +50,7 @@ report:
 | Software | BusyBox, dropbear, tcc | also OpenSSH, curl, git, nano as packages | `make test-ports` (R3) |
 | Upgrades | `cosmo-upgrade`, `pkg` | unchanged, proven from v1.0.14 to every 1.x release | `test-upgrade` |
 | Kernel | 49.5% of ring 0 in CeeSafe | ring 0 in CeeSafe except a named floor; no conversion after the freeze | `cee-share.py`, K3's soak |
-| Documentation | for contributors | an install guide per platform, a download page, known limits | R5 |
+| Documentation | a user guide (`docs/guide/`) whose install page covers QEMU | the guide's install page per platform, a download page, a first-hour page, the limits brought up to date | R5 |
 
 **Not in 1.3** (each stays where 2.0 describes it): physical machines,
 benchmarks against Linux and FreeBSD, glibc, containers, the messaging
@@ -170,9 +171,12 @@ virtio devices. The owner chooses the provider and holds the account.
 
 ### R5 Documentation for a stranger
 
-An install guide per platform (R1's and R4's), a download page with the
-checksums and how to verify the signature, a first-hour guide (log in,
-add a user, install a package, upgrade, roll back), and the known limits.
+The user guide ([`docs/guide/`](guide/README.md)) extended, not rewritten:
+[installing.md](guide/installing.md) gains a section per platform (R1's
+and R4's), there is a download page with the checksums and how to verify
+the signature, a first-hour page (log in, add a user, install a package,
+upgrade, roll back), and [limitations.md](guide/limitations.md) says what
+1.3 does not do.
 
 - [ ] **Acceptance:** the owner installs from the guide alone on a
   machine that has never held the tree; every command in the guides is
@@ -192,11 +196,19 @@ Sizes: R0 0.1x, R1 0.6x, R2 0.6x, R3 1.5x, R4 0.3x, R5 0.4x.
 
 ### K1 Finish SA8
 
-`kernel/syscall/` is done on 2026-11-11 except the two tables, which only
-C can write today (C4 below). `compat/linux/syscalls.c` has about 4,200
-lines left, in sections.
+On main at `5a36f9c1`, `kernel/syscall/native.c` still holds the socket,
+process, sysctl and mapping calls (1,761 lines). Six commits on the
+working branch, not yet pushed, port them and leave `native.c` as the
+call table and the personality record; they are K1's first PR.
+`compat/linux/syscalls.c` then has about 4,200 lines left, in sections.
+The two call tables are arrays of C functions, which CeeSafe cannot write
+until C4, so K1 leaves them in C and names them in the floor list; C4
+moves them later.
 
-- [ ] **Acceptance:** 2.0's SA8 acceptance, its box ticked.
+- [ ] **Acceptance:** 2.0's SA8 acceptance with that one exception: no C
+  left in `compat/` or `kernel/syscall/` but the two tables and the
+  personality records that hold them. SA8's box is ticked with the
+  exception written beside it.
 
 ### K2 Ring 0, in a box of three weeks
 
