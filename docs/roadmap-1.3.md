@@ -77,8 +77,8 @@ x86-64 machine (1.2's C4).
 ## Order
 
 ```text
-week 0     T1, T2 ─► R0 (v1.1.0)          K1 (finish SA8)        C1 starts
-weeks 1-2  R1 (images) ─► R2 (first boot)  K2 (ring 0, boxed)     C1 ─► C2 ─► C3
+week 0     T1, T2 ─► R0 (v1.1.0)          K1 (finish SA8, U1, U2)  C1, C2
+weeks 1-2  R1 (images) ─► R2 (first boot)  K2 (ring 0, boxed)     C3
 weeks 3-4  R3 (packages) ─► R4 (cloud)     K2 ends ─► K3 (soak)   C4
 weeks 5-6  R5 (documentation) ─► R6 (v1.3.0)
 ```
@@ -202,7 +202,7 @@ working branch, not yet pushed, port them and leave `native.c` as the
 call table and the personality record; they are K1's first PR.
 `compat/linux/syscalls.c` then has about 4,200 lines left, in sections.
 The two call tables are arrays of C functions, which CeeSafe cannot write
-until C4, so K1 leaves them in C and names them in the floor list; C4
+until C2, so K1 leaves them in C and names them in the floor list; C2
 moves them later.
 
 - [ ] **Acceptance:** 2.0's SA8 acceptance with that one exception: no C
@@ -237,20 +237,29 @@ Sizes: K1 0.3x, K2 boxed at 2.0x, K3 0.4x.
 
 ## C. CeeSafe: only what makes CosmoOS faster
 
-Each is a change in CeeSafe's repository, ordered by what it saves. The
-evidence is the SA8 ports of 2026-11-11.
+Each row was tested on 2026-11-11 with probes against ceesafec 0.24.2
+(the pin) and 0.29.0, after the SA8 ports of that day. Two things the
+ports work around turned out to exist already, so they are this tree's
+to use, not CeeSafe's to build.
+
+**In CeeSafe's repository:**
 
 | | CosmoOS pays today | Wanted | Proof here |
 |---|---|---|---|
 | C1 | Each port copies its C structs, constants and prototypes by hand: about 150 of `sockets.cee`'s 640 lines | A generator of the `extern "C"` block from the kernel's headers | `sockets.cee`'s block is generated and the hand-written one deleted |
-| C2 | A local of an imported C struct is refused (N0294), so each is a word array and a layout check | Locals of imported structs, their size taken from the C compiler | `sockets.cee`'s `AnyAddr` holds a `netaddr` and a `unix_addr` |
-| C3 | Each kernel `.cee` compiles alone, so helpers repeat: the socket address code is in `sockets.cee` and `lxsock.cee` | CeeSafe-typed calls between kernel files, as the driver build already has | one shared file for the system-call helpers |
-| C4 | A table of C functions cannot be written, so `native.c` and the Linux table stay C | Static arrays of C function pointers | both tables in CeeSafe; `native.c` deleted |
-| C5 | Moving the pin costs a matrix and the analysis baselines; CeeSafe makes several releases a day | CeeSafe's CI builds CosmoOS's tree at head; CosmoOS moves its pin at most weekly | a pin bump whose `out/cee` difference is version lines only |
-| C6 | Unknown: `c2cee`'s drafts were not used for SA8 | Measure it on SA9's first driver: lines of the draft kept unchanged | a dated report |
+| C2 | A static table of C functions is refused: `extern "C" fn` pointers are not `Share` (N0337), so `native.c` and the Linux table stay C. The values themselves are accepted (an `extern "C"` or `@callback` function names one) | Function-pointer types are `Share` | both tables in CeeSafe; `native.c` deleted |
+| C3 | Moving the pin costs a matrix and the analysis baselines; CeeSafe makes several releases a day | CeeSafe's CI builds CosmoOS's tree at head; CosmoOS moves its pin at most weekly | a pin bump whose `out/cee` difference is version lines only |
+| C4 | Unknown: `c2cee`'s drafts were not used for SA8 | Measure it on SA9's first driver: lines of the draft kept unchanged | a dated report |
+
+**In this tree, with the pinned compiler:**
+
+| | Today | What already works | Proof here |
+|---|---|---|---|
+| U1 | A C struct needed as a local is a word array and a `@cvalue` layout check (`AnyAddr` in `sockets.cee`, the statistics in `sysctl.cee`) | `var na: netaddr;` declares a zeroed local of an imported struct, opaque or not | the SA8 ports' word arrays replaced; `docs/build/ceesafe.md` says so |
+| U2 | Each kernel `.cee` compiles alone, so helpers repeat: the socket address code is in `sockets.cee` and `lxsock.cee` | `ceesafec build a.cee common.cee` compiles files as one unit | a `PORTS` entry may name shared sources; one file holds the system-call helpers |
 
 K2 does not wait for these. C1 comes first because every port still to
-write pays for it.
+write pays for it; U1 and U2 are part of K1.
 
 ---
 
