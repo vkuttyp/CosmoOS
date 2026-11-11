@@ -14,7 +14,8 @@ wins and the document is wrong.
 | `development.md` | Setting up a development host, building, running, testing, CI |
 | `roadmap-1.0.md` | The 1.0 definition of done, its milestones M1-M6 and their acceptance tests |
 | `roadmap-1.1.md` | The units merged after 1.0, the gaps recorded since, and the 1.1 units with their acceptance tests (complete) |
-| `roadmap-1.2.md` | The current roadmap: storage depth (direction B, complete), self-hosting (direction A, under way), platform depth (C, deferred) |
+| `roadmap-1.3.md` | The current roadmap (adopted 2026-11-11): a release people can install, the conversion to CeeSafe bounded |
+| `roadmap-1.2.md` | 1.2: storage depth (direction B, complete); self-hosting (direction A) and platform depth (C) deferred |
 | `backlog.md` | Open defects and gaps by subsystem, with ids, severities and sizes |
 | `guide/` | The user guide (roadmap M6): installing, the shell, networking, ssh, packages, privileges, known limitations; every command in it is run by CI (`tests/guide/run_guide.py`) |
 | `plan.md` | Work after 1.0 grouped by area (a historical record; new work goes to `backlog.md`) |

@@ -6,13 +6,18 @@ Read the governing [prompts](prompts/) before acting. Follow the
 
 ## Scope rules
 
-The [1.2 roadmap](docs/roadmap-1.2.md) (direction A, self-hosting,
-chosen 2026-10-27 after direction B was completed) sets the work; the [1.0](docs/roadmap-1.0.md) and [1.1](docs/roadmap-1.1.md)
-roadmaps are complete. These rules take precedence over the backlog when
-choosing what to do.
+The [1.3 roadmap](docs/roadmap-1.3.md) (a release people can install,
+adopted 2026-11-11) sets the work. The [1.0](docs/roadmap-1.0.md) and
+[1.1](docs/roadmap-1.1.md) roadmaps are complete, as is 1.2's direction B;
+[1.2](docs/roadmap-1.2.md)'s direction A and the [2.0 roadmap](docs/roadmap-2.0.md)
+are the record of longer work, not scheduled, except that 2.0's CeeSafe
+rule stands for new kernel code. These rules take precedence over the
+backlog when choosing what to do.
 
-- Work only on the current roadmap unit: the 1.2 milestone the project
-  owner has chosen. With none chosen, propose; do not start one. A defect
+- Work only on a 1.3 milestone, in the roadmap's order: one in the
+  release stream (R) and one in the kernel stream (K) at a time, never
+  the same subsystem in the same week; T's two units go first. With the
+  next milestone unclear, propose; do not start one. A defect
   found along the way is fixed only if it blocks that unit's acceptance
   test or turns main red. Otherwise add one line to
   [docs/backlog.md](docs/backlog.md) (under its subsystem, the next free
@@ -36,9 +41,15 @@ choosing what to do.
   CI, which runs the acceptance test it changes (as #479 did). A change
   to the self-tests, anything compiled, or a harness a matrix step runs
   (such as `tests/boot/run_boot_test.py`) is not test-only.
-- At most 5 PRs per unit. If more seem needed, stop and report why.
+- Every change reaches main through a PR with CI green, conversions to
+  CeeSafe included; a conversion PR may hold several ports and changes no
+  behaviour.
+- At most 5 PRs per unit, except K2, which is bounded by its three weeks
+  (to 2026-12-02). If more seem needed, stop and report why.
 - A unit is done when its acceptance test is green on main; tick its
-  box in [docs/roadmap-1.2.md](docs/roadmap-1.2.md) in the same PR.
+  box in [docs/roadmap-1.3.md](docs/roadmap-1.3.md) in the same PR.
+- Release from main at least every two weeks, by the rule under
+  [Releases](#releases).
 
 ## Project conventions
 

@@ -1,5 +1,10 @@
 # CosmoOS 2.0 roadmap (proposed)
 
+> **2026-11-11:** the owner adopted [roadmap-1.3.md](roadmap-1.3.md), a
+> shorter roadmap that releases first. It replaces this document's order;
+> the milestones below stay as the record of the longer work, and the
+> [CeeSafe rule](#the-ceesafe-rule) stands for new kernel code.
+
 Written 2026-10-29 at v1.0.14, on main at `f073ad71`; the MS track
 (messaging at scale) added the same day on `4b1c55ec`. **Proposed, not
 adopted.**
