@@ -3679,4 +3679,10 @@ See the [history index](README.md).
   - `tests/host/test_handles.c`: the layer on the host, and a seeded trace
     of 10,000 operations whose digest a Nova version must reproduce.
   - Report: `docs/audit/2026-10-30-sa2-census-report.md`.
+- **ceesafec 0.33.0 (2026-11-11, roadmap 1.3).**
+  - The pin moves from 0.24.2 to 0.33.0, which has CeeSafe's read-only C
+    objects (its ADR 0091) for the kernel's remaining C tables. `embed.h`
+    joins the runtime files the build generates, since `rt.h` includes it.
+  - No CeeSafe source changed; the 172 generated files match their sources.
+  - Report: `docs/audit/2026-11-11-ceesafec-0.33.0-report.md`.
 
