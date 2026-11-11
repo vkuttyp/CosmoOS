@@ -86,6 +86,7 @@ int64_t lx_sched_yield(struct syscall_args *a);
 int64_t lx_setitimer(struct syscall_args *a);
 int64_t lx_getitimer(struct syscall_args *a);
 int64_t lx_alarm(struct syscall_args *a);
+int64_t lx_futex(struct syscall_args *a);
 int64_t lx_setpriority(struct syscall_args *a);
 int64_t lx_getpriority(struct syscall_args *a);
 

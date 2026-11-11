@@ -2463,11 +2463,11 @@ static int64_t lx_madvise(struct syscall_args *a) { (void)a; return 0; }
 /* --- the clocks, sleeping, nice values and rebooting (lxtime.cee) -------------
  *
  * clock_gettime, gettimeofday, time, times, settimeofday, clock_settime,
- * nanosleep, clock_nanosleep, sched_yield, getpriority, setpriority and
- * reboot are CeeSafe's (compat/linux/lxtime.cee, roadmap 1.3 K1;
+ * nanosleep, clock_nanosleep, sched_yield, futex, getpriority, setpriority
+ * and reboot are CeeSafe's (compat/linux/lxtime.cee, roadmap 1.3 K1;
  * linux_internal.h). */
 
-/* --- mounting, statfs, sysinfo, getrandom, uname, the host name and futex ---- */
+/* --- mounting, statfs, sysinfo, getrandom, uname and the host name ------------ */
 
 /*
  * mount(2) and umount2(2) (shell completeness S6; docs/compat/linux/
@@ -2695,78 +2695,6 @@ static int64_t lx_sethostname(struct syscall_args *a)
     if (copy_from_user(buf, a->a[0], len))
         return -EFAULT;
     return utsns_sethostname(utsns_current(), buf, len);
-}
-
-static int64_t lx_futex(struct syscall_args *a)
-{
-    uint64_t uaddr = a->a[0];
-    unsigned op = (unsigned)a->a[1] & (unsigned)LX_FUTEX_CMD_MASK;
-    bool realtime = ((unsigned)a->a[1] & LX_FUTEX_CLOCK_REALTIME) != 0;
-    /* The flag is the program's promise that nobody outside this
-     * process can see the word: the private key, no lookup. Without it
-     * the word is classified by what it maps, so a process-shared mutex
-     * in a MAP_SHARED page is shared (the shared-futex unit; the flag
-     * used to be masked out and every futex was private). */
-    bool private = ((unsigned)a->a[1] & LX_FUTEX_PRIVATE_FLAG) != 0;
-    uint32_t val = (uint32_t)a->a[2];
-    struct vm_space *space = process_current()->space;
-    if (!user_range_ok(uaddr, 4))
-        return -EFAULT;
-    /* Once, for every operation: the past-deadline WAIT_BITSET path below
-     * reads the word itself and used to answer -EAGAIN/-ETIMEDOUT for a
-     * misaligned address the futex would have refused (review). */
-    if (uaddr & 3)
-        return -EINVAL;
-    switch (op) {
-    case LX_FUTEX_WAIT:
-    case LX_FUTEX_WAIT_BITSET: {
-        /* WAIT's timeout is relative (monotonic); WAIT_BITSET's is absolute
-         * on CLOCK_MONOTONIC, or CLOCK_REALTIME with the flag. The bitset is
-         * a wake filter (glibc uses MATCH_ANY); only that value is supported. */
-        if (op == LX_FUTEX_WAIT_BITSET && (uint32_t)a->a[5] != LX_FUTEX_BITSET_MATCH_ANY)
-            return -ENOSYS;
-        if (op == LX_FUTEX_WAIT && realtime)
-            return -ENOSYS;
-        uint64_t timeout = 0;
-        if (a->a[3]) {
-            int rc = ns_from_timespec(a->a[3], &timeout);
-            if (rc)
-                return rc;
-            if (op == LX_FUTEX_WAIT_BITSET) {
-                uint64_t now = realtime ? clock_realtime_ns() : clock_now_ns();
-                if (timeout <= now) {
-                    /* Already past: the value check still decides EAGAIN vs ETIMEDOUT. */
-                    uint32_t cur;
-                    if (copy_from_user(&cur, uaddr, sizeof(cur)))
-                        return -EFAULT;
-                    return cur != val ? -EAGAIN : -ETIMEDOUT;
-                }
-                timeout -= now;
-            }
-            if (timeout == 0)
-                timeout = 1;
-        }
-        return futex_wait(space, uaddr, val, timeout, private);
-    }
-    case LX_FUTEX_WAKE:
-    case LX_FUTEX_WAKE_BITSET:
-        if (op == LX_FUTEX_WAKE_BITSET && (uint32_t)a->a[5] != LX_FUTEX_BITSET_MATCH_ANY)
-            return -ENOSYS;
-        return futex_wake(space, uaddr, val, private);
-    case LX_FUTEX_REQUEUE:
-    case LX_FUTEX_CMP_REQUEUE: {
-        uint64_t uaddr2 = a->a[4];
-        if (!user_range_ok(uaddr2, 4))
-            return -EFAULT;
-        unsigned nr_requeue = (unsigned)a->a[3];
-        /* Both report woken + requeued, as the Linux kernel does for both
-         * operations (its man page's "woken" for REQUEUE notwithstanding). */
-        return futex_requeue(space, uaddr, uaddr2, val, nr_requeue, op == LX_FUTEX_CMP_REQUEUE, (uint32_t)a->a[5],
-                             private);
-    }
-    default:
-        return -ENOSYS;
-    }
 }
 
 /* --- poll, ppoll (kernel/io/poll.c) ------------------------------------------- */

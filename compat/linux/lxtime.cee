@@ -1,14 +1,14 @@
 // lxtime.cee - The Linux personality's calls on the clocks, sleeping, nice values and rebooting
 // (docs/compat/linux/design.md), in CeeSafe (roadmap 1.3 K1): clock_gettime, gettimeofday, time, times, settimeofday,
-// clock_settime, nanosleep, clock_nanosleep, sched_yield, setitimer, getitimer, alarm, getpriority, setpriority and
-// reboot. syscalls.c's table
+// clock_settime, nanosleep, clock_nanosleep, sched_yield, setitimer, getitimer, alarm, futex, getpriority,
+// setpriority and reboot. syscalls.c's table
 // names them (linux_internal.h).
 //
 // A struct lx_timespec and a struct lx_timeval are two words and a struct lx_tms four; the C compiler checks them
 // (the extern block).
 
 @header(
-    "kernel/cred.h", "kernel/errno.h", "kernel/nice.h", "kernel/process.h", "kernel/sched.h", "kernel/shutdown.h",
+    "kernel/cred.h", "kernel/errno.h", "kernel/futex.h", "kernel/nice.h", "kernel/process.h", "kernel/sched.h", "kernel/shutdown.h",
     "kernel/syscall.h", "kernel/timer.h", "kernel/uaccess.h", "kernel/wait.h", "linux_abi.h", "linux_internal.h",
 )
 extern "C" {
@@ -18,9 +18,11 @@ extern "C" {
     struct credentials {
         ruid: u32;
     }
+    struct vm_space;
     struct process {
         pid: u32;
         domain: u32;
+        space: *mut vm_space;
     }
     struct thread;
     struct nice_caller;
@@ -53,6 +55,17 @@ extern "C" {
     const LX_CLOCK_REALTIME_COARSE: u32 = 5;
     const LX_CLOCK_BOOTTIME: u32 = 7;
     const LX_TIMER_ABSTIME: u32 = 1;
+    const LX_FUTEX_WAIT: u32 = 0;
+    const LX_FUTEX_WAKE: u32 = 1;
+    const LX_FUTEX_REQUEUE: u32 = 3;
+    const LX_FUTEX_CMP_REQUEUE: u32 = 4;
+    const LX_FUTEX_WAIT_BITSET: u32 = 9;
+    const LX_FUTEX_WAKE_BITSET: u32 = 10;
+    const LX_FUTEX_BITSET_MATCH_ANY: u32 = 0xffffffff;
+    const LX_FUTEX_PRIVATE_FLAG: u32 = 128;
+    const LX_FUTEX_CLOCK_REALTIME: u32 = 256;
+    @cvalue("(unsigned)LX_FUTEX_CMD_MASK == 0xFFFFFE7Fu")
+    const FUTEX_CMD_MASK_VALUE: bool = true;
     const LX_ITIMER_REAL: i32 = 0;
     const LX_ITIMER_VIRTUAL: i32 = 1;
     const LX_ITIMER_PROF: i32 = 2;
@@ -63,8 +76,11 @@ extern "C" {
     const PRIV_SYS_ADMIN: u32 = 2;
     const EPERM: i32 = 1;
     const ESRCH: i32 = 3;
+    const EAGAIN: i32 = 11;
     const EFAULT: i32 = 14;
     const EINVAL: i32 = 22;
+    const ENOSYS: i32 = 38;
+    const ETIMEDOUT: i32 = 110;
     fn process_current() -> *mut process;
     fn thread_current() -> *mut thread;
     fn cred_current() -> *credentials;
@@ -78,6 +94,19 @@ extern "C" {
     fn sched_thread_run_ns(t: *mut thread, nowNs: u64) -> u64;
     fn process_cpu_times(p: *mut process, mine: *mut cputime_pair, children: *mut cputime_pair);
     fn thread_sleep_ns_killable(ns: u64) -> i32;
+    fn user_range_ok(addr: u64, len: usize) -> bool;
+    fn futex_wait(space: *mut vm_space, uaddr: u64, val: u32, timeoutNs: u64, isPrivate: bool) -> i32;
+    fn futex_wake(space: *mut vm_space, uaddr: u64, n: u32, isPrivate: bool) -> i32;
+    fn futex_requeue(
+        space: *mut vm_space,
+        uaddr1: u64,
+        uaddr2: u64,
+        nrWake: u32,
+        nrRequeue: u32,
+        compare: bool,
+        expected: u32,
+        isPrivate: bool,
+    ) -> i32;
     fn process_itimer_set(p: *mut process, valueNs: u64, intervalNs: u64, oldValue: *mut u64, oldInterval: *mut u64);
     fn process_itimer_get(p: *mut process, value: *mut u64, interval: *mut u64);
     fn process_cputimer_set(
@@ -395,6 +424,91 @@ unsafe fn clockNanosleep(a: *mut syscall_args) -> i64 {
 unsafe fn schedYield(a: *mut syscall_args) -> i64 {
     sched_yield();
     return 0;
+}
+
+// --- futex (kernel/scheduler/futex) -----------------------------------------------------------------------------------
+
+const LX_FUTEX_CMD_MASK: u32 = 0xFFFFFE7F; // not the private flag, not the realtime flag (FUTEX_CMD_MASK_VALUE)
+
+/// Safety: the dispatcher's.
+@export("lx_futex")
+unsafe fn futex(a: *mut syscall_args) -> i64 {
+    let uaddr = arg(a, 0);
+    let op = argU32(a, 1) & LX_FUTEX_CMD_MASK;
+    let realtime = (argU32(a, 1) & LX_FUTEX_CLOCK_REALTIME) != 0;
+    // The flag is the program's promise that nobody outside this process can see the word: the private key, no
+    // lookup. Without it the word is classified by what it maps, so a process-shared mutex in a MAP_SHARED page is
+    // shared (the shared-futex unit; the flag used to be masked out and every futex was private).
+    let isPrivate = (argU32(a, 1) & LX_FUTEX_PRIVATE_FLAG) != 0;
+    let val = argU32(a, 2);
+    let space = Ptr.toBorrow(process_current() as *process).space;
+    if (!user_range_ok(uaddr, 4)) {
+        return -EFAULT as i64;
+    }
+    // Once, for every operation: the past-deadline WAIT_BITSET path below reads the word itself and used to answer
+    // -EAGAIN/-ETIMEDOUT for a misaligned address the futex would have refused (review).
+    if ((uaddr & 3) != 0) {
+        return -EINVAL as i64;
+    }
+    if (op == LX_FUTEX_WAIT || op == LX_FUTEX_WAIT_BITSET) {
+        // WAIT's timeout is relative (monotonic); WAIT_BITSET's is absolute on CLOCK_MONOTONIC, or CLOCK_REALTIME
+        // with the flag. The bitset is a wake filter (glibc uses MATCH_ANY); only that value is supported.
+        if (op == LX_FUTEX_WAIT_BITSET && argU32(a, 5) != LX_FUTEX_BITSET_MATCH_ANY) {
+            return -ENOSYS as i64;
+        }
+        if (op == LX_FUTEX_WAIT && realtime) {
+            return -ENOSYS as i64;
+        }
+        var timeout: u64 = 0;
+        if (arg(a, 3) != 0) {
+            let given = nsFromTimespec(arg(a, 3));
+            if (given.rc != 0) {
+                return given.rc as i64;
+            }
+            timeout = given.value;
+            if (op == LX_FUTEX_WAIT_BITSET) {
+                let now = if (realtime) clock_realtime_ns() else clock_now_ns();
+                if (timeout <= now) {
+                    // Already past: the value check still decides EAGAIN vs ETIMEDOUT.
+                    var cur: u32 = 0;
+                    if (copy_from_user(borrow mut cur as *mut u32 as *mut void, uaddr, 4) != 0) {
+                        return -EFAULT as i64;
+                    }
+                    return if (cur != val) -EAGAIN as i64 else -ETIMEDOUT as i64;
+                }
+                timeout -= now;
+            }
+            if (timeout == 0) {
+                timeout = 1;
+            }
+        }
+        return futex_wait(space, uaddr, val, timeout, isPrivate) as i64;
+    }
+    if (op == LX_FUTEX_WAKE || op == LX_FUTEX_WAKE_BITSET) {
+        if (op == LX_FUTEX_WAKE_BITSET && argU32(a, 5) != LX_FUTEX_BITSET_MATCH_ANY) {
+            return -ENOSYS as i64;
+        }
+        return futex_wake(space, uaddr, val, isPrivate) as i64;
+    }
+    if (op == LX_FUTEX_REQUEUE || op == LX_FUTEX_CMP_REQUEUE) {
+        let uaddr2 = arg(a, 4);
+        if (!user_range_ok(uaddr2, 4)) {
+            return -EFAULT as i64;
+        }
+        // Both report woken + requeued, as the Linux kernel does for both operations (its man page's "woken" for
+        // REQUEUE notwithstanding).
+        return futex_requeue(
+            space,
+            uaddr,
+            uaddr2,
+            val,
+            argU32(a, 3),
+            op == LX_FUTEX_CMP_REQUEUE,
+            argU32(a, 5),
+            isPrivate,
+        ) as i64;
+    }
+    return -ENOSYS as i64;
 }
 
 // --- interval timers (kernel/process/itimer.c, cpu_account.c) --------------------------------------------------------
