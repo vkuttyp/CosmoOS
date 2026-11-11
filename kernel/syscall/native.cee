@@ -263,8 +263,12 @@ extern "C" {
     fn sys_chroot(a: *mut syscall_args) -> i64;
 }
 
+/// The table's length: SYS_COUNT, so a number added to the header without a call here is a null entry, which the
+/// dispatcher answers with -ENOSYS, and never an index past the end.
+const CALLS: usize = SYS_COUNT as usize;
+
 /// The table: each call by its number, as C's `[SYS_exit] = sys_exit`.
-static TABLE: [extern "C" fn(*mut syscall_args) -> i64; 113] = [
+static TABLE: [extern "C" fn(*mut syscall_args) -> i64; CALLS] = [
     SYS_exit: sys_exit,
     SYS_write: sys_write,
     SYS_read: sys_read,
@@ -399,7 +403,7 @@ static ALWAYS_ALLOWED: [u16; 4] = [SYS_exit, SYS_sigreturn, SYS_thread_exit, SYS
 @export("personality_native")
 static NATIVE: personality = personality {
     name: "native\0".ptr as *CChar,
-    table: borrow TABLE as *[extern "C" fn(*mut syscall_args) -> i64; 113] as *syscall_fn,
+    table: borrow TABLE as *[extern "C" fn(*mut syscall_args) -> i64; CALLS] as *syscall_fn,
     count: SYS_COUNT as u32,
     always_allowed: borrow ALWAYS_ALLOWED as *[u16; 4] as *u16,
     nr_always_allowed: 4,
