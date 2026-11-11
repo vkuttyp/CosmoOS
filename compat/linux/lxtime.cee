@@ -1,6 +1,7 @@
 // lxtime.cee - The Linux personality's calls on the clocks, sleeping, nice values and rebooting
 // (docs/compat/linux/design.md), in CeeSafe (roadmap 1.3 K1): clock_gettime, gettimeofday, time, times, settimeofday,
-// clock_settime, nanosleep, clock_nanosleep, sched_yield, getpriority, setpriority and reboot. syscalls.c's table
+// clock_settime, nanosleep, clock_nanosleep, sched_yield, setitimer, getitimer, alarm, getpriority, setpriority and
+// reboot. syscalls.c's table
 // names them (linux_internal.h).
 //
 // A struct lx_timespec and a struct lx_timeval are two words and a struct lx_tms four; the C compiler checks them
@@ -36,6 +37,10 @@ extern "C" {
         "sizeof(struct lx_tms) == 32 && offsetof(struct lx_tms, tms_utime) == 0 && offsetof(struct lx_tms, tms_stime) == 8 && offsetof(struct lx_tms, tms_cutime) == 16 && offsetof(struct lx_tms, tms_cstime) == 24",
     )
     const TMS_LAYOUT: bool = true;
+    @cvalue(
+        "sizeof(struct lx_itimerval) == 32 && offsetof(struct lx_itimerval, it_interval) == 0 && offsetof(struct lx_itimerval, it_value) == 16",
+    )
+    const ITIMERVAL_LAYOUT: bool = true;
     @cvalue("sizeof(struct cputime_pair) == 16 && sizeof(pid_t) == 4")
     const SIZES: bool = true;
     @cvalue(
@@ -48,6 +53,9 @@ extern "C" {
     const LX_CLOCK_REALTIME_COARSE: u32 = 5;
     const LX_CLOCK_BOOTTIME: u32 = 7;
     const LX_TIMER_ABSTIME: u32 = 1;
+    const LX_ITIMER_REAL: i32 = 0;
+    const LX_ITIMER_VIRTUAL: i32 = 1;
+    const LX_ITIMER_PROF: i32 = 2;
     const LX_PRIO_PROCESS: u32 = 0;
     const LX_PRIO_PGRP: u32 = 1;
     const LX_PRIO_USER: u32 = 2;
@@ -70,6 +78,17 @@ extern "C" {
     fn sched_thread_run_ns(t: *mut thread, nowNs: u64) -> u64;
     fn process_cpu_times(p: *mut process, mine: *mut cputime_pair, children: *mut cputime_pair);
     fn thread_sleep_ns_killable(ns: u64) -> i32;
+    fn process_itimer_set(p: *mut process, valueNs: u64, intervalNs: u64, oldValue: *mut u64, oldInterval: *mut u64);
+    fn process_itimer_get(p: *mut process, value: *mut u64, interval: *mut u64);
+    fn process_cputimer_set(
+        p: *mut process,
+        which: u32,
+        valueNs: u64,
+        intervalNs: u64,
+        oldValue: *mut u64,
+        oldInterval: *mut u64,
+    ) -> bool;
+    fn process_cputimer_get(p: *mut process, which: u32, value: *mut u64, interval: *mut u64) -> bool;
     fn sched_yield();
     fn kernel_reboot(cmd: u32);
     fn process_getpgid(pid: u32, out: *mut u32) -> i32;
@@ -376,6 +395,125 @@ unsafe fn clockNanosleep(a: *mut syscall_args) -> i64 {
 unsafe fn schedYield(a: *mut syscall_args) -> i64 {
     sched_yield();
     return 0;
+}
+
+// --- interval timers (kernel/process/itimer.c, cpu_account.c) --------------------------------------------------------
+
+/// A struct lx_timeval's two words as nanoseconds: -EINVAL in `rc` only for a negative field or tv_usec of 10^6 or
+/// more, as Linux checks; a time beyond 2^62 ns (about 146 years) clamps there, as nanosleep's does -- "never", not
+/// an error.
+fn itvToNs(sec: u64, usec: u64) -> Got {
+    if (signed(sec) < 0 || signed(usec) < 0 || signed(usec) >= 1000000) {
+        return Got { rc: -EINVAL, value: 0 };
+    }
+    if (sec >= (1 << 62) / SECOND) {
+        return Got { rc: 0, value: 1 << 62 };
+    }
+    return Got { rc: 0, value: sec * SECOND + usec * 1000 };
+}
+
+/// A value and an interval in nanoseconds to user memory as a struct lx_itimerval (the interval first), each rounded
+/// up to the microsecond: a timer still armed never reads 0. Not 0 when the copy faults.
+///
+/// Safety: copy_to_user checks the user address.
+unsafe fn putItimerval(user: u64, valueNs: u64, intervalNs: u64) -> i32 {
+    let value = valueNs.wrappingAdd(999) / 1000;
+    let interval = intervalNs.wrappingAdd(999) / 1000;
+    var itv = [interval / 1000000, interval % 1000000, value / 1000000, value % 1000000];
+    return copy_to_user(user, borrow itv as *[u64; 4] as *void, 32);
+}
+
+/// Safety: the dispatcher's.
+@export("lx_setitimer")
+unsafe fn setitimer(a: *mut syscall_args) -> i64 {
+    let which = arg32(a, 0);
+    if (which != LX_ITIMER_REAL && which != LX_ITIMER_VIRTUAL && which != LX_ITIMER_PROF) {
+        return -EINVAL as i64;
+    }
+    var value: u64 = 0;
+    var interval: u64 = 0;
+    if (arg(a, 1) != 0) {
+        var nv = [0u64; 4]; // a struct lx_itimerval: it_interval, it_value
+        if (copy_from_user(borrow mut nv as *mut [u64; 4] as *mut void, arg(a, 1), 32) != 0) {
+            return -EFAULT as i64;
+        }
+        let v = itvToNs(nv[2], nv[3]);
+        if (v.rc != 0) {
+            return v.rc as i64;
+        }
+        let i = itvToNs(nv[0], nv[1]);
+        if (i.rc != 0) {
+            return i.rc as i64;
+        }
+        value = v.value;
+        interval = i.value;
+    }
+    var oldValue: u64 = 0;
+    var oldInterval: u64 = 0;
+    if (which == LX_ITIMER_REAL) {
+        process_itimer_set(
+            process_current(),
+            value,
+            interval,
+            borrow mut oldValue as *mut u64,
+            borrow mut oldInterval as *mut u64,
+        );
+    } else {
+        process_cputimer_set(
+            process_current(),
+            truncate<u32>(which),
+            value,
+            interval,
+            borrow mut oldValue as *mut u64,
+            borrow mut oldInterval as *mut u64,
+        );
+    }
+    if (arg(a, 2) != 0 && putItimerval(arg(a, 2), oldValue, oldInterval) != 0) {
+        return -EFAULT as i64;
+    }
+    return 0;
+}
+
+/// Safety: the dispatcher's.
+@export("lx_getitimer")
+unsafe fn getitimer(a: *mut syscall_args) -> i64 {
+    let which = arg32(a, 0);
+    var value: u64 = 0;
+    var interval: u64 = 0;
+    if (which == LX_ITIMER_REAL) {
+        process_itimer_get(process_current(), borrow mut value as *mut u64, borrow mut interval as *mut u64);
+    } else if (!process_cputimer_get(
+        process_current(),
+        truncate<u32>(which),
+        borrow mut value as *mut u64,
+        borrow mut interval as *mut u64,
+    )) {
+        return -EINVAL as i64;
+    }
+    return if (putItimerval(arg(a, 1), value, interval) != 0) -EFAULT as i64 else 0;
+}
+
+/// alarm(2), x86-64's table only (musl's alarm is setitimer on AArch64): the seconds the previous alarm had left,
+/// rounded as Linux rounds them -- up from half a second, and never 0 for one still armed.
+///
+/// Safety: the dispatcher's.
+@export("lx_alarm")
+unsafe fn alarm(a: *mut syscall_args) -> i64 {
+    var old: u64 = 0;
+    var oldInterval: u64 = 0;
+    process_itimer_set(
+        process_current(),
+        argU32(a, 0) as u64 * SECOND,
+        0,
+        borrow mut old as *mut u64,
+        borrow mut oldInterval as *mut u64,
+    );
+    var sec = old / SECOND;
+    let rem = old % SECOND;
+    if (rem >= 500000000 || (sec == 0 && rem != 0)) {
+        sec += 1;
+    }
+    return signed(sec);
 }
 
 // --- nice values (roadmap 1.2 A5, LX-13; the rules are kernel/process/nice.cee's) ------------------------------------

@@ -3246,86 +3246,9 @@ static int64_t lx_prctl(struct syscall_args *a)
     }
 }
 
-/* --- interval timers: ITIMER_REAL only (kernel/process/itimer.c) --------- */
-
-/* A timeval as nanoseconds: -EINVAL only for a negative field or tv_usec
- * of 10^6 or more, as Linux checks; a time beyond 2^62 ns (about 146
- * years) clamps there, as nanosleep's does -- "never", not an error. */
-#define ITV_NS_MAX (1ull << 62)
-static bool itv_to_ns(const struct lx_timeval *tv, uint64_t *ns)
-{
-    if (tv->tv_sec < 0 || tv->tv_usec < 0 || tv->tv_usec >= 1000000)
-        return false;
-    if ((uint64_t)tv->tv_sec >= ITV_NS_MAX / 1000000000ull)
-        *ns = ITV_NS_MAX;
-    else
-        *ns = (uint64_t)tv->tv_sec * 1000000000ull + (uint64_t)tv->tv_usec * 1000ull;
-    return true;
-}
-
-static void ns_to_itv(uint64_t ns, struct lx_timeval *tv)
-{
-    /* Rounded up to the microsecond: a timer still armed never reads 0. */
-    uint64_t us = (ns + 999) / 1000;
-    tv->tv_sec = (int64_t)(us / 1000000);
-    tv->tv_usec = (int64_t)(us % 1000000);
-}
-
-static int64_t lx_setitimer(struct syscall_args *a)
-{
-    int which = (int)a->a[0];
-    if (which != LX_ITIMER_REAL && which != LX_ITIMER_VIRTUAL && which != LX_ITIMER_PROF)
-        return -EINVAL;
-    struct lx_itimerval nv;
-    uint64_t value = 0, interval = 0, ov, oi;
-    if (a->a[1] != 0) {
-        if (copy_from_user(&nv, a->a[1], sizeof(nv)))
-            return -EFAULT;
-        if (!itv_to_ns(&nv.it_value, &value) || !itv_to_ns(&nv.it_interval, &interval))
-            return -EINVAL;
-    }
-    if (which == LX_ITIMER_REAL)
-        process_itimer_set(process_current(), value, interval, &ov, &oi);
-    else
-        (void)process_cputimer_set(process_current(), (unsigned)which, value, interval, &ov, &oi);
-    if (a->a[2] != 0) {
-        struct lx_itimerval old;
-        ns_to_itv(ov, &old.it_value);
-        ns_to_itv(oi, &old.it_interval);
-        if (copy_to_user(a->a[2], &old, sizeof(old)))
-            return -EFAULT;
-    }
-    return 0;
-}
-
-static int64_t lx_getitimer(struct syscall_args *a)
-{
-    int which = (int)a->a[0];
-    uint64_t v, i;
-    if (which == LX_ITIMER_REAL)
-        process_itimer_get(process_current(), &v, &i);
-    else if (!process_cputimer_get(process_current(), (unsigned)which, &v, &i))
-        return -EINVAL;
-    struct lx_itimerval cur;
-    ns_to_itv(v, &cur.it_value);
-    ns_to_itv(i, &cur.it_interval);
-    return copy_to_user(a->a[1], &cur, sizeof(cur)) ? -EFAULT : 0;
-}
-
-#ifdef LX_alarm
-/* alarm(2), x86-64 only (musl's alarm is setitimer on AArch64): the seconds
- * the previous alarm had left, rounded as Linux rounds them -- up from half
- * a second, and never 0 for one still armed. */
-static int64_t lx_alarm(struct syscall_args *a)
-{
-    uint64_t ov;
-    process_itimer_set(process_current(), (uint64_t)(unsigned)a->a[0] * 1000000000ull, 0, &ov, NULL);
-    uint64_t sec = ov / 1000000000ull, rem = ov % 1000000000ull;
-    if (rem >= 500000000ull || (sec == 0 && rem != 0))
-        sec++;
-    return (int64_t)sec;
-}
-#endif
+/* --- interval timers (lxtime.cee) ------------------------------------------------
+ *
+ * setitimer, getitimer and alarm are CeeSafe's (compat/linux/lxtime.cee). */
 
 /* --- the table ------------------------------------------------------------------------ */
 
