@@ -15,7 +15,7 @@ runtime, generated too:
   kernel/block/gpt.cee              -> kernel/block/gpt.c
   kernel/object/handle.cee          -> kernel/object/handle.c, kernel/include/kernel/handle_types.h
   kernel/ceesafe/kcore_test.cee     -> kernel/ceesafe/kcore_test.c   (with CeeSafe's kernel library)
-  (every port)                      -> kernel/include/ceesafe/rt.h, foreign.h, kernel/ceesafe/ceesafe_rt_core.c
+  (every port)                      -> kernel/include/ceesafe/rt.h, foreign.h, embed.h, kernel/ceesafe/ceesafe_rt_core.c
 
 The generated C needs a ceesafe_panic for the environment it is linked into
 (kernel/ceesafe/ceesafe_panic.c in the kernel, tests/host/ceesafe_panic.c in
@@ -61,7 +61,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
-CEESAFEC_VERSION = "0.24.2"
+CEESAFEC_VERSION = "0.33.0"
 
 # Each port: its CeeSafe source, the C it generates, what that C is, the header ceesafec generates for it (None
 # when the port's header is hand-written C, imported by the source), and whether it uses CeeSafe's kernel library
@@ -431,6 +431,7 @@ PORTS = [
 # ceesafe/foreign.h (CeeSafe ADRs 0060-0061, ceesafec 0.12.0) is the C side's allocation calls, which rt.h includes from
 # beside itself.
 RUNTIME = [("ceesafe/rt.h", "kernel/include/ceesafe/rt.h"), ("ceesafe/foreign.h", "kernel/include/ceesafe/foreign.h"),
+           ("ceesafe/embed.h", "kernel/include/ceesafe/embed.h"),
            ("ceesafe_rt_core.c", "kernel/ceesafe/ceesafe_rt_core.c")]
 # The async executor (CeeSafe ADR 0039), which only a port that uses async emits: the same from each that does.
 ASYNC_RUNTIME = ("ceesafe_rt_async.c", "kernel/ceesafe/ceesafe_rt_async.c")
