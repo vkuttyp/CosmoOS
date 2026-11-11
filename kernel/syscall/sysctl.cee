@@ -1,0 +1,556 @@
+// sysctl.cee - The native personality's sysctl read and write, reboot and getrandom (uapi/cosmo/syscall.h), in CeeSafe
+// (roadmap 2.0 SA8). native.c's table names them (syscall.h).
+//
+// A value is text in a buffer of VALUE bytes, written as C's snprintf writes it (TextWriter): cut where it does not
+// fit, and its full length reported. The statistics records are locals of u64 words at least their size, which the C
+// compiler checks (the extern block).
+
+@header(
+    "arch/cpu.h", "kernel/blk.h", "kernel/bootfs.h", "kernel/bootinfo.h", "kernel/cosmofs.h", "kernel/cred.h",
+    "kernel/errno.h", "kernel/faultinject.h", "kernel/hv.h", "kernel/netif.h", "kernel/pagecache.h", "kernel/percpu.h",
+    "kernel/pmm.h", "kernel/process.h", "kernel/random.h", "kernel/selftest.h", "kernel/shutdown.h",
+    "kernel/storage.h", "kernel/string.h", "kernel/syscall.h", "kernel/timer.h", "kernel/uaccess.h", "kernel/utsns.h",
+    "kernel/version.h", "kernel/vfs.h", "kernel/vmm.h", "uapi/cosmo/syscall.h",
+)
+extern "C" {
+    struct syscall_args {
+        a: [u64; 6];
+    }
+    struct credentials;
+    struct uts_ns;
+    struct pagecache_stats;
+    struct vm_stats;
+    struct pmm_stats;
+
+    @cvalue(
+        "sizeof(struct pagecache_stats) <= 32 * 8 && offsetof(struct pagecache_stats, writebacks) == 16 && offsetof(struct pagecache_stats, pages) == 24 && offsetof(struct pagecache_stats, exec_syncs) == 72",
+    )
+    const PAGECACHE_STATS_LAYOUT: bool = true;
+    @cvalue(
+        "sizeof(struct vm_stats) <= 32 * 8 && offsetof(struct vm_stats, anon_fault_retries) == 24 && offsetof(struct vm_stats, file_faults) == 40 && offsetof(struct vm_stats, file_cow_faults) == 48 && offsetof(struct vm_stats, file_dirty_faults) == 56 && offsetof(struct vm_stats, file_fault_retries) == 64 && offsetof(struct vm_stats, file_sigbus) == 72 && offsetof(struct vm_stats, futex_shared_keys) == 80",
+    )
+    const VM_STATS_LAYOUT: bool = true;
+    @cvalue(
+        "sizeof(struct pmm_stats) <= 32 * 8 && offsetof(struct pmm_stats, total_pages) == 0 && offsetof(struct pmm_stats, free_pages) == 8",
+    )
+    const PMM_STATS_LAYOUT: bool = true;
+    @cvalue("KERNEL_REBOOT_RESTART == 0 && KERNEL_REBOOT_HALT == 1 && KERNEL_REBOOT_POWER_OFF == 2")
+    const REBOOT_COMMANDS: bool = true;
+    @cvalue("COSMOBOOT_KEY_ID_SIZE == 8 && BLKDEV_NAME_MAX == 16 && sizeof(unsigned) == 4")
+    const SIZES: bool = true;
+    const KERNEL_NAME: *CChar;
+    const KERNEL_VERSION: *CChar;
+    const COSMO_BUILD_ID: *CChar;
+    const COSMO_BUILD_TYPE: *CChar;
+    const PAGE_SIZE: u64 = 4096;
+    const COSMO_HOST_NAME_MAX: usize = 64;
+    const COSMO_REBOOT_RESTART: u64 = 1;
+    const COSMO_REBOOT_HALT: u64 = 2;
+    const COSMO_REBOOT_POWER_OFF: u64 = 3;
+    const RANDOM_WAIT_FOREVER: u64 = 0xFFFFFFFFFFFFFFFF;
+    const PRIV_SYS_ADMIN: u32 = 2;
+    const EPERM: i32 = 1;
+    const ENOENT: i32 = 2;
+    const EFAULT: i32 = 14;
+    const EINVAL: i32 = 22;
+    const EROFS: i32 = 30;
+    const ENAMETOOLONG: i32 = 36;
+
+    static g_cosmofs_scrub_rate: AtomicU32;
+    static g_cosmofs_resilver_rate: AtomicU32;
+    static g_pool_fault_errors: AtomicU32;
+
+    fn cred_current() -> *credentials;
+    fn cred_has(c: *credentials, priv: u32) -> bool;
+    fn user_range_ok(addr: u64, len: usize) -> bool;
+    fn copy_from_user(dst: *mut void, userSrc: u64, len: usize) -> i32;
+    fn copy_to_user(userDst: u64, src: *void, len: usize) -> i32;
+    fn strncpy_from_user(dst: *mut CChar, userSrc: u64, max: usize) -> i32;
+    fn strlen(s: *CChar) -> usize;
+    fn memset(dst: *mut void, c: i32, n: usize) -> *mut void;
+    fn arch_name() -> *CChar;
+    fn clock_now_ns() -> u64;
+    fn utsns_current() -> *mut uts_ns;
+    fn utsns_gethostname(ns: *mut uts_ns, out: *mut CChar, n: usize) -> usize;
+    fn utsns_sethostname(ns: *mut uts_ns, name: *CChar, len: usize) -> i32;
+    fn bootinfo_cmdline() -> *CChar;
+    fn bootinfo_verified(keyId: *mut u8) -> bool;
+    fn bootfs_root_spec() -> *CChar;
+    fn bootfs_root_device(out: *mut CChar, len: usize) -> i32;
+    fn process_count() -> u32;
+    fn cpu_count() -> u32;
+    fn pagecache_get_stats(out: *mut pagecache_stats);
+    fn pagecache_limit() -> u64;
+    fn vm_get_stats(out: *mut vm_stats);
+    fn pmm_get_stats(out: *mut pmm_stats);
+    fn vm_test_file_hold_state() -> u32;
+    fn vm_test_anon_hold_state() -> u32;
+    fn vfs_test_cwd_hold_state() -> u32;
+    fn hv_sysctl(name: *CChar, out: *mut CChar, n: usize) -> i32;
+    fn netif_steering() -> bool;
+    fn faultinject_sysctl(out: *mut CChar, n: usize) -> i32;
+    fn sched_preempt_probe_sysctl(out: *mut CChar, n: usize) -> i32;
+    fn kernel_reboot(cmd: u32);
+    fn random_wait_ready(timeoutNs: u64) -> i32;
+    fn random_get_bytes(buf: *mut void, len: usize);
+}
+
+/// A value's buffer, and a name's.
+const VALUE: usize = 512;
+const NAME: usize = 64;
+
+/// enum kernel_reboot_cmd (REBOOT_COMMANDS).
+const KERNEL_REBOOT_RESTART: u32 = 0;
+const KERNEL_REBOOT_HALT: u32 = 1;
+const KERNEL_REBOOT_POWER_OFF: u32 = 2;
+
+/// Every name, as sysctl.names lists them and a write looks one up.
+const NAMES: usize = 40;
+
+fn nameAt(i: usize) -> StringView => if (i == 0) "kernel.name"
+    else if (i == 1) "kernel.version"
+    else if (i == 2) "kernel.build"
+    else if (i == 3) "kernel.arch"
+    else if (i == 4) "kernel.uptime_ns"
+    else if (i == 5) "kernel.nprocs"
+    else if (i == 6) "kernel.hostname"
+    else if (i == 7) "kernel.cmdline"
+    else if (i == 8) "kernel.root"
+    else if (i == 9) "kernel.rootdev"
+    else if (i == 10) "kernel.verified_boot"
+    else if (i == 11) "hw.ncpu"
+    else if (i == 12) "vm.page_size"
+    else if (i == 13) "vm.pages_total"
+    else if (i == 14) "vm.pages_free"
+    else if (i == 15) "vm.cache_pages"
+    else if (i == 16) "vm.cache_limit"
+    else if (i == 17) "vm.cache_writebacks"
+    else if (i == 18) "vm.cache_exec_syncs"
+    else if (i == 19) "vm.file_faults"
+    else if (i == 20) "vm.file_cow_faults"
+    else if (i == 21) "vm.file_dirty_faults"
+    else if (i == 22) "vm.file_fault_retries"
+    else if (i == 23) "vm.file_sigbus"
+    else if (i == 24) "vm.futex_shared_keys"
+    else if (i == 25) "vm.anon_fault_retries"
+    else if (i == 26) "hv.backend"
+    else if (i == 27) "hv.vms"
+    else if (i == 28) "hv.vcpus"
+    else if (i == 29) "hv.exits"
+    else if (i == 30) "net.steer"
+    else if (i == 31) "fs.scrub_rate"
+    else if (i == 32) "fs.fault_errors"
+    else if (i == 33) "fs.resilver_rate"
+    else if (i == 34) "sysctl.names"
+    else if (i == 35) "debug.faultinject"
+    else if (i == 36) "debug.preempt_probe"
+    else if (i == 37) "debug.file_fault_hold"
+    else if (i == 38) "debug.anon_fault_hold"
+    else "debug.cwd_hold";
+
+/// Safety: the dispatcher's: `a` is the call's arguments.
+unsafe fn arg(a: *mut syscall_args, i: usize) -> u64 => Ptr.toBorrow(a as *syscall_args).a[i];
+
+/// Whether `name` is `s`.
+fn isName(name: Slice<u8>, s: StringView) -> bool {
+    let b = s.bytes();
+    if (name.length != b.length) {
+        return false;
+    }
+    var i: usize = 0;
+    while (i < b.length) {
+        if (name[i] != b[i]) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+/// Whether `name` starts with `s`.
+fn startsWith(name: Slice<u8>, s: StringView) -> bool {
+    let b = s.bytes();
+    return name.length >= b.length && isName(name[..b.length], s);
+}
+
+/// Safety: `s` is a NUL-terminated string that outlives the use.
+unsafe fn cBytes(s: *CChar) -> Slice<static, u8> => Slice.fromRaw(s as *u8, strlen(s));
+
+/// snprintf's result: every byte asked for.
+fn wanted(w: borrow TextWriter) -> i32 => truncate<i32>(w.wanted());
+
+/// `v` in decimal as the value (the C's "%llu" and "%u").
+/// Safety: `out` holds VALUE bytes.
+unsafe fn number(out: *mut u8, v: u64) -> i32 {
+    var w = TextWriter.create(SliceMut.fromRaw(out, VALUE));
+    w.decimal(v);
+    return wanted(w);
+}
+
+/// The string `s` as the value (the C's "%s").
+/// Safety: `out` holds VALUE bytes; `s` is a NUL-terminated string.
+unsafe fn string(out: *mut u8, s: *CChar) -> i32 {
+    var w = TextWriter.create(SliceMut.fromRaw(out, VALUE));
+    w.bytes(cBytes(s));
+    return wanted(w);
+}
+
+/// The value of `name` into `out` as text: its full length as snprintf reports it, or the error. `cname` is `name`
+/// with its NUL.
+/// Safety: in a process's thread; `out` holds VALUE bytes; `cname` is the NUL-terminated string `name` views.
+unsafe fn value(name: Slice<u8>, cname: *CChar, out: *mut u8) -> i32 {
+    if (isName(name, "kernel.name")) {
+        return string(out, KERNEL_NAME);
+    }
+    if (isName(name, "kernel.version")) {
+        return string(out, KERNEL_VERSION);
+    }
+    if (isName(name, "kernel.build")) {
+        var w = TextWriter.create(SliceMut.fromRaw(out, VALUE));
+        w.bytes(cBytes(COSMO_BUILD_ID));
+        w.text(" ");
+        w.bytes(cBytes(COSMO_BUILD_TYPE));
+        return wanted(w);
+    }
+    if (isName(name, "kernel.arch")) {
+        return string(out, arch_name());
+    }
+    if (isName(name, "kernel.uptime_ns")) {
+        return number(out, clock_now_ns());
+    }
+    // From the caller's namespace, like gethostname and uname: three ways to ask must not give a contained process
+    // three answers.
+    if (isName(name, "kernel.hostname")) {
+        var host = [0u8; 64];
+        let hp = borrow mut host as *mut [u8; 64] as *mut CChar;
+        let _ = utsns_gethostname(utsns_current(), hp, COSMO_HOST_NAME_MAX);
+        return string(out, hp as *CChar);
+    }
+    // The command line and what its root= names (kernel/core/bootfs.c): init reads these to decide whether to switch
+    // to a disk root. kernel.rootdev is resolved at the read, "" when root= names nothing registered (or there is no
+    // root=).
+    if (isName(name, "kernel.cmdline")) {
+        return string(out, bootinfo_cmdline());
+    }
+    if (isName(name, "kernel.root")) {
+        return string(out, bootfs_root_spec());
+    }
+    if (isName(name, "kernel.rootdev")) {
+        var dev = [0u8; 16];
+        let dp = borrow mut dev as *mut [u8; 16] as *mut CChar;
+        if (bootfs_root_device(dp, 16) != 0) {
+            (dp as *mut u8).write(0);
+        }
+        return string(out, dp as *CChar);
+    }
+    // Verified boot (boot protocol v8, docs/boot/design.md): "yes <key id>" when the loader checked kernel, archive
+    // and command line against the signed manifest, "no" for a VERIFY_BOOT=0 loader.
+    if (isName(name, "kernel.verified_boot")) {
+        var id = [0u8; 8];
+        var w = TextWriter.create(SliceMut.fromRaw(out, VALUE));
+        if (!bootinfo_verified(borrow mut id as *mut [u8; 8] as *mut u8)) {
+            w.text("no");
+            return wanted(w);
+        }
+        w.text("yes ");
+        for (b in id[..]) {
+            w.hex(b as u64, 2);
+        }
+        return wanted(w);
+    }
+    if (isName(name, "kernel.nprocs")) {
+        return number(out, process_count() as u64);
+    }
+    if (isName(name, "hw.ncpu")) {
+        return number(out, cpu_count() as u64);
+    }
+    if (isName(name, "vm.page_size")) {
+        return number(out, PAGE_SIZE & 0xFFFFFFFF);
+    }
+    let cache = isName(name, "vm.cache_pages");
+    let writebacks = isName(name, "vm.cache_writebacks");
+    if (cache || writebacks || isName(name, "vm.cache_exec_syncs")) {
+        var st = [0u64; 32]; // a struct pagecache_stats (PAGECACHE_STATS_LAYOUT)
+        pagecache_get_stats(borrow mut st as *mut [u64; 32] as *mut pagecache_stats);
+        return number(out, if (cache) st[3] else if (writebacks) st[2] else st[9]);
+    }
+    if (isName(name, "vm.cache_limit")) {
+        return number(out, pagecache_limit());
+    }
+    // The file-mapping counters (docs/audit/next-subsystem-file-regions.md): what the mmap section of init --selftest
+    // reads to tell one mutation of the fault from another.
+    let file = startsWith(name, "vm.file_");
+    let anon = isName(name, "vm.anon_fault_retries");
+    if (file || anon || isName(name, "vm.futex_shared_keys")) {
+        var st = [0u64; 32]; // a struct vm_stats (VM_STATS_LAYOUT)
+        vm_get_stats(borrow mut st as *mut [u64; 32] as *mut vm_stats);
+        if (!file) {
+            return number(out, if (anon) st[3] else st[10]);
+        }
+        let k = name[8..];
+        if (isName(k, "faults")) {
+            return number(out, st[5]);
+        }
+        if (isName(k, "cow_faults")) {
+            return number(out, st[6]);
+        }
+        if (isName(k, "dirty_faults")) {
+            return number(out, st[7]);
+        }
+        if (isName(k, "fault_retries")) {
+            return number(out, st[8]);
+        }
+        if (isName(k, "sigbus")) {
+            return number(out, st[9]);
+        }
+        return -ENOENT;
+    }
+    // The three debug holds: a debug build's.
+    if (isName(name, "debug.file_fault_hold")) {
+        if (cfg("CONFIG_DEBUG")) {
+            return number(out, vm_test_file_hold_state() as u64);
+        }
+        return -ENOENT;
+    }
+    if (isName(name, "debug.anon_fault_hold")) {
+        if (cfg("CONFIG_DEBUG")) {
+            return number(out, vm_test_anon_hold_state() as u64);
+        }
+        return -ENOENT;
+    }
+    if (isName(name, "debug.cwd_hold")) {
+        if (cfg("CONFIG_DEBUG")) {
+            return number(out, vfs_test_cwd_hold_state() as u64);
+        }
+        return -ENOENT;
+    }
+    let total = isName(name, "vm.pages_total");
+    if (total || isName(name, "vm.pages_free")) {
+        var st = [0u64; 32]; // a struct pmm_stats (PMM_STATS_LAYOUT)
+        pmm_get_stats(borrow mut st as *mut [u64; 32] as *mut pmm_stats);
+        return number(out, if (total) st[0] else st[1]);
+    }
+    if (startsWith(name, "hv.")) {
+        return hv_sysctl((cname as *u8).add(3) as *CChar, out as *mut CChar, VALUE);
+    }
+    if (isName(name, "net.steer")) {
+        return number(out, if (netif_steering()) 1 else 0);
+    }
+    // The scrub's bound, blocks a second (roadmap 1.2 B2): a scrub reads it when it starts. 0 is no bound.
+    if (isName(name, "fs.scrub_rate")) {
+        return number(out, g_cosmofs_scrub_rate.loadWith(LoadOrdering.Relaxed) as u64);
+    }
+    // Failures after which a mirror's copy is FAULTED (roadmap 1.2 B3); 0 never faults one.
+    if (isName(name, "fs.fault_errors")) {
+        return number(out, g_pool_fault_errors.loadWith(LoadOrdering.Relaxed) as u64);
+    }
+    // The resilver's bound, blocks a second (roadmap 1.2 B3): read at each idle wake of the resilver thread. 0 is no
+    // bound.
+    if (isName(name, "fs.resilver_rate")) {
+        return number(out, g_cosmofs_resilver_rate.loadWith(LoadOrdering.Relaxed) as u64);
+    }
+    if (isName(name, "debug.faultinject")) {
+        let len = faultinject_sysctl(out as *mut CChar, VALUE);
+        return if (len < 0) -ENOENT else len; // -ENOENT in release builds: the knob does not exist
+    }
+    if (isName(name, "debug.preempt_probe")) {
+        if (cfg("CONFIG_SELFTEST")) {
+            // The read is the system call under test (docs/audit/next-subsystem-wake-preempt.md); it creates a kernel
+            // thread, so only a PRIV_SYS_ADMIN caller may ask.
+            if (!cred_has(cred_current(), PRIV_SYS_ADMIN)) {
+                return -EPERM;
+            }
+            return sched_preempt_probe_sysctl(out as *mut CChar, VALUE);
+        }
+        return -ENOENT;
+    }
+    if (isName(name, "sysctl.names")) {
+        var w = TextWriter.create(SliceMut.fromRaw(out, VALUE));
+        var i: usize = 0;
+        while (i < NAMES) {
+            w.text(nameAt(i));
+            w.text("\n");
+            i = i + 1;
+        }
+        return wanted(w);
+    }
+    return -ENOENT;
+}
+
+/// The name a call's first argument points at, into `buf` (NAME bytes): its length, or the error; a name that does not
+/// fit names nothing.
+/// Safety: the dispatcher's; `buf` holds NAME bytes.
+unsafe fn nameFromUser(a: *mut syscall_args, buf: *mut CChar) -> i32 {
+    let rc = strncpy_from_user(buf, arg(a, 0), NAME);
+    if (rc < 0) {
+        return if (rc == -ENAMETOOLONG) -ENOENT else rc;
+    }
+    return if (rc < 64) rc else -ENOENT;
+}
+
+/// Safety: the dispatcher's.
+@export("sys_sysctl")
+unsafe fn sysctl(a: *mut syscall_args) -> i64 {
+    var name = [0u8; 64];
+    let np = borrow mut name as *mut [u8; 64] as *mut CChar;
+    let nlen = nameFromUser(a, np);
+    if (nlen < 0) {
+        return nlen as i64;
+    }
+    var len = truncate<usize>(arg(a, 2));
+    if (len > 4096) {
+        len = 4096;
+    }
+    if (!user_range_ok(arg(a, 1), len)) {
+        return -EFAULT as i64;
+    }
+    var text = [0u8; 512];
+    let tp = borrow mut text as *mut [u8; 512] as *mut u8;
+    var vlen = value(Slice.fromRaw(np as *u8, truncate<usize>(nlen)), np as *CChar, tp);
+    if (vlen < 0) {
+        return vlen as i64;
+    }
+    if (vlen >= 512) {
+        vlen = 511;
+    }
+    let full = truncate<usize>(vlen) + 1;
+    let copy = if (full <= len) full else len; // NUL when it fits
+    if (copy != 0 && copy_to_user(arg(a, 1), tp as *void, copy) != 0) {
+        return -EFAULT as i64;
+    }
+    return vlen as i64;
+}
+
+/// Shell completeness S5: init's door to kernel_reboot (the Linux personality's reboot(2) is the other).
+/// Safety: the dispatcher's.
+@export("sys_reboot")
+unsafe fn reboot(a: *mut syscall_args) -> i64 {
+    if (!cred_has(cred_current(), PRIV_SYS_ADMIN)) {
+        return -EPERM as i64;
+    }
+    let cmd = arg(a, 0);
+    // kernel_reboot does not return.
+    if (cmd == COSMO_REBOOT_RESTART) {
+        kernel_reboot(KERNEL_REBOOT_RESTART);
+    } else if (cmd == COSMO_REBOOT_HALT) {
+        kernel_reboot(KERNEL_REBOOT_HALT);
+    } else if (cmd == COSMO_REBOOT_POWER_OFF) {
+        kernel_reboot(KERNEL_REBOOT_POWER_OFF);
+    }
+    return -EINVAL as i64;
+}
+
+/// Roadmap 1.2 B5: what a key, a salt or a key file is made of, for the native personality, which had only the sixteen
+/// AT_RANDOM bytes a process starts with. The Linux door's getrandom without its flags: it waits for the pool to be
+/// seeded (an unseeded pool's bytes are not key material, invariant S18) and gives at most 256 bytes, as getentropy.
+/// Safety: the dispatcher's.
+@export("sys_getrandom")
+unsafe fn getrandom(a: *mut syscall_args) -> i64 {
+    let len = truncate<usize>(arg(a, 1));
+    if (len > 256) {
+        return -EINVAL as i64;
+    }
+    if (!user_range_ok(arg(a, 0), len)) {
+        return -EFAULT as i64;
+    }
+    let rc = random_wait_ready(RANDOM_WAIT_FOREVER);
+    if (rc != 0) {
+        return rc as i64;
+    }
+    var tmp = [0u8; 256];
+    let tp = borrow mut tmp as *mut [u8; 256] as *mut void;
+    random_get_bytes(tp, len);
+    let failed = copy_to_user(arg(a, 0), tp as *void, len) != 0;
+    let _ = memset(tp, 0, 256);
+    return if (failed) -EFAULT as i64 else truncate<i64>(len);
+}
+
+/// Roadmap M5: a sysctl write. Four names are writable: kernel.hostname (what sethostname writes, in the caller's uts
+/// namespace) and the three fs. bounds; writing needs PRIV_SYS_ADMIN. -ENOENT for an unknown name, -EROFS for one that
+/// is read-only, -EPERM without the privilege.
+/// Safety: the dispatcher's.
+@export("sys_sysctl_set")
+unsafe fn sysctlSet(a: *mut syscall_args) -> i64 {
+    var nameBuf = [0u8; 64];
+    let np = borrow mut nameBuf as *mut [u8; 64] as *mut CChar;
+    let nlen = nameFromUser(a, np);
+    if (nlen < 0) {
+        return nlen as i64;
+    }
+    let name = Slice.fromRaw(np as *u8, truncate<usize>(nlen));
+    var known = false;
+    var i: usize = 0;
+    while (i < NAMES) {
+        known = known || isName(name, nameAt(i));
+        i = i + 1;
+    }
+    // Listed but not built in this kernel: absent, as a read says (PR #370 review). The build conditions are value's.
+    var built = false;
+    if (isName(name, "debug.preempt_probe")) {
+        if (cfg("CONFIG_SELFTEST")) {
+            built = true;
+        }
+    } else if (isName(name, "debug.faultinject")) {
+        if (cfg("CONFIG_FAULTINJECT")) {
+            built = true;
+        }
+    } else if (startsWith(name, "debug.")) {
+        if (cfg("CONFIG_DEBUG")) {
+            built = true;
+        }
+    } else {
+        built = true;
+    }
+    if (!known || !built) {
+        return -ENOENT as i64;
+    }
+    let faultErrors = isName(name, "fs.fault_errors");
+    let resilverRate = isName(name, "fs.resilver_rate");
+    if (faultErrors || resilverRate || isName(name, "fs.scrub_rate")) {
+        if (!cred_has(cred_current(), PRIV_SYS_ADMIN)) {
+            return -EPERM as i64;
+        }
+        let len = truncate<usize>(arg(a, 2));
+        var buf = [0u8; 16];
+        if (len == 0 || len >= 16) {
+            return -EINVAL as i64;
+        }
+        if (copy_from_user(borrow mut buf as *mut [u8; 16] as *mut void, arg(a, 1), len) != 0) {
+            return -EFAULT as i64;
+        }
+        var v: u64 = 0;
+        for (c in buf[..len]) {
+            if (c < 48 || c > 57) {
+                return -EINVAL as i64; // digits only, as fsctl's ids
+            }
+            v = v * 10 + (c - 48) as u64; // fifteen digits at most: below 2^64
+        }
+        if (v > 16777216) {
+            return -EINVAL as i64; // 64 GiB a second, or 16 M failures: past it the bound means nothing
+        }
+        let bound = truncate<u32>(v);
+        if (faultErrors) {
+            g_pool_fault_errors.storeWith(bound, StoreOrdering.Relaxed);
+        } else if (resilverRate) {
+            g_cosmofs_resilver_rate.storeWith(bound, StoreOrdering.Relaxed);
+        } else {
+            g_cosmofs_scrub_rate.storeWith(bound, StoreOrdering.Relaxed);
+        }
+        return 0;
+    }
+    if (!isName(name, "kernel.hostname")) {
+        return -EROFS as i64;
+    }
+    if (!cred_has(cred_current(), PRIV_SYS_ADMIN)) {
+        return -EPERM as i64;
+    }
+    let len = truncate<usize>(arg(a, 2));
+    if (len >= COSMO_HOST_NAME_MAX) {
+        return -EINVAL as i64;
+    }
+    var buf = [0u8; 64];
+    if (copy_from_user(borrow mut buf as *mut [u8; 64] as *mut void, arg(a, 1), len) != 0) {
+        return -EFAULT as i64;
+    }
+    return utsns_sethostname(utsns_current(), borrow buf as *[u8; 64] as *CChar, len) as i64;
+}

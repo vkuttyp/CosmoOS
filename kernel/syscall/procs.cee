@@ -1,0 +1,955 @@
+// procs.cee - The native personality's calls on processes and the objects beside them (uapi/cosmo/syscall.h), in
+// CeeSafe (roadmap 2.0 SA8): spawn, exec, wait, kill, thread_kill, the asynchronous I/O ring's four calls, pipe, dup, getppid,
+// chdir, getcwd, procinfo, klog, syscall_filter, gethostname and sethostname, which native.c's table names, and
+// syscall_handle_stat, the fstat both personalities share (syscall.h).
+//
+// A struct signal_info is built as `Info` and a struct cosmo_spawn read as `Spawn`; the C compiler checks both layouts
+// (the extern block). spawn's copies -- the paths, the strings, the two pointer arrays and the handle map -- are one
+// heap block laid out here (SC_*), since no C reads it.
+
+@header(
+    "kernel/aio.h", "kernel/cred.h", "kernel/errno.h", "kernel/handle.h", "kernel/kmalloc.h", "kernel/log.h",
+    "kernel/object.h", "kernel/pipe.h", "kernel/process.h", "kernel/signal.h", "kernel/string.h", "kernel/syscall.h",
+    "kernel/timerobj.h", "kernel/uaccess.h", "kernel/utsns.h", "kernel/vfs.h", "uapi/cosmo/syscall.h",
+)
+extern "C" {
+    struct syscall_args {
+        a: [u64; 6];
+        frame: *mut void; // the arch frame, opaque here
+    }
+    struct handle_table;
+    struct credentials {
+        ruid: u32;
+    }
+    struct process {
+        pid: u32;
+        parent_pid: u32;
+        handles: handle_table;
+        cred: credentials;
+        lock: spinlock_t;
+        domain: u32;
+        cwd_path_locked: [u8; 1024]; // under `lock`
+    }
+    struct thread;
+    struct exec_args;
+    struct aio_ring {
+        obj: kobject;
+    }
+    struct file;
+    struct cosmo_stat;
+    struct cosmo_procinfo;
+    struct uts_ns;
+    struct signal_info;
+    struct cputime_pair;
+    struct process_handle_map;
+    struct process_spawn_cred;
+    struct kobject_io_type {
+        stat: extern "C" fn(*mut kobject, *mut cosmo_stat) -> i32;
+    }
+
+    @cvalue("VFS_PATH_MAX == 1024")
+    const PATH_IS_1024: bool = true;
+    @cvalue("sizeof(struct cosmo_procinfo)")
+    const PROCINFO_SIZE: usize = 72;
+    @cvalue(
+        "sizeof(struct signal_info) == 32 && offsetof(struct signal_info, sig) == 0 && offsetof(struct signal_info, source) == 4 && offsetof(struct signal_info, fault_addr) == 8 && offsetof(struct signal_info, code) == 16 && offsetof(struct signal_info, sender_pid) == 20 && offsetof(struct signal_info, sender_uid) == 24 && offsetof(struct signal_info, status) == 28 && sizeof(enum signal_source) == 4",
+    )
+    const SIGNAL_INFO_LAYOUT: bool = true;
+    @cvalue("SIGSRC_USER == 0 && SIGSRC_TKILL == 1")
+    const SIGNAL_SOURCES: bool = true;
+    @cvalue(
+        "sizeof(struct cosmo_spawn) == 88 && offsetof(struct cosmo_spawn, argv) == 8 && offsetof(struct cosmo_spawn, envp) == 16 && offsetof(struct cosmo_spawn, handles) == 24 && offsetof(struct cosmo_spawn, nr_handles) == 32 && offsetof(struct cosmo_spawn, cwd) == 40 && offsetof(struct cosmo_spawn, flags) == 48 && offsetof(struct cosmo_spawn, uid) == 52 && offsetof(struct cosmo_spawn, gid) == 56 && offsetof(struct cosmo_spawn, root) == 64 && offsetof(struct cosmo_spawn, pgid) == 72 && offsetof(struct cosmo_spawn, priv_drop) == 80",
+    )
+    const SPAWN_LAYOUT: bool = true;
+    @cvalue(
+        "sizeof(struct process_handle_map) == 16 && sizeof(struct cosmo_spawn_handle) == 16 && offsetof(struct process_handle_map, child) == 0 && offsetof(struct process_handle_map, parent) == 4 && offsetof(struct process_handle_map, rights) == 8 && offsetof(struct process_handle_map, pad) == 12 && _Alignof(struct process_handle_map) <= 8",
+    )
+    const HANDLE_MAP_LAYOUT: bool = true;
+    @cvalue("sizeof(struct process_spawn_cred) == 8 && offsetof(struct process_spawn_cred, gid) == 4")
+    const SPAWN_CRED_LAYOUT: bool = true;
+    @cvalue("sizeof(int) == 4 && sizeof(pid_t) == 4")
+    const SIZES: bool = true;
+    const VFS_PATH_MAX: usize = 1024;
+    const COSMO_WNOHANG: u32 = 1;
+    const COSMO_WUNTRACED: u32 = 2;
+    const COSMO_WCONTINUED: u32 = 4;
+    const PROCESS_WAIT_NOHANG: u32 = 1;
+    const PROCESS_WAIT_UNTRACED: u32 = 2;
+    const PROCESS_WAIT_CONTINUED: u32 = 4;
+    const COSMO_NSIG: i32 = 32;
+    const COSMO_SPAWN_SIZE_V1: usize = 64;
+    const COSMO_SPAWN_SIZE_V2: usize = 72;
+    const COSMO_SPAWN_SIZE_V3: usize = 80;
+    const COSMO_SPAWN_SETCRED: u32 = 1;
+    const COSMO_SPAWN_HANDLE_RIGHTS: u32 = 2;
+    const COSMO_SPAWN_SETROOT: u32 = 4;
+    const COSMO_SPAWN_NEWDOMAIN: u32 = 8;
+    const COSMO_SPAWN_NEWMOUNTNS: u32 = 16;
+    const COSMO_SPAWN_NEWUTSNS: u32 = 32;
+    const COSMO_SPAWN_SETPGID: u32 = 64;
+    const COSMO_SPAWN_SETSID: u32 = 128;
+    const COSMO_SPAWN_DROPPRIV: u32 = 256;
+    const COSMO_SPAWN_FOREGROUND: u32 = 512;
+    const COSMO_PRIV_ALL: u32 = 63;
+    const COSMO_ARG_MAX: usize = 2048;
+    const COSMO_ARG_ENTRIES: u32 = 128;
+    const COSMO_RIGHTS_SAME: u32 = 0;
+    const COSMO_SYSCALL_MASK_WORDS: usize = 8;
+    const COSMO_HOST_NAME_MAX: usize = 64;
+    const HANDLE_TABLE_SIZE: i32 = 64;
+    const HANDLE_RIGHT_READ: u32 = 1;
+    const HANDLE_RIGHT_WRITE: u32 = 2;
+    const HANDLE_RIGHT_DUP: u32 = 4;
+    const HANDLE_RIGHT_OWNER: u32 = 28;
+    const HANDLE_RIGHT_ALL: u32 = 31;
+    const PRIV_SYS_ADMIN: u32 = 2;
+    const KLOG_RING_SIZE: usize = 32768;
+    const EPERM: i32 = 1;
+    const ENOENT: i32 = 2;
+    const ESRCH: i32 = 3;
+    const E2BIG: i32 = 7;
+    const EBADF: i32 = 9;
+    const ENOMEM: i32 = 12;
+    const EFAULT: i32 = 14;
+    const EINVAL: i32 = 22;
+    const EMFILE: i32 = 24;
+    const ERANGE: i32 = 34;
+    const ENAMETOOLONG: i32 = 36;
+
+    fn process_current() -> *mut process;
+    fn process_lookup(pid: u32) -> *mut process;
+    fn process_put(p: *mut process);
+    fn process_group_next(pgid: u32, after: u32) -> *mut process;
+    fn process_getpgid(pid: u32, out: *mut u32) -> i32;
+    fn process_may_signal(sender: *process, target: *process, sig: i32) -> bool;
+    fn process_find_thread(p: *mut process, userTid: u32) -> *mut thread;
+    fn process_wait_child(pid: i32, flags: u32, pidOut: *mut u32, statusOut: *mut i32, usage: *mut cputime_pair) -> i32;
+    fn process_chdir(path: *CChar) -> i32;
+    fn process_info(buf: *mut cosmo_procinfo, count: u32, viewer: *credentials) -> u32;
+    fn process_spawn(
+        path: *CChar,
+        argv: **CChar,
+        envp: **CChar,
+        handles: *process_handle_map,
+        nrHandles: u32,
+        cwd: *CChar,
+        root: *CChar,
+        newDomain: bool,
+        newMountns: bool,
+        newUtsns: bool,
+        cred: *process_spawn_cred,
+        setPgid: bool,
+        pgid: u32,
+        newSession: bool,
+        foreground: bool,
+        privDrop: u32,
+        pidOut: *mut u32,
+    ) -> i32;
+    fn kzalloc(size: usize) -> *mut void;
+    fn process_execve(ea: *mut exec_args, syscallFrame: *mut void) -> i32;
+    fn exec_args_alloc() -> *mut exec_args;
+    fn exec_args_copy(ea: *mut exec_args, upath: u64, uargv: u64, uenvp: u64) -> i32;
+    fn exec_args_free(ea: *mut exec_args);
+    fn signal_send(p: *mut process, sig: i32, info: *signal_info) -> i32;
+    fn signal_send_thread(t: *mut thread, sig: i32, info: *signal_info) -> i32;
+    fn cred_current() -> *credentials;
+    fn cred_has(c: *credentials, priv: u32) -> bool;
+    fn user_range_ok(addr: u64, len: usize) -> bool;
+    fn copy_from_user(dst: *mut void, userSrc: u64, len: usize) -> i32;
+    fn copy_to_user(userDst: u64, src: *void, len: usize) -> i32;
+    fn strncpy_from_user(dst: *mut CChar, userSrc: u64, max: usize) -> i32;
+    fn strlcpy(dst: *mut CChar, src: *CChar, size: usize) -> usize;
+    fn handle_get(t: *mut handle_table, h: i32, rightsOut: *mut u32) -> *mut kobject;
+    fn handle_lookup(t: *mut handle_table, h: i32, rightsNeeded: u32) -> *mut kobject;
+    fn handle_install(t: *mut handle_table, obj: *mut kobject, rights: u32) -> i32;
+    fn handle_install_at(t: *mut handle_table, h: i32, obj: *mut kobject, rights: u32) -> i32;
+    fn handle_close(t: *mut handle_table, h: i32) -> i32;
+    fn kobject_io_of(obj: *kobject) -> *kobject_io_type;
+    fn file_from_kobject(obj: *mut kobject) -> *mut file;
+    fn file_stat(f: *mut file, st: *mut cosmo_stat) -> i32;
+    fn aio_ring_create(entries: u32, flags: u32, out: *mut *mut aio_ring) -> i32;
+    fn aio_ring_from_kobject(obj: *mut kobject) -> *mut aio_ring;
+    fn aio_submit(r: *mut aio_ring, usqes: u64, n: u32) -> i64;
+    fn aio_wait(r: *mut aio_ring, ucqes: u64, n: u32, min: u32, timeoutNs: u64) -> i64;
+    fn timer_obj_create(initialNs: u64, intervalNs: u64, out: *mut *mut kobject) -> i32;
+    fn pipe_create(readEnd: *mut *mut kobject, writeEnd: *mut *mut kobject) -> i32;
+    fn klog_copy(buf: *mut CChar, len: usize) -> usize;
+    fn syscall_filter_install(p: *mut process, mask: *u64, words: u32);
+    fn utsns_current() -> *mut uts_ns;
+    fn utsns_gethostname(ns: *mut uts_ns, out: *mut CChar, n: usize) -> usize;
+    fn utsns_sethostname(ns: *mut uts_ns, name: *CChar, len: usize) -> i32;
+}
+
+/// A struct signal_info (SIGNAL_INFO_LAYOUT).
+struct Info {
+    sig: i32;
+    source: u32;
+    faultAddr: u64;
+    code: u32;
+    senderPid: u32;
+    senderUid: u32;
+    status: i32;
+}
+
+/// enum signal_source's two senders here (SIGNAL_SOURCES).
+const SIGSRC_USER: u32 = 0;
+const SIGSRC_TKILL: u32 = 1;
+
+/// Safety: the dispatcher's: `a` is the call's arguments.
+unsafe fn arg(a: *mut syscall_args, i: usize) -> u64 => Ptr.toBorrow(a as *syscall_args).a[i];
+
+/// The `i`th argument as C's (int) sees it.
+/// Safety: the dispatcher's.
+unsafe fn arg32(a: *mut syscall_args, i: usize) -> i32 => truncate<i32>(arg(a, i));
+
+/// The `i`th argument as C's (unsigned) sees it.
+/// Safety: the dispatcher's.
+unsafe fn argU32(a: *mut syscall_args, i: usize) -> u32 => truncate<u32>(arg(a, i));
+
+/// The calling process's handle table.
+/// Safety: in a process's thread.
+unsafe fn handles() -> *mut handle_table {
+    let p = Ptr.toBorrowMut(process_current());
+    return borrow mut p.handles as *mut handle_table;
+}
+
+/// A path from user memory into `buf` (VFS_PATH_MAX bytes); an empty one is -ENOENT.
+/// Safety: `buf` holds VFS_PATH_MAX bytes.
+unsafe fn getPath(uptr: u64, buf: *mut CChar) -> i32 {
+    let rc = strncpy_from_user(buf, uptr, VFS_PATH_MAX);
+    if (rc < 0) {
+        return rc;
+    }
+    return if (Slice.fromRaw(buf as *u8, 1)[0] == 0) -ENOENT else 0;
+}
+
+/// The fstat both personalities share: a file's, or the object's own `stat`.
+/// Safety: in a process's thread; `st` is a writable struct cosmo_stat.
+@export("syscall_handle_stat")
+unsafe fn handleStat(h: i32, st: *mut cosmo_stat) -> i32 {
+    let obj = handle_lookup(handles(), h, 0);
+    if (obj.isNull()) {
+        return -EBADF;
+    }
+    let f = file_from_kobject(obj);
+    var rc: i32 = 0;
+    if (!f.isNull()) {
+        let _ = file_stat(f, st);
+    } else {
+        let io = kobject_io_of(obj as *kobject);
+        if (io.isNull() || Ptr.toBorrow(io).stat.isNull()) {
+            rc = -EBADF;
+        } else {
+            let stat = Ptr.toBorrow(io).stat;
+            rc = stat(obj, st);
+        }
+    }
+    kobject_put(obj);
+    return rc;
+}
+
+// --- spawn -----------------------------------------------------------------------------------------------------------
+
+/// A struct cosmo_spawn, its user pointers as addresses (SPAWN_LAYOUT).
+struct Spawn {
+    path: u64;
+    argv: u64;
+    envp: u64;
+    handles: u64;
+    nrHandles: usize;
+    cwd: u64;
+    flags: u32;
+    uid: u32;
+    gid: u32;
+    pad: u32;
+    root: u64;
+    pgid: u32;
+    pgidPad: u32;
+    privDrop: u32;
+    privPad: u32;
+}
+
+/// What the two pointer arrays have used together: bytes of the strings, and entries.
+struct Strv {
+    used: usize;
+    count: u32;
+}
+
+/// spawn's heap block: the path, the working directory and the root (VFS_PATH_MAX bytes each), the strings
+/// (COSMO_ARG_MAX bytes), argv and envp (COSMO_ARG_ENTRIES + 1 pointers each) and the handle map (HANDLE_TABLE_SIZE
+/// entries of 16 bytes).
+const SC_CWD: usize = 1024;
+const SC_ROOT: usize = 2048;
+const SC_STRINGS: usize = 3072;
+const SC_ARGV: usize = 5120;
+const SC_ENVP: usize = 6152;
+const SC_MAP: usize = 7184;
+const SC_SIZE: usize = 8208;
+
+/// Copy a NULL-terminated pointer array and its strings: `out` holds COSMO_ARG_ENTRIES + 1 pointers, `strings`
+/// COSMO_ARG_MAX bytes, and `sv` says what argv and envp have used together.
+/// Safety: in a process's thread; `out`, `strings` and `sv` are as described.
+unsafe fn copyStrv(uarr: u64, out: *mut *CChar, strings: *mut u8, sv: *mut Strv) -> i32 {
+    let st = Ptr.toBorrowMut(sv);
+    var n: usize = 0;
+    if (uarr == 0) {
+        out.write(0 as *CChar);
+        return 0;
+    }
+    while (true) {
+        var uptr: u64 = 0;
+        if (copy_from_user(borrow mut uptr as *mut u64 as *mut void, uarr.wrappingAdd(n as u64 * 8), 8) != 0) {
+            return -EFAULT;
+        }
+        if (uptr == 0) {
+            break;
+        }
+        if (st.count >= COSMO_ARG_ENTRIES || st.used >= COSMO_ARG_MAX) {
+            return -E2BIG;
+        }
+        let room = COSMO_ARG_MAX - st.used;
+        let dst = strings.add(st.used) as *mut CChar;
+        let len = strncpy_from_user(dst, uptr, room);
+        if (len < 0) {
+            return if (len == -ENAMETOOLONG) -E2BIG else len;
+        }
+        out.add(n).write(dst as *CChar);
+        n = n + 1;
+        st.used = st.used + truncate<usize>(len) + 1;
+        st.count = st.count + 1;
+    }
+    out.add(n).write(0 as *CChar);
+    return 0;
+}
+
+/// spawn's work once the request is read and its block allocated: the child's pid, or the error.
+/// Safety: the dispatcher's; `rp` is the checked request, `sc` a zeroed block of SC_SIZE bytes, `cred` two words.
+unsafe fn spawnWith(rp: *Spawn, sc: *mut u8, cred: *process_spawn_cred) -> i64 {
+    let r = Ptr.toBorrow(rp);
+    let path = sc as *mut CChar;
+    var rc = getPath(r.path, path);
+    if (rc != 0) {
+        return rc as i64;
+    }
+    var cwd = 0 as *CChar;
+    if (r.cwd != 0) {
+        rc = getPath(r.cwd, sc.add(SC_CWD) as *mut CChar);
+        if (rc != 0) {
+            return rc as i64;
+        }
+        cwd = sc.add(SC_CWD) as *CChar;
+    }
+    var sv = Strv { used: 0, count: 0 };
+    let argv = sc.add(SC_ARGV) as *mut *CChar;
+    let envp = sc.add(SC_ENVP) as *mut *CChar;
+    rc = copyStrv(r.argv, argv, sc.add(SC_STRINGS), borrow mut sv as *mut Strv);
+    if (rc != 0) {
+        return rc as i64;
+    }
+    rc = copyStrv(r.envp, envp, sc.add(SC_STRINGS), borrow mut sv as *mut Strv);
+    if (rc != 0) {
+        return rc as i64;
+    }
+    let map = sc.add(SC_MAP);
+    if (r.nrHandles != 0) {
+        if ((r.flags & COSMO_SPAWN_HANDLE_RIGHTS) != 0) {
+            if (copy_from_user(map as *mut void, r.handles, r.nrHandles * 16) != 0) {
+                return -EFAULT as i64;
+            }
+        } else {
+            // The map as it was before rights existed: two ints per entry, and the child gets what the caller holds.
+            // Reading the wider element would take the next entry's child for this one's rights.
+            var legacy = [0i32; 128];
+            if (copy_from_user(borrow mut legacy as *mut [i32; 128] as *mut void, r.handles, r.nrHandles * 8) != 0) {
+                return -EFAULT as i64;
+            }
+            let words = map as *mut i32;
+            var i: usize = 0;
+            while (i < r.nrHandles && i < 64) {
+                words.add(4 * i).write(legacy[2 * i]);         // child
+                words.add(4 * i + 1).write(legacy[2 * i + 1]); // parent
+                words.add(4 * i + 2).write(0);                 // rights: COSMO_RIGHTS_SAME
+                words.add(4 * i + 3).write(0);                 // pad
+                i = i + 1;
+            }
+        }
+    }
+    var pid: u32 = 0;
+    var rootp = 0 as *CChar;
+    if ((r.flags & COSMO_SPAWN_SETROOT) != 0) {
+        if (r.root == 0) {
+            return -EINVAL as i64;
+        }
+        if (strncpy_from_user(sc.add(SC_ROOT) as *mut CChar, r.root, VFS_PATH_MAX) < 0) {
+            return -EFAULT as i64;
+        }
+        rootp = sc.add(SC_ROOT) as *CChar;
+    }
+    rc = process_spawn(
+        path as *CChar,
+        argv as **CChar,
+        envp as **CChar,
+        if (r.nrHandles != 0) map as *process_handle_map else 0 as *process_handle_map,
+        truncate<u32>(r.nrHandles),
+        cwd,
+        rootp,
+        (r.flags & COSMO_SPAWN_NEWDOMAIN) != 0,
+        (r.flags & COSMO_SPAWN_NEWMOUNTNS) != 0,
+        (r.flags & COSMO_SPAWN_NEWUTSNS) != 0,
+        if ((r.flags & COSMO_SPAWN_SETCRED) != 0) cred else 0 as *process_spawn_cred,
+        (r.flags & COSMO_SPAWN_SETPGID) != 0,
+        r.pgid,
+        (r.flags & COSMO_SPAWN_SETSID) != 0,
+        (r.flags & COSMO_SPAWN_FOREGROUND) != 0,
+        if ((r.flags & COSMO_SPAWN_DROPPRIV) != 0) r.privDrop else 0,
+        borrow mut pid as *mut u32,
+    );
+    return if (rc != 0) rc as i64 else pid as i64;
+}
+
+/// Safety: the dispatcher's.
+@export("sys_spawn")
+unsafe fn spawn(a: *mut syscall_args) -> i64 {
+    // Copy what every caller has, decide from its flags whether it has the field added after that, and only then read
+    // further: a program built against the older header passes the older struct, and the kernel must not read past
+    // what it gave.
+    var req = Spawn {
+        path: 0,
+        argv: 0,
+        envp: 0,
+        handles: 0,
+        nrHandles: 0,
+        cwd: 0,
+        flags: 0,
+        uid: 0,
+        gid: 0,
+        pad: 0,
+        root: 0,
+        pgid: 0,
+        pgidPad: 0,
+        privDrop: 0,
+        privPad: 0,
+    };
+    let rp = borrow mut req as *mut Spawn;
+    if (copy_from_user(rp as *mut void, arg(a, 0), COSMO_SPAWN_SIZE_V1) != 0) {
+        return -EFAULT as i64;
+    }
+    let known = COSMO_SPAWN_SETCRED | COSMO_SPAWN_HANDLE_RIGHTS | COSMO_SPAWN_SETROOT | COSMO_SPAWN_NEWDOMAIN |
+        COSMO_SPAWN_NEWMOUNTNS | COSMO_SPAWN_NEWUTSNS | COSMO_SPAWN_SETPGID | COSMO_SPAWN_SETSID |
+        COSMO_SPAWN_DROPPRIV | COSMO_SPAWN_FOREGROUND;
+    if ((req.flags & (known ^ 0xFFFFFFFF)) != 0 || req.path == 0 || req.argv == 0) {
+        return -EINVAL as i64;
+    }
+    if ((req.flags & COSMO_SPAWN_SETSID) != 0 && (req.flags & COSMO_SPAWN_SETPGID) != 0) {
+        return -EINVAL as i64; // a new session names its own group
+    }
+    if ((req.flags & COSMO_SPAWN_FOREGROUND) != 0 && (req.flags & COSMO_SPAWN_SETPGID) == 0) {
+        return -EINVAL as i64; // the foreground is a group's: the child must be put in one
+    }
+    let want = if ((req.flags & COSMO_SPAWN_DROPPRIV) != 0) 88
+        else if ((req.flags & COSMO_SPAWN_SETPGID) != 0) COSMO_SPAWN_SIZE_V3
+        else if ((req.flags & COSMO_SPAWN_SETROOT) != 0) COSMO_SPAWN_SIZE_V2
+        else COSMO_SPAWN_SIZE_V1;
+    if (want > COSMO_SPAWN_SIZE_V1 && copy_from_user(rp as *mut void, arg(a, 0), want) != 0) {
+        return -EFAULT as i64;
+    }
+    if ((req.flags & COSMO_SPAWN_DROPPRIV) != 0 && (req.privDrop & (COSMO_PRIV_ALL ^ 0xFFFFFFFF)) != 0) {
+        return -EINVAL as i64;
+    }
+    var cred = [req.uid, req.gid]; // a struct process_spawn_cred
+    if (req.nrHandles > 64 || (req.nrHandles != 0 && req.handles == 0)) {
+        return -EINVAL as i64;
+    }
+    let sc = kzalloc(SC_SIZE) as *mut u8;
+    if (sc.isNull()) {
+        return -ENOMEM as i64;
+    }
+    let rc = spawnWith(rp as *Spawn, sc, borrow cred as *[u32; 2] as *process_spawn_cred);
+    kfree(sc as *mut void);
+    return rc;
+}
+
+/// SYS_exec (roadmap M3): Linux execve's operation at the native door.
+/// Safety: the dispatcher's.
+@export("sys_exec")
+unsafe fn exec(a: *mut syscall_args) -> i64 {
+    let ea = exec_args_alloc();
+    if (ea.isNull()) {
+        return -ENOMEM as i64;
+    }
+    var rc = exec_args_copy(ea, arg(a, 0), arg(a, 1), arg(a, 2));
+    if (rc == 0) {
+        rc = process_execve(ea, Ptr.toBorrow(a as *syscall_args).frame);
+    }
+    exec_args_free(ea);
+    return rc as i64;
+}
+
+/// Safety: the dispatcher's.
+@export("sys_wait")
+unsafe fn wait(a: *mut syscall_args) -> i64 {
+    let pid = arg32(a, 0);
+    let flags = argU32(a, 2);
+    let known = COSMO_WNOHANG | COSMO_WUNTRACED | COSMO_WCONTINUED;
+    if (pid == 0 || pid < -1 || (flags & (known ^ 0xFFFFFFFF)) != 0) {
+        return -EINVAL as i64;
+    }
+    var wf: u32 = 0;
+    if ((flags & COSMO_WNOHANG) != 0) {
+        wf = wf | PROCESS_WAIT_NOHANG;
+    }
+    if ((flags & COSMO_WUNTRACED) != 0) {
+        wf = wf | PROCESS_WAIT_UNTRACED;
+    }
+    if ((flags & COSMO_WCONTINUED) != 0) {
+        wf = wf | PROCESS_WAIT_CONTINUED;
+    }
+    var got: u32 = 0;
+    var status: i32 = 0;
+    let rc = process_wait_child(
+        pid,
+        wf,
+        borrow mut got as *mut u32,
+        borrow mut status as *mut i32,
+        0 as *mut cputime_pair,
+    );
+    if (rc != 0) {
+        return rc as i64;
+    }
+    if (got != 0 && arg(a, 1) != 0 && copy_to_user(arg(a, 1), borrow status as *i32 as *void, 4) != 0) {
+        return -EFAULT as i64;
+    }
+    return got as i64;
+}
+
+/// One target, every check. -ESRCH when the caller may not even see it, -EPERM when it may see it and not signal it, 0
+/// when `sig` is 0 and the target passed both.
+/// Safety: in a process's thread; `target` is a referenced process.
+unsafe fn killOne(target: *mut process, sig: i32) -> i32 {
+    let cur = process_current();
+    if (cur.isNull()) {
+        return -ESRCH;
+    }
+    let c = Ptr.toBorrow(cur as *process);
+    // A process outside domain 0 cannot reach another domain, and is told the target does not exist rather than that
+    // it may not touch it: -EPERM would confirm the pid is in use, which is the one thing the domain is meant not to
+    // tell it.
+    if (c.domain != 0 && Ptr.toBorrow(target as *process).domain != c.domain) {
+        return -ESRCH;
+    }
+    if (!process_may_signal(cur as *process, target as *process, sig)) {
+        return -EPERM;
+    }
+    if (sig == 0) {
+        return 0; // it exists and could be signalled; nothing is sent
+    }
+    // The signal core: a default-terminate signal ends the target (128 + sig); default-ignore ones (SIGCHLD, ...) are
+    // discarded; a process that installed a handler runs it.
+    let info = Info {
+        sig: sig,
+        source: SIGSRC_USER,
+        faultAddr: 0,
+        code: 0,
+        senderPid: c.pid,
+        senderUid: c.cred.ruid,
+        status: 0,
+    };
+    return signal_send(target, sig, borrow info as *Info as *signal_info);
+}
+
+/// A whole process group. POSIX's rule for the group form is that the call succeeds if the signal reached anyone, so a
+/// shell interrupting a job is not made to care that one member of it belongs to root: the refusals only surface when
+/// every member refused.
+/// Safety: in a process's thread.
+unsafe fn killGroup(pgid: u32, sig: i32) -> i64 {
+    var sent = false;
+    var denied = false;
+    var p = process_group_next(pgid, 0);
+    while (!p.isNull()) {
+        let after = Ptr.toBorrow(p as *process).pid;
+        let rc = killOne(p, sig);
+        process_put(p);
+        if (rc == 0) {
+            sent = true;
+        } else if (rc == -EPERM) {
+            denied = true;
+        }
+        p = process_group_next(pgid, after);
+    }
+    if (sent) {
+        return 0;
+    }
+    return if (denied) -EPERM as i64 else -ESRCH as i64;
+}
+
+/// Safety: the dispatcher's.
+@export("sys_kill")
+unsafe fn kill(a: *mut syscall_args) -> i64 {
+    let pid = arg32(a, 0);
+    let sig = arg32(a, 1);
+    // Signal 0 sends nothing and reports whether the target exists and could be signalled, which is what POSIX says of
+    // it and the only way a supervisor can tell a live pid from a stale pid file (docs/userland/design.md,
+    // "Services"). It goes through every check below and stops before the delivery.
+    if (sig < 0 || sig >= COSMO_NSIG || pid == -1) {
+        return -EINVAL as i64; // -1 is "every process", which nothing here wants
+    }
+    if (pid <= 0) {
+        // 0 is the caller's own group, a negative pid names one.
+        var pgid: u32 = 0;
+        if (pid == 0) {
+            let rc = process_getpgid(0, borrow mut pgid as *mut u32);
+            if (rc != 0) {
+                return rc as i64;
+            }
+        } else {
+            pgid = truncate<u32>(0 - pid as i64);
+        }
+        return killGroup(pgid, sig);
+    }
+    let target = process_lookup(argU32(a, 0));
+    if (target.isNull()) {
+        return -ESRCH as i64;
+    }
+    let rc = killOne(target, sig);
+    process_put(target);
+    return rc as i64;
+}
+
+/// tgkill with the process implied: the target is a thread of the calling process, named by the id `SYS_thread_self`
+/// and `SYS_thread_create` report (the pid for the first thread), and a tid of any other process is -ESRCH by
+/// construction -- `kill` is the process-scoped door with its own permission story, and this one cannot reach through
+/// it. No credential check: a thread may signal its own process already. Signal 0 probes, as at `kill`; the thread's
+/// own mask decides delivery, as it does for a fault, and the handler runs on the targeted thread's frame.
+/// Safety: the dispatcher's.
+@export("sys_thread_kill")
+unsafe fn threadKill(a: *mut syscall_args) -> i64 {
+    let tid = argU32(a, 0);
+    let sig = arg32(a, 1);
+    if (sig < 0 || sig >= COSMO_NSIG) {
+        return -EINVAL as i64;
+    }
+    let cur = process_current();
+    let t = process_find_thread(cur, tid);
+    if (t.isNull()) {
+        return -ESRCH as i64;
+    }
+    if (sig == 0) {
+        return 0; // it exists; nothing is sent
+    }
+    let c = Ptr.toBorrow(cur as *process);
+    let info = Info {
+        sig: sig,
+        source: SIGSRC_TKILL,
+        faultAddr: 0,
+        code: 0,
+        senderPid: c.pid,
+        senderUid: c.cred.ruid,
+        status: 0,
+    };
+    return signal_send_thread(t, sig, borrow info as *Info as *signal_info) as i64;
+}
+
+// --- milestone 9: the asynchronous I/O ring (kernel/io/aio.c) ------------------------------------------------------
+
+/// Safety: `r` is a live ring.
+unsafe fn ringObj(r: *mut aio_ring) -> *mut kobject => borrow mut Ptr.toBorrowMut(r).obj as *mut kobject;
+
+/// Safety: the dispatcher's.
+@export("sys_aio_create")
+unsafe fn aioCreate(a: *mut syscall_args) -> i64 {
+    var r = 0 as *mut aio_ring;
+    let rc = aio_ring_create(argU32(a, 0), argU32(a, 1), borrow mut r as *mut *mut aio_ring);
+    if (rc != 0) {
+        return rc as i64;
+    }
+    let h = handle_install(handles(), ringObj(r), HANDLE_RIGHT_ALL);
+    kobject_put(ringObj(r));
+    return h as i64;
+}
+
+/// Safety: the dispatcher's.
+@export("sys_timer_create")
+unsafe fn timerCreate(a: *mut syscall_args) -> i64 {
+    var obj = 0 as *mut kobject;
+    let rc = timer_obj_create(arg(a, 0), arg(a, 1), borrow mut obj as *mut *mut kobject);
+    if (rc != 0) {
+        return rc as i64;
+    }
+    let h = handle_install(handles(), obj, HANDLE_RIGHT_ALL);
+    kobject_put(obj);
+    return h as i64;
+}
+
+/// The ring behind `h` if the handle reads and writes, referenced; null otherwise.
+/// Safety: in a process's thread.
+unsafe fn ringOf(h: i32) -> *mut aio_ring {
+    let obj = handle_lookup(handles(), h, HANDLE_RIGHT_READ | HANDLE_RIGHT_WRITE);
+    if (obj.isNull()) {
+        return 0 as *mut aio_ring;
+    }
+    let r = aio_ring_from_kobject(obj);
+    if (r.isNull()) {
+        kobject_put(obj);
+    }
+    return r;
+}
+
+/// Safety: the dispatcher's.
+@export("sys_aio_submit")
+unsafe fn aioSubmit(a: *mut syscall_args) -> i64 {
+    let r = ringOf(arg32(a, 0));
+    if (r.isNull()) {
+        return -EBADF as i64;
+    }
+    let rc = aio_submit(r, arg(a, 1), argU32(a, 2));
+    kobject_put(ringObj(r));
+    return rc;
+}
+
+/// Safety: the dispatcher's.
+@export("sys_aio_wait")
+unsafe fn aioWait(a: *mut syscall_args) -> i64 {
+    let r = ringOf(arg32(a, 0));
+    if (r.isNull()) {
+        return -EBADF as i64;
+    }
+    let rc = aio_wait(r, arg(a, 1), argU32(a, 2), argU32(a, 3), arg(a, 4));
+    kobject_put(ringObj(r));
+    return rc;
+}
+
+// --- pipes, handles, the working directory, introspection -----------------------------------------------------------
+
+/// Safety: the dispatcher's.
+@export("sys_pipe")
+unsafe fn pipe(a: *mut syscall_args) -> i64 {
+    if (!user_range_ok(arg(a, 0), 8)) {
+        return -EFAULT as i64;
+    }
+    var rd = 0 as *mut kobject;
+    var wr = 0 as *mut kobject;
+    let rc = pipe_create(borrow mut rd as *mut *mut kobject, borrow mut wr as *mut *mut kobject);
+    if (rc != 0) {
+        return rc as i64;
+    }
+    let t = handles();
+    var h = [0i32; 2];
+    h[0] = handle_install(t, rd, HANDLE_RIGHT_READ | HANDLE_RIGHT_OWNER);
+    h[1] = if (h[0] < 0) -EMFILE else handle_install(t, wr, HANDLE_RIGHT_WRITE | HANDLE_RIGHT_OWNER);
+    kobject_put(rd);
+    kobject_put(wr);
+    if (h[0] < 0 || h[1] < 0) {
+        if (h[0] >= 0) {
+            handle_close(t, h[0]);
+        }
+        return -EMFILE as i64;
+    }
+    if (copy_to_user(arg(a, 0), borrow h as *[i32; 2] as *void, 8) != 0) {
+        handle_close(t, h[0]);
+        handle_close(t, h[1]);
+        return -EFAULT as i64;
+    }
+    return 0;
+}
+
+/// Duplicating a handle needs the right to duplicate it, and may hand the copy *less* than the original holds -- never
+/// more. That is what makes a handle a capability rather than a name: a process can pass a read-only view of something
+/// it can write, and cannot get back what it gave away (docs/kernel/object/architecture.md, "Rights").
+/// Safety: the dispatcher's.
+@export("sys_dup")
+unsafe fn dup(a: *mut syscall_args) -> i64 {
+    let h = arg32(a, 0);
+    let target = arg32(a, 1);
+    let want = argU32(a, 2);
+    if (target < -1 || target >= HANDLE_TABLE_SIZE) {
+        return -EINVAL as i64;
+    }
+    let t = handles();
+    var rights: u32 = 0;
+    let obj = handle_get(t, h, borrow mut rights as *mut u32);
+    if (obj.isNull()) {
+        return -EBADF as i64;
+    }
+    if ((rights & HANDLE_RIGHT_DUP) == 0) {
+        kobject_put(obj);
+        return -EPERM as i64;
+    }
+    if (want != COSMO_RIGHTS_SAME) {
+        if ((want & (rights ^ 0xFFFFFFFF)) != 0) {
+            kobject_put(obj);
+            return -EPERM as i64; // rights only ever shrink
+        }
+        rights = want;
+    }
+    var rc: i32 = h;
+    if (target == -1) {
+        rc = handle_install(t, obj, rights);
+    } else if (target != h) {
+        handle_close(t, target); // -EBADF when free: fine
+        rc = handle_install_at(t, target, obj, rights);
+    }
+    kobject_put(obj);
+    return rc as i64;
+}
+
+/// Safety: the dispatcher's.
+@export("sys_getppid")
+unsafe fn getppid(a: *mut syscall_args) -> i64 {
+    let cur = Ptr.toBorrow(process_current() as *process);
+    // The process that started a domain has a parent outside it. Naming that pid would leak one number out of the very
+    // thing the domain hides, so it reports no parent -- which is also what a process at the top of a tree
+    // conventionally reports.
+    let ppid = cur.parent_pid;
+    if (ppid != 0) {
+        let parent = process_lookup(ppid);
+        if (!parent.isNull()) {
+            let outside = cur.domain != 0 && Ptr.toBorrow(parent as *process).domain != cur.domain;
+            process_put(parent);
+            if (outside) {
+                return 0;
+            }
+        }
+    }
+    return cur.parent_pid as i64;
+}
+
+/// Safety: the dispatcher's.
+@export("sys_chdir")
+unsafe fn chdir(a: *mut syscall_args) -> i64 {
+    var path = [0u8; 1024];
+    let p = borrow mut path as *mut [u8; 1024] as *mut CChar;
+    let rc = getPath(arg(a, 0), p);
+    if (rc != 0) {
+        return rc as i64;
+    }
+    return process_chdir(p as *CChar) as i64;
+}
+
+/// Safety: the dispatcher's.
+@export("sys_getcwd")
+unsafe fn getcwd(a: *mut syscall_args) -> i64 {
+    let p = process_current();
+    let len = truncate<usize>(arg(a, 1));
+    var buf = [0u8; 1024];
+    let lock = borrow mut Ptr.toBorrowMut(p).lock as *mut spinlock_t;
+    let s = spin_lock_irqsave(lock);
+    let n = strlcpy(
+        borrow mut buf as *mut [u8; 1024] as *mut CChar,
+        borrow Ptr.toBorrow(p as *process).cwd_path_locked as *[u8; 1024] as *CChar,
+        1024,
+    );
+    spin_unlock_irqrestore(lock, s);
+    if (n >= 1024 || len < n + 1) {
+        return -ERANGE as i64;
+    }
+    if (copy_to_user(arg(a, 0), borrow buf as *[u8; 1024] as *void, n + 1) != 0) {
+        return -EFAULT as i64;
+    }
+    return truncate<i64>(n);
+}
+
+/// Safety: the dispatcher's.
+@export("sys_procinfo")
+unsafe fn procinfo(a: *mut syscall_args) -> i64 {
+    var count = truncate<usize>(arg(a, 1));
+    if (count > 4096) {
+        count = 4096;
+    }
+    if (!user_range_ok(arg(a, 0), count * PROCINFO_SIZE)) {
+        return -EFAULT as i64;
+    }
+    var tmp = 0 as *mut cosmo_procinfo;
+    if (count != 0) {
+        tmp = kmalloc(count * PROCINFO_SIZE, 0) as *mut cosmo_procinfo;
+        if (tmp.isNull()) {
+            return -ENOMEM as i64;
+        }
+    }
+    let total = process_info(tmp, truncate<u32>(count), cred_current());
+    let filled = if ((total as usize) < count) total as usize else count;
+    var rc: i32 = 0;
+    if (filled != 0 && copy_to_user(arg(a, 0), tmp as *void, filled * PROCINFO_SIZE) != 0) {
+        rc = -EFAULT;
+    }
+    kfree(tmp as *mut void);
+    return if (rc != 0) rc as i64 else total as i64;
+}
+
+/// Safety: the dispatcher's.
+@export("sys_klog")
+unsafe fn klog(a: *mut syscall_args) -> i64 {
+    // The kernel log carries kernel addresses and every process's activity: privileged, like dmesg on a hardened
+    // system.
+    if (!cred_has(cred_current(), PRIV_SYS_ADMIN)) {
+        return -EPERM as i64;
+    }
+    var len = truncate<usize>(arg(a, 1));
+    if (len > KLOG_RING_SIZE) {
+        len = KLOG_RING_SIZE;
+    }
+    if (!user_range_ok(arg(a, 0), len)) {
+        return -EFAULT as i64;
+    }
+    if (len == 0) {
+        return 0;
+    }
+    let tmp = kmalloc(len, 0);
+    if (tmp.isNull()) {
+        return -ENOMEM as i64;
+    }
+    let n = klog_copy(tmp as *mut CChar, len);
+    let failed = n != 0 && copy_to_user(arg(a, 0), tmp as *void, n) != 0;
+    kfree(tmp);
+    return if (failed) -EFAULT as i64 else truncate<i64>(n);
+}
+
+/// Unprivileged on purpose: it only ever takes authority from the caller and its children
+/// (docs/kernel/security/design.md §1f). Copied in fully before anything is applied, so a faulting mask leaves the
+/// process with the filter it had rather than half of a new one.
+/// Safety: the dispatcher's.
+@export("sys_syscall_filter")
+unsafe fn syscallFilter(a: *mut syscall_args) -> i64 {
+    let words = truncate<usize>(arg(a, 1));
+    if (words == 0 || words > COSMO_SYSCALL_MASK_WORDS) {
+        return -EINVAL as i64;
+    }
+    var mask = [0u64; 8];
+    if (copy_from_user(borrow mut mask as *mut [u64; 8] as *mut void, arg(a, 0), words * 8) != 0) {
+        return -EFAULT as i64;
+    }
+    syscall_filter_install(process_current(), borrow mask as *[u64; 8] as *u64, truncate<u32>(words));
+    return 0;
+}
+
+/// Safety: the dispatcher's.
+@export("sys_gethostname")
+unsafe fn gethostname(a: *mut syscall_args) -> i64 {
+    var buf = [0u8; 64];
+    let n = utsns_gethostname(utsns_current(), borrow mut buf as *mut [u8; 64] as *mut CChar, COSMO_HOST_NAME_MAX);
+    if (n >= COSMO_HOST_NAME_MAX || truncate<usize>(arg(a, 1)) < n + 1) {
+        return -ERANGE as i64;
+    }
+    if (copy_to_user(arg(a, 0), borrow buf as *[u8; 64] as *void, n + 1) != 0) {
+        return -EFAULT as i64;
+    }
+    return truncate<i64>(n);
+}
+
+/// Privileged: a name is not a secret, but a process that could rename the machine could make another one's logs say
+/// whatever it liked.
+/// Safety: the dispatcher's.
+@export("sys_sethostname")
+unsafe fn sethostname(a: *mut syscall_args) -> i64 {
+    if (!cred_has(cred_current(), PRIV_SYS_ADMIN)) {
+        return -EPERM as i64;
+    }
+    let len = truncate<usize>(arg(a, 1));
+    if (len >= COSMO_HOST_NAME_MAX) {
+        return -EINVAL as i64;
+    }
+    var buf = [0u8; 64];
+    if (copy_from_user(borrow mut buf as *mut [u8; 64] as *mut void, arg(a, 0), len) != 0) {
+        return -EFAULT as i64;
+    }
+    return utsns_sethostname(utsns_current(), borrow buf as *[u8; 64] as *CChar, len) as i64;
+}

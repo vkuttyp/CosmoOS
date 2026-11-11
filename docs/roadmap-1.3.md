@@ -197,7 +197,7 @@ Sizes: R0 0.1x, R1 0.6x, R2 0.6x, R3 1.5x, R4 0.3x, R5 0.4x.
 ### K1 Finish SA8
 
 On main at `5a36f9c1`, `kernel/syscall/native.c` still holds the socket,
-process, sysctl and mapping calls (1,761 lines). Six commits on the
+process, sysctl and mapping calls (1,761 lines). Seven commits on the
 working branch, not yet pushed, port them and leave `native.c` as the
 call table and the personality record; they are K1's first PR.
 `compat/linux/syscalls.c` then has about 4,200 lines left, in sections.
@@ -246,7 +246,7 @@ to use, not CeeSafe's to build.
 
 | | CosmoOS pays today | Wanted | Proof here |
 |---|---|---|---|
-| C1 | Each port copies its C structs, constants and prototypes by hand: about 150 of `sockets.cee`'s 640 lines | A generator of the `extern "C"` block from the kernel's headers | `sockets.cee`'s block is generated and the hand-written one deleted |
+| C1 | Each port copies its C structs, constants and prototypes by hand: about 120 of `sockets.cee`'s 924 lines | A generator of the `extern "C"` block from the kernel's headers | `sockets.cee`'s block is generated and the hand-written one deleted |
 | C2 | A static table of C functions is refused: `extern "C" fn` pointers are not `Share` (N0337), so `native.c` and the Linux table stay C. The values themselves are accepted (an `extern "C"` or `@callback` function names one) | Function-pointer types are `Share` | both tables in CeeSafe; `native.c` deleted |
 | C3 | Moving the pin costs a matrix and the analysis baselines; CeeSafe makes several releases a day | CeeSafe's CI builds CosmoOS's tree at head; CosmoOS moves its pin at most weekly | a pin bump whose `out/cee` difference is version lines only |
 | C4 | Unknown: `c2cee`'s drafts were not used for SA8 | Measure it on SA9's first driver: lines of the draft kept unchanged | a dated report |

@@ -1,0 +1,307 @@
+// io.cee - Reading and writing an object through the bounce (docs/kernel/syscall/architecture.md, "The bounce"), in
+// CeeSafe (roadmap 2.0 SA8): syscall_bounce_get and _put with their counters, syscall_obj_read and _write,
+// syscall_handle_read and _write, which both personalities use (syscall.h), and the native read, write, log and close
+// calls, which native.c's table names.
+//
+// An object's read, write, read_filled and read_undo are C function pointers in its kobject_io_type, called through;
+// read_filled's `put` is putUserPiece, a @callback.
+
+@header(
+    "kernel/errno.h", "kernel/handle.h", "kernel/kmalloc.h", "kernel/object.h", "kernel/process.h",
+    "kernel/syscall.h", "kernel/uaccess.h",
+)
+extern "C" {
+    struct syscall_args {
+        a: [u64; 6];
+    }
+    struct handle_table;
+    struct process {
+        handles: handle_table;
+        pid: u32;
+    }
+    struct kobject_io_type {
+        read: extern "C" fn(*mut kobject, *mut void, usize) -> i64;
+        write: extern "C" fn(*mut kobject, *void, usize) -> i64;
+        read_undo: extern "C" fn(*mut kobject);
+        read_filled: extern "C" fn(*mut kobject, *mut void, usize, usize, extern "C" fn(*mut void, *void, usize) -> i32, *mut void,) -> i64;
+    }
+    struct io_bounce {
+        buf: *mut CChar;
+        cap: usize;
+        heap: bool;
+    }
+
+    @cvalue("IO_CHUNK == 1024 && sizeof(struct io_bounce) <= 3 * sizeof(uint64_t)")
+    const CHUNK_IS_1024: bool = true;
+    const IO_CHUNK: usize = 1024;
+    const IO_BOUNCE_MAX: usize = 65536;
+    const HANDLE_RIGHT_READ: u32 = 1;
+    const HANDLE_RIGHT_WRITE: u32 = 2;
+    const EIO: i32 = 5;
+    const EBADF: i32 = 9;
+    const EAGAIN: i32 = 11;
+    const EFAULT: i32 = 14;
+    const EINVAL: i32 = 22;
+    const EOPNOTSUPP: i32 = 95;
+
+    fn process_current() -> *mut process;
+    fn process_log_permitted() -> bool;
+    fn user_range_ok(addr: u64, len: usize) -> bool;
+    fn copy_from_user(dst: *mut void, userSrc: u64, len: usize) -> i32;
+    fn copy_to_user(userDst: u64, src: *void, len: usize) -> i32;
+    fn handle_lookup(t: *mut handle_table, h: i32, rightsNeeded: u32) -> *mut kobject;
+    fn handle_close(t: *mut handle_table, h: i32) -> i32;
+    fn kobject_io_of(obj: *kobject) -> *kobject_io_type;
+}
+
+static BOUNCE_HEAP: AtomicU64 = AtomicU64.constant(0);
+static BOUNCE_FALLBACK: AtomicU64 = AtomicU64.constant(0);
+
+/// The panic of a broken invariant (the C's KASSERT).
+fn check(ok: bool, what: StringView) {
+    if (!ok) {
+        var buffer: [u8; 128] = [0; 128];
+        var line = TextWriter.create(mut buffer[..]);
+        line.text("assertion failed: ");
+        line.text(what);
+        line.text(" at kernel/syscall/io.cee");
+        KernelLog.panic(line);
+    }
+}
+
+/// Safety: the dispatcher's: `a` is the call's arguments.
+unsafe fn arg(a: *mut syscall_args, i: usize) -> u64 => Ptr.toBorrow(a as *syscall_args).a[i];
+
+/// The calling process's handle table.
+/// Safety: in a process's thread.
+unsafe fn handles() -> *mut handle_table {
+    let p = Ptr.toBorrowMut(process_current());
+    return borrow mut p.handles as *mut handle_table;
+}
+
+/// The bounce for a copy of `len` bytes: `stack` (IO_CHUNK bytes) for a kilobyte and less, the heap above it up to
+/// IO_BOUNCE_MAX, and the stack chunk again when that allocation fails -- never an error.
+/// Safety: `b` is writable; `stack` holds IO_CHUNK bytes and outlives the bounce.
+@export("syscall_bounce_get")
+unsafe fn bounceGet(b: *mut io_bounce, stack: *mut CChar, len: usize) {
+    let bounce = Ptr.toBorrowMut(b);
+    bounce.buf = stack;
+    bounce.cap = IO_CHUNK;
+    bounce.heap = false;
+    if (len > IO_CHUNK) {
+        let want = if (len < IO_BOUNCE_MAX) len else IO_BOUNCE_MAX;
+        let p = kmalloc(want, 0) as *mut CChar; // the page path above the largest slab class
+        if (!p.isNull()) {
+            bounce.buf = p;
+            bounce.cap = want;
+            bounce.heap = true;
+            BOUNCE_HEAP.fetchAddWith(1, Ordering.Relaxed);
+        } else {
+            BOUNCE_FALLBACK.fetchAddWith(1, Ordering.Relaxed);
+        }
+    }
+}
+
+/// Safety: `b` was filled by syscall_bounce_get and is put once.
+@export("syscall_bounce_put")
+unsafe fn bouncePut(b: *mut io_bounce) {
+    let bounce = Ptr.toBorrow(b as *io_bounce);
+    if (bounce.heap) {
+        kfree(bounce.buf as *mut void);
+    }
+}
+
+/// Safety: none beyond the call.
+@export("syscall_bounce_heap_count")
+unsafe fn bounceHeapCount() -> u64 => BOUNCE_HEAP.loadWith(LoadOrdering.Relaxed);
+
+/// Safety: none beyond the call.
+@export("syscall_bounce_fallback_count")
+unsafe fn bounceFallbackCount() -> u64 => BOUNCE_FALLBACK.loadWith(LoadOrdering.Relaxed);
+
+/// Write `len` bytes from user memory at `ubuf` to `obj`, a bounce at a time: the bytes written, or the error when
+/// none were.
+/// Safety: in a process's thread; `obj` is referenced.
+@export("syscall_obj_write")
+unsafe fn objWrite(obj: *mut kobject, ubuf: u64, len: usize) -> i64 {
+    let io = kobject_io_of(obj as *kobject);
+    if (io.isNull() || Ptr.toBorrow(io).write.isNull()) {
+        return -EBADF as i64;
+    }
+    let write = Ptr.toBorrow(io).write;
+    var stack = [0u8; 1024];
+    var words = [0u64; 3];
+    let bp = borrow mut words as *mut [u64; 3] as *mut io_bounce;
+    bounceGet(bp, borrow mut stack as *mut [u8; 1024] as *mut CChar, len);
+    let b = Ptr.toBorrow(bp as *io_bounce);
+    var done: usize = 0;
+    var rc: i64 = 0;
+    while (done < len) {
+        let n = if (len - done < b.cap) len - done else b.cap;
+        rc = copy_from_user(b.buf as *mut void, ubuf + done as u64, n) as i64;
+        if (rc != 0) {
+            break;
+        }
+        rc = write(obj, b.buf as *void, n);
+        if (rc < 0) {
+            break;
+        }
+        check(rc <= truncate<i64>(n), "rc <= (int64_t)n");
+        if (rc > truncate<i64>(n)) {
+            rc = -EIO as i64;
+            break;
+        }
+        done = done + truncate<usize>(rc);
+        if (truncate<usize>(rc) < n) {
+            break;
+        }
+    }
+    bouncePut(bp);
+    return if (done > 0) truncate<i64>(done) else rc;
+}
+
+/// Safety: in a process's thread.
+@export("syscall_handle_write")
+unsafe fn handleWrite(h: i32, ubuf: u64, len: usize) -> i64 {
+    if (!user_range_ok(ubuf, len)) {
+        return -EFAULT as i64;
+    }
+    let obj = handle_lookup(handles(), h, HANDLE_RIGHT_WRITE);
+    if (obj.isNull()) {
+        return -EBADF as i64;
+    }
+    let rc = objWrite(obj, ubuf, len);
+    kobject_put(obj);
+    return rc;
+}
+
+/// read_filled's `put`: each piece to the caller's buffer after the last.
+struct PutUser {
+    ubuf: u64;
+    done: u64;
+}
+
+/// Safety: `ctx` is a PutUser; `piece` holds `n` bytes.
+@callback
+unsafe fn putUserPiece(ctx: *mut void, piece: *void, n: usize) -> i32 {
+    let pu = Ptr.toBorrowMut(ctx as *mut PutUser);
+    if (copy_to_user(pu.ubuf + pu.done, piece, n) != 0) {
+        return -EFAULT;
+    }
+    pu.done = pu.done + n as u64;
+    return 0;
+}
+
+/// Read up to `len` bytes from `obj` into user memory at `ubuf`.
+/// Safety: in a process's thread; `obj` is referenced.
+@export("syscall_obj_read")
+unsafe fn objRead(obj: *mut kobject, ubuf: u64, len: usize) -> i64 {
+    let io = kobject_io_of(obj as *kobject);
+    if (io.isNull() || Ptr.toBorrow(io).read.isNull()) {
+        return -EBADF as i64;
+    }
+    let ops = Ptr.toBorrow(io);
+    // One object call, as large as the request up to the bounce: what one call returns is what the read returns, so a
+    // pipe or a tty that has 300 bytes returns 300. An object whose reads fill (read_filled: a regular file,
+    // /dev/zero) is handed a larger request whole and reads it a bounce at a time as one read, so a 1 MiB read of a
+    // file returns 1 MiB, not 64 KiB.
+    var stack = [0u8; 1024];
+    var words = [0u64; 3];
+    let bp = borrow mut words as *mut [u64; 3] as *mut io_bounce;
+    bounceGet(bp, borrow mut stack as *mut [u8; 1024] as *mut CChar, len);
+    let b = Ptr.toBorrow(bp as *io_bounce);
+    var rc = -EOPNOTSUPP as i64;
+    if (!ops.read_filled.isNull() && len > b.cap) {
+        var pu = PutUser { ubuf: ubuf, done: 0 };
+        let filled = ops.read_filled;
+        rc = filled(obj, b.buf as *mut void, b.cap, len, putUserPiece, borrow mut pu as *mut PutUser as *mut void);
+        // What the object reports is what landed in the caller's buffer.
+        check(
+            rc == -EOPNOTSUPP as i64 || (rc < 0 && pu.done == 0) || (rc >= 0 && truncate<u64>(rc) == pu.done),
+            "rc == -EOPNOTSUPP || (rc < 0 && pu.done == 0) || (rc >= 0 && (uint64_t)rc == pu.done)",
+        );
+    }
+    if (rc == -EOPNOTSUPP as i64) {
+        let n = if (len < b.cap) len else b.cap;
+        let read = ops.read;
+        rc = read(obj, b.buf as *mut void, n);
+        // An object may never report more than it was offered; the count bounds the copy out of the kernel buffer.
+        check(rc <= truncate<i64>(n), "rc <= (int64_t)n");
+        if (rc > truncate<i64>(n)) {
+            rc = -EIO as i64;
+        }
+        if (rc > 0 && copy_to_user(ubuf, b.buf as *void, truncate<usize>(rc)) != 0) {
+            // The copy to user faulted after the object already removed what it returned from its source. The read
+            // delivered nothing (an -EFAULT read's buffer is unspecified, so a caller cannot trust the bytes that did
+            // land); let the object put back what it took, if it can.
+            if (!ops.read_undo.isNull()) {
+                let undo = ops.read_undo;
+                undo(obj);
+            }
+            rc = -EFAULT as i64;
+        }
+    }
+    bouncePut(bp);
+    return rc;
+}
+
+/// Safety: in a process's thread.
+@export("syscall_handle_read")
+unsafe fn handleRead(h: i32, ubuf: u64, len: usize) -> i64 {
+    if (!user_range_ok(ubuf, len)) {
+        return -EFAULT as i64;
+    }
+    let obj = handle_lookup(handles(), h, HANDLE_RIGHT_READ);
+    if (obj.isNull()) {
+        return -EBADF as i64;
+    }
+    let rc = objRead(obj, ubuf, len);
+    kobject_put(obj);
+    return rc;
+}
+
+/// Safety: the dispatcher's.
+@export("sys_write")
+unsafe fn write(a: *mut syscall_args) -> i64 =>
+    handleWrite(truncate<i32>(arg(a, 0)), arg(a, 1), truncate<usize>(arg(a, 2)));
+
+/// Safety: the dispatcher's.
+@export("sys_read")
+unsafe fn read(a: *mut syscall_args) -> i64 =>
+    handleRead(truncate<i32>(arg(a, 0)), arg(a, 1), truncate<usize>(arg(a, 2)));
+
+/// A line from the program to the kernel log, as `pid N: text`; the text ends at its first NUL, as C's %s does.
+/// Safety: the dispatcher's.
+@export("sys_log")
+unsafe fn log(a: *mut syscall_args) -> i64 {
+    let ustr = arg(a, 0);
+    let len64 = arg(a, 1);
+    var buf = [0u8; 200];
+    if (len64 >= 200) {
+        return -EINVAL as i64;
+    }
+    if (!process_log_permitted()) {
+        return -EAGAIN as i64; // an unprivileged writer past its rate limit (docs/kernel/security/design.md §1)
+    }
+    let len = truncate<usize>(len64);
+    let rc = copy_from_user(borrow mut buf as *mut [u8; 200] as *mut void, ustr, len);
+    if (rc != 0) {
+        return rc as i64;
+    }
+    var end: usize = 0;
+    while (end < len && buf[end] != 0) {
+        end = end + 1;
+    }
+    var out: [u8; 256] = [0; 256];
+    var line = TextWriter.create(mut out[..]);
+    line.text("pid ");
+    line.decimal(Ptr.toBorrow(process_current() as *process).pid as u64);
+    line.text(": ");
+    line.bytes(buf[..end]);
+    KernelLog.send(LogLevel.Info, line);
+    return 0;
+}
+
+/// Safety: the dispatcher's.
+@export("sys_close")
+unsafe fn close(a: *mut syscall_args) -> i64 => handle_close(handles(), truncate<i32>(arg(a, 0))) as i64;

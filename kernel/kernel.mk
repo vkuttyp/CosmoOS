@@ -101,6 +101,7 @@ KERNEL_GENERIC_SRCS := \
 	compat/linux/syscalls.c \
 	compat/linux/netioctl.c \
 	compat/linux/sigcalls.c \
+	compat/linux/lxsock.c \
 	kernel-services/virtualization/vmm.c \
 	kernel-services/virtualization/vm.c \
 	kernel-services/virtualization/guestmem.c \
@@ -129,6 +130,11 @@ KERNEL_GENERIC_SRCS := \
 	kernel/syscall/threads.c \
 	kernel/syscall/files.c \
 	kernel/syscall/mount.c \
+	kernel/syscall/mmap.c \
+	kernel/syscall/io.c \
+	kernel/syscall/sockets.c \
+	kernel/syscall/procs.c \
+	kernel/syscall/sysctl.c \
 	kernel/syscall/personality.c \
 	kernel/syscall/uaccess.c \
 	kernel/syscall/uaccesstest.c \
@@ -353,12 +359,13 @@ $(OUT)/kernel/kernel.ship.elf: $(KERNEL_ELF)
 
 -include $(KERNEL_OBJS:.o=.d)
 
-# compat/linux/lxconv.c, netioctl.c and sigcalls.c are generated from their .cee into out/cee (scripts/cee-gen.py), away from the
+# compat/linux/lxconv.c, netioctl.c, sigcalls.c and lxsock.c are generated from their .cee into out/cee (scripts/cee-gen.py), away from the
 # headers they include by name (convert.h, linux_abi.h, linux_internal.h): their objects and analyses look in
 # compat/linux too.
 $(OUT)/compat/linux/lxconv.o $(OUT)/compat/linux/lxconv.analyzed: EXTRA_CFLAGS += -I$(ROOT)/compat/linux
 $(OUT)/compat/linux/netioctl.o $(OUT)/compat/linux/netioctl.analyzed: EXTRA_CFLAGS += -I$(ROOT)/compat/linux
 $(OUT)/compat/linux/sigcalls.o $(OUT)/compat/linux/sigcalls.analyzed: EXTRA_CFLAGS += -I$(ROOT)/compat/linux
+$(OUT)/compat/linux/lxsock.o $(OUT)/compat/linux/lxsock.analyzed: EXTRA_CFLAGS += -I$(ROOT)/compat/linux
 
 # drivers/acpi/acpi_parse.c likewise, from acpi_parse.cee, away from the acpi_internal.h it includes.
 $(OUT)/drivers/acpi/acpi_parse.o $(OUT)/drivers/acpi/acpi_parse.analyzed: EXTRA_CFLAGS += -I$(ROOT)/drivers/acpi

@@ -39,6 +39,24 @@ int64_t lx_set_tid_address(struct syscall_args *a);
 int64_t lx_exit(struct syscall_args *a);
 int64_t lx_exit_group(struct syscall_args *a);
 
+/* lxsock.cee: the socket calls. lx_accept is accept4 too (its fourth
+ * argument, the flags, is 0 from accept). */
+int64_t lx_socket(struct syscall_args *a);
+int64_t lx_bind(struct syscall_args *a);
+int64_t lx_connect(struct syscall_args *a);
+int64_t lx_listen(struct syscall_args *a);
+int64_t lx_accept(struct syscall_args *a);
+int64_t lx_sendto(struct syscall_args *a);
+int64_t lx_recvfrom(struct syscall_args *a);
+int64_t lx_shutdown(struct syscall_args *a);
+int64_t lx_getsockname(struct syscall_args *a);
+int64_t lx_getpeername(struct syscall_args *a);
+int64_t lx_setsockopt(struct syscall_args *a);
+int64_t lx_getsockopt(struct syscall_args *a);
+int64_t lx_sendmsg(struct syscall_args *a);
+int64_t lx_recvmsg(struct syscall_args *a);
+int64_t lx_socketpair(struct syscall_args *a);
+
 /* netioctl.cee: the interface ioctls (SIOCGIF*, SIOCSIF*) on a socket. */
 int64_t lx_ioctl_net(unsigned req, uint64_t arg);
 

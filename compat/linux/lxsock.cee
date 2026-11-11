@@ -1,0 +1,1201 @@
+// lxsock.cee - The Linux personality's socket calls (docs/compat/linux/design.md), in CeeSafe (roadmap 2.0 SA8): socket,
+// bind, connect, listen, accept and accept4, sendto, recvfrom, shutdown, getsockname, getpeername, setsockopt,
+// getsockopt, sendmsg, recvmsg and socketpair. syscalls.c's table names them (linux_internal.h).
+//
+// An address at this door is whichever shape its family has: AnyAddr holds a struct netaddr and a struct unix_addr as
+// words and bytes of their size. A struct lx_msghdr, lx_iovec and lx_cmsghdr are read as MsgHdr, Iovec and CmsgHdr. The
+// C compiler checks every size and offset (the extern block).
+//
+// Sums and addresses made from a caller's numbers wrap as C's unsigned arithmetic does (wrappingAdd): a bad one is
+// then refused by the comparison after it, or is copy_from_user's -EFAULT.
+
+@header(
+    "kernel/cred.h", "kernel/errno.h", "kernel/handle.h", "kernel/kmalloc.h", "kernel/net/inet.h", "kernel/object.h",
+    "kernel/process.h", "kernel/socket.h", "kernel/syscall.h", "kernel/uaccess.h", "kernel/unix.h", "convert.h",
+    "linux_abi.h", "linux_internal.h", "uapi/cosmo/syscall.h",
+)
+extern "C" {
+    struct syscall_args {
+        a: [u64; 6];
+    }
+    struct handle_table;
+    struct credentials {
+        euid: u32;
+    }
+    struct process {
+        handles: handle_table;
+        cred: credentials;
+    }
+    struct kobject;
+    struct socket {
+        obj: kobject;
+        family: i32;
+        @cname("type")
+        kind: i32;
+    }
+    struct netaddr;
+    struct unix_addr;
+    struct unix_handles {
+        nr: u32;
+        objs: [*mut kobject; 32];
+        rights: [u32; 32];
+    }
+    struct cosmo_ucred;
+
+    @cvalue("sizeof(struct netaddr) == 20 && _Alignof(struct netaddr) <= 4")
+    const NETADDR_IS_5_WORDS: bool = true;
+    @cvalue("sizeof(struct unix_addr) == 110")
+    const UNIX_ADDR_IS_110_BYTES: bool = true;
+    @cvalue("sizeof(struct lx_sockaddr_in6) == 28 && sizeof(struct lx_sockaddr_un) == 110")
+    const SOCKADDR_SIZES: bool = true;
+    @cvalue("sizeof(struct unix_handles) == 49 * sizeof(uint64_t) && _Alignof(struct unix_handles) <= 8")
+    const HANDLES_IS_49_WORDS: bool = true;
+    @cvalue(
+        "sizeof(struct cosmo_ucred) == 12 && sizeof(struct lx_ucred) == 12 && offsetof(struct cosmo_ucred, pid) == offsetof(struct lx_ucred, pid) && offsetof(struct cosmo_ucred, uid) == offsetof(struct lx_ucred, uid) && offsetof(struct cosmo_ucred, gid) == offsetof(struct lx_ucred, gid) && _Alignof(struct cosmo_ucred) <= 4",
+    )
+    const UCRED_SHAPES_AGREE: bool = true;
+    @cvalue(
+        "sizeof(struct lx_msghdr) == 56 && offsetof(struct lx_msghdr, msg_namelen) == 8 && offsetof(struct lx_msghdr, msg_iov) == 16 && offsetof(struct lx_msghdr, msg_iovlen) == 24 && offsetof(struct lx_msghdr, msg_control) == 32 && offsetof(struct lx_msghdr, msg_controllen) == 40 && offsetof(struct lx_msghdr, msg_flags) == 48",
+    )
+    const MSGHDR_LAYOUT: bool = true;
+    @cvalue(
+        "sizeof(struct lx_iovec) == 16 && offsetof(struct lx_iovec, iov_len) == 8 && sizeof(struct lx_cmsghdr) == 16 && offsetof(struct lx_cmsghdr, cmsg_level) == 8 && offsetof(struct lx_cmsghdr, cmsg_type) == 12",
+    )
+    const IOVEC_CMSG_LAYOUT: bool = true;
+    const LX_AF_UNIX: i32 = 1;
+    const LX_AF_INET: i32 = 2;
+    const LX_AF_INET6: i32 = 10;
+    const LX_SOCK_STREAM: u32 = 1;
+    const LX_SOCK_DGRAM: u32 = 2;
+    const LX_SOCK_RAW: u32 = 3;
+    const LX_IPPROTO_ICMP: i32 = 1;
+    const LX_IPPROTO_TCP: i32 = 6;
+    const LX_IPPROTO_UDP: i32 = 17;
+    const LX_SO_PEERCRED: i32 = 17;
+    const LX_SCM_RIGHTS: i32 = 1;
+    const LX_MSG_CTRUNC: u32 = 0x08;
+    const LX_MSG_TRUNC: u32 = 0x20;
+    const LX_MSG_DONTWAIT: u32 = 0x40;
+    const LX_MSG_CMSG_CLOEXEC: u32 = 0x40000000;
+    const LX_SOCK_NONBLOCK: u32 = 0o4000;
+    const LX_SOCK_CLOEXEC: u32 = 0o2000000;
+    const LX_SOL_SOCKET: i32 = 1;
+    const LX_SO_ERROR: i32 = 4;
+    const COSMO_AF_UNIX: i32 = 1;
+    const COSMO_AF_INET: i32 = 2;
+    const COSMO_AF_INET6: i32 = 10;
+    const COSMO_SOCK_STREAM: i32 = 1;
+    const COSMO_SOCK_DGRAM: i32 = 2;
+    const COSMO_MSG_HTRUNC: u32 = 0x08;
+    const COSMO_MSG_TRUNC: u32 = 0x20;
+    const COSMO_RIGHTS_SAME: u32 = 0;
+    const HANDLE_FLAG_CLOEXEC: u32 = 1;
+    const HANDLE_RIGHT_READ: u32 = 1;
+    const HANDLE_RIGHT_WRITE: u32 = 2;
+    const HANDLE_RIGHT_MANAGE: u32 = 16;
+    const HANDLE_RIGHT_SOCK_BIND: u32 = 0x10000;
+    const HANDLE_RIGHT_SOCK_ACCEPT: u32 = 0x20000;
+    const HANDLE_RIGHT_SOCK_CONNECT: u32 = 0x40000;
+    const HANDLE_RIGHT_SOCK_SHUTDOWN: u32 = 0x80000;
+    const HANDLE_RIGHT_SOCK_ALL: u32 = 0xF001F;
+    const HANDLE_RIGHT_SOCK_CONNECTED: u32 = 0x8001F;
+    const EPERM: i32 = 1;
+    const EBADF: i32 = 9;
+    const ENOMEM: i32 = 12;
+    const EFAULT: i32 = 14;
+    const EINVAL: i32 = 22;
+    const EMFILE: i32 = 24;
+    const EMSGSIZE: i32 = 90;
+    const ENOPROTOOPT: i32 = 92;
+    const EPROTONOSUPPORT: i32 = 93;
+    const ESOCKTNOSUPPORT: i32 = 94;
+    const EAFNOSUPPORT: i32 = 97;
+
+    fn process_current() -> *mut process;
+    fn kmalloc(size: usize, flags: u32) -> *mut void;
+    fn kfree(ptr: *mut void);
+    fn user_range_ok(addr: u64, len: usize) -> bool;
+    fn copy_from_user(dst: *mut void, userSrc: u64, len: usize) -> i32;
+    fn copy_to_user(userDst: u64, src: *void, len: usize) -> i32;
+    fn handle_get(t: *mut handle_table, h: i32, rightsOut: *mut u32) -> *mut kobject;
+    fn handle_lookup(t: *mut handle_table, h: i32, rightsNeeded: u32) -> *mut kobject;
+    fn handle_install_flags(t: *mut handle_table, obj: *mut kobject, rights: u32, flags: u32) -> i32;
+    fn handle_close(t: *mut handle_table, h: i32) -> i32;
+    fn handle_transfer_check(t: *mut handle_table, h: i32, give: u32, obj: *mut *mut kobject, rights: *mut u32) -> i32;
+    fn kobject_put(obj: *mut kobject);
+    fn socket_from_kobject(obj: *mut kobject) -> *mut socket;
+    fn ksock_create(family: i32, kind: i32, uid: u32, out: *mut *mut socket) -> i32;
+    fn ksock_create_raw(family: i32, proto: i32, uid: u32, out: *mut *mut socket) -> i32;
+    fn ksock_bind(s: *mut socket, addr: *netaddr) -> i32;
+    fn ksock_listen(s: *mut socket, backlog: i32) -> i32;
+    fn ksock_accept(s: *mut socket, out: *mut *mut socket, peer: *mut netaddr) -> i32;
+    fn ksock_connect(s: *mut socket, addr: *netaddr) -> i32;
+    fn ksock_sendto(s: *mut socket, buf: *void, len: usize, to: *netaddr) -> i64;
+    fn ksock_recvfrom(s: *mut socket, buf: *mut void, len: usize, from: *mut netaddr) -> i64;
+    fn ksock_shutdown(s: *mut socket, how: i32) -> i32;
+    fn ksock_getsockname(s: *mut socket, out: *mut netaddr) -> i32;
+    fn ksock_getpeername(s: *mut socket, out: *mut netaddr) -> i32;
+    fn ksock_set_nonblock(s: *mut socket, on: bool);
+    fn ksock_error_peek(s: *mut socket, token: *mut u64) -> i32;
+    fn ksock_error_delivered(s: *mut socket, token: u64);
+    fn lx_sockaddr_to_netaddr(sa: *void, len: usize, out: *mut netaddr) -> i32;
+    fn lx_sockaddr_from_netaddr(addr: *netaddr, out: *mut void, cap: usize) -> usize;
+    fn unix_bind(s: *mut socket, a: *unix_addr) -> i32;
+    fn unix_connect(s: *mut socket, a: *unix_addr) -> i32;
+    fn unix_send(s: *mut socket, buf: *void, len: usize, to: *unix_addr, h: *mut unix_handles, dontwait: bool) -> i64;
+    fn unix_recv(
+        s: *mut socket,
+        buf: *mut void,
+        len: usize,
+        from: *mut unix_addr,
+        h: *mut unix_handles,
+        flags: *mut u32,
+        dontwait: bool,
+    ) -> i64;
+    fn unix_getsockname(s: *mut socket, out: *mut unix_addr) -> i32;
+    fn unix_getpeername(s: *mut socket, out: *mut unix_addr) -> i32;
+    fn unix_peercred(s: *mut socket, out: *mut cosmo_ucred) -> i32;
+    fn unix_socketpair(kind: i32, a: *mut *mut socket, b: *mut *mut socket) -> i32;
+    fn unix_addr_from_user(uptr: u64, len: usize, out: *mut unix_addr) -> i32;
+    fn unix_addr_pack(a: *unix_addr, family: u16, out: *mut void) -> usize;
+    fn unix_handles_drop(h: *mut unix_handles);
+}
+
+/// What one send or receive moves at most in a piece, and the most a datagram or one receive carries (16 pieces).
+const SOCK_CHUNK: usize = 4096;
+const SOCK_MAX: usize = 65536;
+
+/// The most elements a vector may have.
+const IOV_MAX: u64 = 1024;
+
+/// LX_AF_UNIX as an address's family field.
+const UNIX_FAMILY: u16 = 1;
+
+/// sizeof(struct lx_cmsghdr): a control message's header.
+const CMSG_HDR: u64 = 16;
+
+/// The most handles one message carries (UNIX_HANDLES_MAX).
+const HANDLES_MAX: u32 = 32;
+
+/// An address in whichever shape its family has: `na` is a struct netaddr, `ua` a struct unix_addr.
+struct AnyAddr {
+    family: u16;
+    na: [u32; 5];
+    ua: [u8; 110];
+}
+
+/// A struct lx_msghdr (MSGHDR_LAYOUT).
+struct MsgHdr {
+    name: u64;
+    namelen: u32;
+    pad0: u32;
+    iov: u64;
+    iovlen: u64;
+    control: u64;
+    controllen: u64;
+    flags: i32;
+    pad1: u32;
+}
+
+/// A struct lx_iovec (IOVEC_CMSG_LAYOUT).
+struct Iovec {
+    base: u64;
+    len: u64;
+}
+
+/// A struct lx_cmsghdr (IOVEC_CMSG_LAYOUT).
+struct CmsgHdr {
+    len: u64;
+    level: i32;
+    kind: i32;
+}
+
+/// A socket behind a descriptor, referenced, or the error that refused it.
+struct Found {
+    s: *mut socket;
+    err: i32;
+}
+
+fn noAddr() -> AnyAddr => AnyAddr { family: 0, na: [0; 5], ua: [0; 110] };
+
+fn noMsg() -> MsgHdr =>
+    MsgHdr { name: 0, namelen: 0, pad0: 0, iov: 0, iovlen: 0, control: 0, controllen: 0, flags: 0, pad1: 0 };
+
+/// A control length rounded up to eight bytes, as C's unsigned arithmetic rounds it (LX_CMSG_ALIGN).
+fn cmsgAlign(n: u64) -> u64 => n.wrappingAdd(7) & (7 ^ 0xFFFFFFFFFFFFFFFF);
+
+/// Safety: the dispatcher's: `a` is the call's arguments.
+unsafe fn arg(a: *mut syscall_args, i: usize) -> u64 => Ptr.toBorrow(a as *syscall_args).a[i];
+
+/// The `i`th argument as C's (int) sees it.
+/// Safety: the dispatcher's.
+unsafe fn arg32(a: *mut syscall_args, i: usize) -> i32 => truncate<i32>(arg(a, i));
+
+/// The `i`th argument as C's (unsigned) sees it.
+/// Safety: the dispatcher's.
+unsafe fn argU32(a: *mut syscall_args, i: usize) -> u32 => truncate<u32>(arg(a, i));
+
+/// The calling process's handle table.
+/// Safety: in a process's thread.
+unsafe fn handles() -> *mut handle_table {
+    let p = Ptr.toBorrowMut(process_current());
+    return borrow mut p.handles as *mut handle_table;
+}
+
+/// Safety: `s` is a live socket.
+unsafe fn objOf(s: *mut socket) -> *mut kobject => borrow mut Ptr.toBorrowMut(s).obj as *mut kobject;
+
+/// Drop a reference (the C's ksock_put).
+/// Safety: `s` is referenced by the caller.
+unsafe fn sockPut(s: *mut socket) {
+    kobject_put(objOf(s));
+}
+
+/// Safety: `s` is a live socket.
+unsafe fn isUnix(s: *mut socket) -> bool => Ptr.toBorrow(s as *socket).family == COSMO_AF_UNIX;
+
+/// Safety: `s` is a live socket.
+unsafe fn isStream(s: *mut socket) -> bool => Ptr.toBorrow(s as *socket).kind == COSMO_SOCK_STREAM;
+
+/// Safety: `a` is a live AnyAddr, or null.
+unsafe fn naOf(a: *AnyAddr) -> *netaddr {
+    if (a.isNull()) {
+        return 0 as *netaddr;
+    }
+    return borrow Ptr.toBorrow(a).na as *[u32; 5] as *netaddr;
+}
+
+/// Safety: `a` is a live AnyAddr, or null.
+unsafe fn uaOf(a: *AnyAddr) -> *unix_addr {
+    if (a.isNull()) {
+        return 0 as *unix_addr;
+    }
+    return borrow Ptr.toBorrow(a).ua as *[u8; 110] as *unix_addr;
+}
+
+/// Safety: `a` is a live, writable AnyAddr.
+unsafe fn naMut(a: *mut AnyAddr) -> *mut netaddr => borrow mut Ptr.toBorrowMut(a).na as *mut [u32; 5] as *mut netaddr;
+
+/// Safety: `a` is a live, writable AnyAddr.
+unsafe fn uaMut(a: *mut AnyAddr) -> *mut unix_addr =>
+    borrow mut Ptr.toBorrowMut(a).ua as *mut [u8; 110] as *mut unix_addr;
+
+/// The socket behind `h` if the handle carries `rights`, referenced; null otherwise.
+/// Safety: in a process's thread.
+unsafe fn sockOf(h: i32, rights: u32) -> *mut socket {
+    let obj = handle_lookup(handles(), h, rights);
+    if (obj.isNull()) {
+        return 0 as *mut socket;
+    }
+    let s = socket_from_kobject(obj);
+    if (s.isNull()) {
+        kobject_put(obj);
+    }
+    return s;
+}
+
+/// The same as the native side's (kernel/syscall/sockets.cee): the object's kind first, then the bits its kind
+/// defines. A handle is a capability whatever ABI asks about it, so a socket delegated with an operation removed must
+/// refuse that operation here too -- otherwise the restriction lasts exactly until the holder makes the Linux call.
+/// Safety: in a process's thread.
+unsafe fn sockOfErr(h: i32, rights: u32) -> Found {
+    var have: u32 = 0;
+    let obj = handle_get(handles(), h, borrow mut have as *mut u32);
+    if (obj.isNull()) {
+        return Found { s: 0 as *mut socket, err: -EBADF };
+    }
+    let s = socket_from_kobject(obj);
+    if (s.isNull()) {
+        kobject_put(obj);
+        return Found { s: 0 as *mut socket, err: -EBADF };
+    }
+    if ((have & rights) != rights) {
+        sockPut(s);
+        return Found { s: 0 as *mut socket, err: -EPERM };
+    }
+    return Found { s: s, err: 0 };
+}
+
+/// Safety: `out` is a writable netaddr.
+unsafe fn addrFromUser(uptr: u64, len: usize, out: *mut netaddr) -> i32 {
+    var buf = [0u32; 7]; // a struct lx_sockaddr_in6's size
+    if (len < 2 || len > 28) {
+        return -EINVAL;
+    }
+    if (copy_from_user(borrow mut buf as *mut [u32; 7] as *mut void, uptr, len) != 0) {
+        return -EFAULT;
+    }
+    return lx_sockaddr_to_netaddr(borrow buf as *[u32; 7] as *void, len, out);
+}
+
+// --- the unix address at this door ---------------------------------------------------------------------------------
+// Linux's sockaddr_un is the family and 108 bytes of path, parsed by the transport's own rule (kernel/unix.h): a
+// NUL-terminated path, a path exactly as long as the length says, or a leading NUL and the bytes of an abstract name.
+
+/// Safety: `out` is writable.
+unsafe fn anyAddrFromUser(uptr: u64, len: usize, out: *mut AnyAddr) -> i32 {
+    var family: u16 = 0;
+    if (len < 2) {
+        return -EINVAL;
+    }
+    if (copy_from_user(borrow mut family as *mut u16 as *mut void, uptr, 2) != 0) {
+        return -EFAULT;
+    }
+    let o = Ptr.toBorrowMut(out);
+    o.family = family;
+    if (family == UNIX_FAMILY) {
+        return unix_addr_from_user(uptr, len, uaMut(out)); // Linux's sockaddr_un has the same layout
+    }
+    return addrFromUser(uptr, len, naMut(out));
+}
+
+/// A name in its Linux shape into `name` (110 bytes, 2-aligned): its full size.
+/// Safety: `s` is a live socket; `a` is a live AnyAddr; `name` holds 110 bytes.
+unsafe fn packName(s: *mut socket, a: *AnyAddr, name: *mut void) -> usize {
+    if (isUnix(s)) {
+        return unix_addr_pack(uaOf(a), UNIX_FAMILY, name);
+    }
+    return lx_sockaddr_from_netaddr(naOf(a), name, 28);
+}
+
+/// A name in its Linux shape, bounded by the caller's socklen_t, the full size reported back. `ulenp` is the user
+/// address of the socklen_t, in and out; the value is read from it, never used as one.
+/// Safety: `s` is a live socket; `a` is a live AnyAddr.
+unsafe fn sockAddrToUser(s: *mut socket, uptr: u64, ulenp: u64, a: *AnyAddr) -> i32 {
+    if (uptr == 0 || ulenp == 0) {
+        return 0;
+    }
+    var cap: i32 = 0;
+    if (copy_from_user(borrow mut cap as *mut i32 as *mut void, ulenp, 4) != 0) {
+        return -EFAULT;
+    }
+    if (cap < 0) {
+        return -EINVAL;
+    }
+    var name = [0u16; 55]; // a struct lx_sockaddr_un or lx_sockaddr_in6
+    let full = packName(s, a, borrow mut name as *mut [u16; 55] as *mut void);
+    let n = if (truncate<usize>(cap) < full) truncate<usize>(cap) else full;
+    if (n != 0 && copy_to_user(uptr, borrow name as *[u16; 55] as *void, n) != 0) {
+        return -EFAULT;
+    }
+    var out: i32 = truncate<i32>(full);
+    return if (copy_to_user(ulenp, borrow out as *i32 as *void, 4) != 0) -EFAULT else 0;
+}
+
+/// One piece to the family's transport.
+/// Safety: `s` is a live socket; `buf` holds `n` bytes; `to` and `h` are live or null.
+unsafe fn sendPiece(s: *mut socket, buf: *mut u8, n: usize, to: *AnyAddr, h: *mut unix_handles, dontwait: bool) -> i64 {
+    if (isUnix(s)) {
+        return unix_send(s, buf as *void, n, uaOf(to), h, dontwait);
+    }
+    return ksock_sendto(s, buf as *void, n, naOf(to));
+}
+
+/// The bytes of a send: a datagram whole, a stream in chunks, through the family's transport; `h` is the handles
+/// riding along (a unix socket only), consumed by the first chunk that goes.
+/// Safety: in a process's thread; `s` is referenced; `to` and `h` are live or null; the caller checked the user range.
+unsafe fn sockSend(s: *mut socket, ubuf: u64, len: usize, to: *AnyAddr, h: *mut unix_handles, dontwait: bool) -> i64 {
+    let un = isUnix(s);
+    if (!to.isNull()) {
+        let toUnix = Ptr.toBorrow(to).family == UNIX_FAMILY;
+        if (un != toUnix) {
+            return -EAFNOSUPPORT as i64;
+        }
+    }
+    if (!un && !h.isNull() && Ptr.toBorrow(h as *unix_handles).nr > 0) {
+        return -EINVAL as i64;
+    }
+    let dgram = !isStream(s); // a datagram or a raw socket: one message per call
+    let cap = if (!dgram) SOCK_CHUNK else if (len != 0) len else 1;
+    if (cap > SOCK_MAX) {
+        return -EMSGSIZE as i64;
+    }
+    let tmp = kmalloc(cap, 0) as *mut u8;
+    if (tmp.isNull()) {
+        return -ENOMEM as i64;
+    }
+    var done: i64 = 0;
+    var rc: i64 = 0;
+    if (dgram) {
+        if (copy_from_user(tmp as *mut void, ubuf, len) != 0) {
+            rc = -EFAULT as i64;
+        } else {
+            rc = sendPiece(s, tmp, len, to, h, dontwait);
+        }
+        done = if (rc > 0) rc else 0;
+    } else {
+        while (truncate<usize>(done) < len) {
+            let left = len - truncate<usize>(done);
+            let n = if (left < SOCK_CHUNK) left else SOCK_CHUNK;
+            if (copy_from_user(tmp as *mut void, ubuf.wrappingAdd(truncate<u64>(done)), n) != 0) {
+                rc = -EFAULT as i64;
+                break;
+            }
+            let w = sendPiece(s, tmp, n, to, h, dontwait);
+            if (w <= 0) {
+                rc = w;
+                break;
+            }
+            done = done + w;
+            if (truncate<usize>(w) < n) {
+                break;
+            }
+        }
+        if (len == 0 && un) {
+            rc = unix_send(s, tmp as *void, 0, uaOf(to), h, dontwait);
+        }
+    }
+    kfree(tmp as *mut void);
+    return if (done > 0) done else rc;
+}
+
+/// Safety: the dispatcher's.
+@export("lx_socket")
+unsafe fn socketCall(a: *mut syscall_args) -> i64 {
+    let family = arg32(a, 0);
+    let bits = argU32(a, 1);
+    let nonblock = (bits & LX_SOCK_NONBLOCK) != 0;
+    let kind = bits & ((LX_SOCK_NONBLOCK | LX_SOCK_CLOEXEC) ^ 0xFFFFFFFF);
+    let proto = arg32(a, 2);
+    if (family != LX_AF_INET && family != LX_AF_INET6 && family != LX_AF_UNIX) {
+        return -EAFNOSUPPORT as i64;
+    }
+    let cfamily = if (family == LX_AF_INET) COSMO_AF_INET else if (family == LX_AF_INET6) COSMO_AF_INET6
+        else COSMO_AF_UNIX;
+    let euid = Ptr.toBorrow(process_current() as *process).cred.euid;
+    var s = 0 as *mut socket;
+    var rc: i32 = 0;
+    if (kind == LX_SOCK_RAW && family != LX_AF_UNIX) {
+        // Raw ICMP over IPv4, what ping opens (PRIV_NET; design.md, "Raw ICMP sockets"); any other protocol or IPv6
+        // is -EPROTONOSUPPORT.
+        if (family == LX_AF_INET && proto == LX_IPPROTO_ICMP) {
+            rc = ksock_create_raw(cfamily, LX_IPPROTO_ICMP, euid, borrow mut s as *mut *mut socket);
+        } else {
+            rc = -EPROTONOSUPPORT;
+        }
+    } else if (kind != LX_SOCK_STREAM && kind != LX_SOCK_DGRAM) {
+        // A known type this family lacks (SEQPACKET, RAW, RDM, DCCP, PACKET), or no type at all: Linux's two answers.
+        return if (kind >= 1 && kind <= 10) -ESOCKTNOSUPPORT as i64 else -EINVAL as i64;
+    } else {
+        // The protocol is 0 or the type's own: a ping socket (SOCK_DGRAM, IPPROTO_ICMP) is not built, and must not
+        // become a UDP one. A unix socket's own is 1, PF_UNIX.
+        let typeProto = if (family == LX_AF_UNIX) 1 else if (kind == LX_SOCK_STREAM) LX_IPPROTO_TCP else LX_IPPROTO_UDP;
+        if (proto != 0 && proto != typeProto) {
+            return -EPROTONOSUPPORT as i64;
+        }
+        rc = ksock_create(
+            cfamily,
+            if (kind == LX_SOCK_STREAM) COSMO_SOCK_STREAM else COSMO_SOCK_DGRAM,
+            euid,
+            borrow mut s as *mut *mut socket,
+        );
+    }
+    if (rc != 0) {
+        return rc as i64;
+    }
+    if (nonblock) {
+        ksock_set_nonblock(s, true);
+    }
+    let h = handle_install_flags(
+        handles(),
+        objOf(s),
+        HANDLE_RIGHT_SOCK_ALL,
+        if ((bits & LX_SOCK_CLOEXEC) != 0) HANDLE_FLAG_CLOEXEC else 0,
+    );
+    sockPut(s);
+    return h as i64;
+}
+
+/// bind and connect: the address parsed, then the socket, then the family's operation.
+/// Safety: the dispatcher's.
+unsafe fn withAddr(a: *mut syscall_args, right: u32, connect: bool) -> i64 {
+    var addr = noAddr();
+    let ap = borrow mut addr as *mut AnyAddr;
+    var rc = anyAddrFromUser(arg(a, 1), truncate<usize>(arg(a, 2)), ap);
+    if (rc != 0) {
+        return rc as i64;
+    }
+    let found = sockOfErr(arg32(a, 0), right);
+    if (found.s.isNull()) {
+        return found.err as i64;
+    }
+    let s = found.s;
+    if (addr.family == UNIX_FAMILY) {
+        if (!isUnix(s)) {
+            rc = -EAFNOSUPPORT;
+        } else if (connect) {
+            rc = unix_connect(s, uaOf(ap as *AnyAddr));
+        } else {
+            rc = unix_bind(s, uaOf(ap as *AnyAddr));
+        }
+    } else if (connect) {
+        rc = ksock_connect(s, naOf(ap as *AnyAddr));
+    } else {
+        rc = ksock_bind(s, naOf(ap as *AnyAddr));
+    }
+    sockPut(s);
+    return rc as i64;
+}
+
+/// Safety: the dispatcher's.
+@export("lx_bind")
+unsafe fn bind(a: *mut syscall_args) -> i64 => withAddr(a, HANDLE_RIGHT_SOCK_BIND, false);
+
+/// Safety: the dispatcher's.
+@export("lx_connect")
+unsafe fn connect(a: *mut syscall_args) -> i64 => withAddr(a, HANDLE_RIGHT_SOCK_CONNECT, true);
+
+/// Safety: the dispatcher's.
+@export("lx_listen")
+unsafe fn listen(a: *mut syscall_args) -> i64 {
+    let found = sockOfErr(arg32(a, 0), HANDLE_RIGHT_SOCK_BIND);
+    if (found.s.isNull()) {
+        return found.err as i64;
+    }
+    let rc = ksock_listen(found.s, arg32(a, 1));
+    sockPut(found.s);
+    return rc as i64;
+}
+
+/// accept and accept4: the fourth argument is accept4's flags, and accept passes 0.
+/// Safety: the dispatcher's.
+@export("lx_accept")
+unsafe fn accept(a: *mut syscall_args) -> i64 {
+    let found = sockOfErr(arg32(a, 0), HANDLE_RIGHT_SOCK_ACCEPT);
+    if (found.s.isNull()) {
+        return found.err as i64;
+    }
+    var c = 0 as *mut socket;
+    var peer = noAddr(); // the family's half is filled below; the other stays zero
+    let pp = borrow mut peer as *mut AnyAddr;
+    var rc = ksock_accept(found.s, borrow mut c as *mut *mut socket, naMut(pp));
+    sockPut(found.s);
+    if (rc != 0) {
+        return rc as i64;
+    }
+    let flags = arg(a, 3);
+    if ((flags & LX_SOCK_NONBLOCK as u64) != 0) {
+        ksock_set_nonblock(c, true);
+    }
+    if (isUnix(c)) {
+        unix_getpeername(c, uaMut(pp));
+    }
+    rc = sockAddrToUser(c, arg(a, 1), arg(a, 2), pp as *AnyAddr);
+    if (rc != 0) {
+        sockPut(c);
+        return rc as i64;
+    }
+    let h = handle_install_flags(
+        handles(),
+        objOf(c),
+        HANDLE_RIGHT_SOCK_CONNECTED,
+        if ((flags & LX_SOCK_CLOEXEC as u64) != 0) HANDLE_FLAG_CLOEXEC else 0,
+    );
+    sockPut(c);
+    return h as i64;
+}
+
+/// Safety: the dispatcher's.
+@export("lx_sendto")
+unsafe fn sendto(a: *mut syscall_args) -> i64 {
+    let ubuf = arg(a, 1);
+    let len = truncate<usize>(arg(a, 2));
+    let flags = argU32(a, 3);
+    if (!user_range_ok(ubuf, len)) {
+        return -EFAULT as i64;
+    }
+    var to = noAddr();
+    let tp = borrow mut to as *mut AnyAddr;
+    let haveTo = arg(a, 4) != 0;
+    if (haveTo) {
+        let rc = anyAddrFromUser(arg(a, 4), truncate<usize>(arg(a, 5)), tp);
+        if (rc != 0) {
+            return rc as i64;
+        }
+    }
+    let s = sockOf(arg32(a, 0), HANDLE_RIGHT_WRITE);
+    if (s.isNull()) {
+        return -EBADF as i64;
+    }
+    // MSG_NOSIGNAL means nothing more here: no socket write raises a signal on this system, it returns -EPIPE.
+    let dest = if (haveTo) tp as *AnyAddr else 0 as *AnyAddr;
+    let rc = sockSend(s, ubuf, len, dest, 0 as *mut unix_handles, (flags & LX_MSG_DONTWAIT) != 0);
+    sockPut(s);
+    return rc;
+}
+
+/// Safety: the dispatcher's.
+@export("lx_recvfrom")
+unsafe fn recvfrom(a: *mut syscall_args) -> i64 {
+    let ubuf = arg(a, 1);
+    let len = truncate<usize>(arg(a, 2));
+    if (!user_range_ok(ubuf, len)) {
+        return -EFAULT as i64;
+    }
+    let s = sockOf(arg32(a, 0), HANDLE_RIGHT_READ);
+    if (s.isNull()) {
+        return -EBADF as i64;
+    }
+    let cap = if (len >= SOCK_MAX) SOCK_MAX else if (len != 0) len else 1;
+    let tmp = kmalloc(cap, 0);
+    if (tmp.isNull()) {
+        sockPut(s);
+        return -ENOMEM as i64;
+    }
+    var from = noAddr();
+    let fp = borrow mut from as *mut AnyAddr;
+    let uname = arg(a, 4);
+    var rc: i64 = 0;
+    if (isUnix(s)) {
+        let dontwait = (argU32(a, 3) & LX_MSG_DONTWAIT) != 0;
+        rc = unix_recv(s, tmp, cap, uaMut(fp), 0 as *mut unix_handles, 0 as *mut u32, dontwait);
+    } else {
+        rc = ksock_recvfrom(s, tmp, cap, if (uname != 0) naMut(fp) else 0 as *mut netaddr);
+    }
+    if (rc > 0 && copy_to_user(ubuf, tmp as *void, truncate<usize>(rc)) != 0) {
+        rc = -EFAULT as i64;
+    }
+    kfree(tmp);
+    if (rc >= 0 && uname != 0) {
+        let r2 = sockAddrToUser(s, uname, arg(a, 5), fp as *AnyAddr);
+        if (r2 != 0) {
+            rc = r2 as i64;
+        }
+    }
+    sockPut(s);
+    return rc;
+}
+
+/// Safety: the dispatcher's.
+@export("lx_shutdown")
+unsafe fn shutdown(a: *mut syscall_args) -> i64 {
+    let found = sockOfErr(arg32(a, 0), HANDLE_RIGHT_SOCK_SHUTDOWN);
+    if (found.s.isNull()) {
+        return found.err as i64;
+    }
+    let rc = ksock_shutdown(found.s, arg32(a, 1)); // SHUT_* values coincide
+    sockPut(found.s);
+    return rc as i64;
+}
+
+/// getsockname and getpeername.
+/// Safety: the dispatcher's.
+unsafe fn nameCall(a: *mut syscall_args, peer: bool) -> i64 {
+    let s = sockOf(arg32(a, 0), 0);
+    if (s.isNull()) {
+        return -EBADF as i64;
+    }
+    var addr = noAddr();
+    let ap = borrow mut addr as *mut AnyAddr;
+    var rc: i32 = 0;
+    if (isUnix(s)) {
+        rc = if (peer) unix_getpeername(s, uaMut(ap)) else unix_getsockname(s, uaMut(ap));
+    } else {
+        rc = if (peer) ksock_getpeername(s, naMut(ap)) else ksock_getsockname(s, naMut(ap));
+    }
+    if (rc == 0) {
+        rc = sockAddrToUser(s, arg(a, 1), arg(a, 2), ap as *AnyAddr);
+    }
+    sockPut(s);
+    return rc as i64;
+}
+
+/// Safety: the dispatcher's.
+@export("lx_getsockname")
+unsafe fn getsockname(a: *mut syscall_args) -> i64 => nameCall(a, false);
+
+/// Safety: the dispatcher's.
+@export("lx_getpeername")
+unsafe fn getpeername(a: *mut syscall_args) -> i64 => nameCall(a, true);
+
+/// Changing how a socket behaves is what MANAGE means, and it was asking for nothing
+/// (docs/kernel/object/architecture.md, "Rights").
+///
+/// This used to return 0 for every SOL_SOCKET option while doing nothing, which is worse than refusing: a program that
+/// sets SO_RCVTIMEO was told it took effect and then blocked forever, and one that sets SO_REUSEADDR believed in an
+/// address reuse this stack does not implement -- failing its next bind with -EADDRINUSE and no way to connect the two.
+/// -ENOPROTOOPT is what Linux itself returns for an option a protocol does not implement, so a program's existing
+/// error path handles it (docs/audit/next-subsystem-socket-verdict.md, Design 4). Nothing about a socket is settable
+/// here yet, so the implemented set is empty.
+/// Safety: the dispatcher's.
+@export("lx_setsockopt")
+unsafe fn setsockopt(a: *mut syscall_args) -> i64 {
+    let s = sockOf(arg32(a, 0), HANDLE_RIGHT_MANAGE);
+    if (s.isNull()) {
+        return -EBADF as i64;
+    }
+    sockPut(s);
+    return -ENOPROTOOPT as i64;
+}
+
+/// SO_PEERCRED's answer: a struct lx_ucred, which has struct cosmo_ucred's shape (UCRED_SHAPES_AGREE).
+/// Safety: the dispatcher's; `s` is a live socket.
+unsafe fn peerCred(a: *mut syscall_args, s: *mut socket) -> i32 {
+    var uc = [0u32; 3]; // a struct cosmo_ucred
+    if (!isUnix(s)) {
+        return -ENOPROTOOPT;
+    }
+    let rc = unix_peercred(s, borrow mut uc as *mut [u32; 3] as *mut cosmo_ucred);
+    if (rc != 0) {
+        return rc;
+    }
+    let ulen = arg(a, 4);
+    var room: u32 = 12;
+    if (ulen != 0 && copy_from_user(borrow mut room as *mut u32 as *mut void, ulen, 4) != 0) {
+        return -EFAULT;
+    }
+    if (room < 12) {
+        return -EINVAL;
+    }
+    var len: u32 = 12;
+    if (copy_to_user(arg(a, 3), borrow uc as *[u32; 3] as *void, 12) != 0 ||
+        (ulen != 0 && copy_to_user(ulen, borrow len as *u32 as *void, 4) != 0)) {
+        return -EFAULT;
+    }
+    return 0;
+}
+
+/// The same kernel path the native SYS_getsockopt takes, so the capability is not one personality's: a rule or a power
+/// in compat/linux alone is half of one, because both doors reach the same objects.
+/// Safety: the dispatcher's.
+@export("lx_getsockopt")
+unsafe fn getsockopt(a: *mut syscall_args) -> i64 {
+    let s = sockOf(arg32(a, 0), 0);
+    if (s.isNull()) {
+        return -EBADF as i64;
+    }
+    let uval = arg(a, 3);
+    let ulen = arg(a, 4);
+    var rc: i32 = 0;
+    if (arg32(a, 1) == LX_SOL_SOCKET && arg32(a, 2) == LX_SO_PEERCRED) {
+        rc = peerCred(a, s);
+    } else if (arg32(a, 1) != LX_SOL_SOCKET || arg32(a, 2) != LX_SO_ERROR) {
+        rc = -ENOPROTOOPT;
+    } else {
+        var room: u32 = 4; // Linux's socklen_t is 32 bits
+        if (ulen != 0 && copy_from_user(borrow mut room as *mut u32 as *mut void, ulen, 4) != 0) {
+            rc = -EFAULT;
+        } else if (room < 4) {
+            rc = -EINVAL;
+        } else if (!user_range_ok(uval, 4) || (ulen != 0 && !user_range_ok(ulen, 4))) {
+            rc = -EFAULT;
+        } else {
+            // Read, copy, then commit the clear: see sys_getsockopt (kernel/syscall/sockets.cee) for why it is not
+            // taken and put back.
+            var token: u64 = 0;
+            let e = ksock_error_peek(s, borrow mut token as *mut u64);
+            var val: i32 = if (e < 0) 0i32.wrappingSub(e) else e;
+            var len: u32 = 4;
+            if (copy_to_user(uval, borrow val as *i32 as *void, 4) != 0) {
+                rc = -EFAULT;
+            } else if (ulen != 0 && copy_to_user(ulen, borrow len as *u32 as *void, 4) != 0) {
+                rc = -EFAULT;
+            }
+            if (rc == 0) {
+                ksock_error_delivered(s, token);
+            }
+        }
+    }
+    sockPut(s);
+    return rc as i64;
+}
+
+// --- sendmsg, recvmsg, socketpair -----------------------------------------------------------------------------------
+// struct msghdr: a name, a vector, a control buffer. SCM_RIGHTS is the one control type: int descriptors in, under
+// spawn's transfer rule with SAME rights (Linux has no narrower notion); int descriptors out, installed in order until
+// the first refusal, the rest closed with MSG_CTRUNC.
+
+/// The `i`th element of the vector at `uiov`, into `iov`: whether the copy succeeded.
+/// Safety: in a process's thread.
+unsafe fn iovAt(uiov: u64, i: u64, iov: *mut Iovec) -> bool =>
+    copy_from_user(iov as *mut void, uiov.wrappingAdd(i.wrappingMul(16)), 16) == 0;
+
+/// The descriptors of a control buffer, checked and referenced into `hp`.
+/// Safety: in a process's thread; `hp` is a writable struct unix_handles.
+unsafe fn msgHandlesIn(control: u64, controllen: u64, hp: *mut unix_handles) -> i32 {
+    let hs = Ptr.toBorrowMut(hp);
+    hs.nr = 0;
+    if (control == 0 || controllen == 0) {
+        return 0;
+    }
+    let t = handles();
+    var off: u64 = 0;
+    while (off.wrappingAdd(CMSG_HDR) <= controllen) {
+        var ch = CmsgHdr { len: 0, level: 0, kind: 0 };
+        if (copy_from_user(borrow mut ch as *mut CmsgHdr as *mut void, control.wrappingAdd(off), 16) != 0) {
+            return -EFAULT;
+        }
+        if (ch.len < CMSG_HDR || off.wrappingAdd(ch.len) > controllen) {
+            return -EINVAL;
+        }
+        if (ch.level != LX_SOL_SOCKET || ch.kind != LX_SCM_RIGHTS) {
+            return -EINVAL;
+        }
+        let n = (ch.len - CMSG_HDR) / 4;
+        if (n > (HANDLES_MAX - hs.nr) as u64) {
+            return -EINVAL;
+        }
+        for (i in 0..n) {
+            var fd: i32 = 0;
+            let at = control.wrappingAdd(off).wrappingAdd(CMSG_HDR).wrappingAdd(i * 4);
+            if (copy_from_user(borrow mut fd as *mut i32 as *mut void, at, 4) != 0) {
+                return -EFAULT;
+            }
+            let slot = hs.nr as usize;
+            let rc = handle_transfer_check(
+                t,
+                fd,
+                COSMO_RIGHTS_SAME,
+                borrow mut hs.objs[slot] as *mut *mut kobject,
+                borrow mut hs.rights[slot] as *mut u32,
+            );
+            if (rc != 0) {
+                return rc;
+            }
+            hs.nr = hs.nr + 1;
+        }
+        off = off.wrappingAdd(cmsgAlign(ch.len));
+    }
+    return 0;
+}
+
+/// A datagram's or raw socket's sendmsg: gathered into one buffer and sent once, handles and all.
+/// Safety: in a process's thread; `s` is referenced; `m` is the call's header; `to` and `hp` are live or null.
+unsafe fn sendGathered(s: *mut socket, m: *MsgHdr, to: *AnyAddr, hp: *mut unix_handles, dontwait: bool) -> i64 {
+    let msg = Ptr.toBorrow(m);
+    var iov = Iovec { base: 0, len: 0 };
+    let ip = borrow mut iov as *mut Iovec;
+    var total: usize = 0;
+    for (i in 0..msg.iovlen) {
+        if (!iovAt(msg.iov, i, ip)) {
+            return -EFAULT as i64;
+        }
+        if (!user_range_ok(iov.base, truncate<usize>(iov.len))) {
+            return -EFAULT as i64;
+        }
+        if (iov.len > (SOCK_MAX - total) as u64) {
+            return -EMSGSIZE as i64;
+        }
+        total = total + truncate<usize>(iov.len);
+    }
+    let tmp = kmalloc(if (total != 0) total else 1, 0) as *mut u8;
+    if (tmp.isNull()) {
+        return -ENOMEM as i64;
+    }
+    var rc: i64 = 0;
+    var at: usize = 0;
+    for (i in 0..msg.iovlen) {
+        // The vector is user memory and another thread may have grown an element since it was summed: the second pass
+        // copies no more than the buffer was sized for.
+        if (!iovAt(msg.iov, i, ip) || iov.len > (total - at) as u64 ||
+            copy_from_user(tmp.add(at) as *mut void, iov.base, truncate<usize>(iov.len)) != 0) {
+            rc = -EFAULT as i64;
+            break;
+        }
+        at = at + truncate<usize>(iov.len);
+    }
+    if (rc == 0) {
+        // `at` is what was actually gathered, if an element shrank.
+        if (isUnix(s)) {
+            rc = unix_send(s, tmp as *void, at, uaOf(to), hp, dontwait);
+        } else {
+            rc = ksock_sendto(s, tmp as *void, at, naOf(to));
+        }
+    }
+    kfree(tmp as *mut void);
+    return rc;
+}
+
+/// A stream's sendmsg: element by element; the handles ride with the first element that carries a byte, which is
+/// where Linux puts them.
+/// Safety: in a process's thread; `s` is referenced; `m` is the call's header; `to` and `hp` are live or null.
+unsafe fn sendElements(s: *mut socket, m: *MsgHdr, to: *AnyAddr, hp: *mut unix_handles, dontwait: bool) -> i64 {
+    let msg = Ptr.toBorrow(m);
+    var iov = Iovec { base: 0, len: 0 };
+    let ip = borrow mut iov as *mut Iovec;
+    var rc: i64 = 0;
+    var done: i64 = 0;
+    var any = false;
+    for (i in 0..msg.iovlen) {
+        if (!iovAt(msg.iov, i, ip)) {
+            rc = -EFAULT as i64;
+            break;
+        }
+        if (iov.len == 0) {
+            continue;
+        }
+        if (!user_range_ok(iov.base, truncate<usize>(iov.len))) {
+            rc = -EFAULT as i64;
+            break;
+        }
+        any = true;
+        let w = sockSend(s, iov.base, truncate<usize>(iov.len), to, hp, dontwait);
+        if (w < 0) {
+            rc = w;
+            break;
+        }
+        done = done + w;
+        if (truncate<u64>(w) < iov.len) {
+            break;
+        }
+    }
+    if (!any && rc == 0 && Ptr.toBorrow(hp as *unix_handles).nr > 0 && isUnix(s)) {
+        rc = sockSend(s, 0, 0, to, hp, dontwait); // handles and no bytes
+    }
+    return if (done > 0) done else rc;
+}
+
+/// Safety: the dispatcher's.
+@export("lx_sendmsg")
+unsafe fn sendmsg(a: *mut syscall_args) -> i64 {
+    var m = noMsg();
+    let mp = borrow mut m as *mut MsgHdr;
+    if (copy_from_user(mp as *mut void, arg(a, 1), 56) != 0) {
+        return -EFAULT as i64;
+    }
+    let flags = argU32(a, 2);
+    if (m.iovlen > IOV_MAX) {
+        return -EINVAL as i64;
+    }
+    var to = noAddr();
+    let tp = borrow mut to as *mut AnyAddr;
+    let haveTo = m.name != 0 && m.namelen != 0;
+    if (haveTo) {
+        let parsed = anyAddrFromUser(m.name, m.namelen as usize, tp);
+        if (parsed != 0) {
+            return parsed as i64;
+        }
+    }
+    let s = sockOf(arg32(a, 0), HANDLE_RIGHT_WRITE);
+    if (s.isNull()) {
+        return -EBADF as i64;
+    }
+    var words = [0u64; 49]; // a struct unix_handles, nr 0
+    let hp = borrow mut words as *mut [u64; 49] as *mut unix_handles;
+    var rc = msgHandlesIn(m.control, m.controllen, hp) as i64;
+    if (rc == 0 && !isUnix(s) && Ptr.toBorrow(hp as *unix_handles).nr > 0) {
+        rc = -EINVAL as i64;
+    }
+    let dontwait = (flags & LX_MSG_DONTWAIT) != 0;
+    let dest = if (haveTo) tp as *AnyAddr else 0 as *AnyAddr;
+    if (rc == 0) {
+        rc = if (isStream(s)) sendElements(s, mp as *MsgHdr, dest, hp, dontwait)
+            else sendGathered(s, mp as *MsgHdr, dest, hp, dontwait);
+    }
+    unix_handles_drop(hp); // whatever no message took
+    sockPut(s);
+    return rc;
+}
+
+/// Safety: the dispatcher's.
+@export("lx_recvmsg")
+unsafe fn recvmsg(a: *mut syscall_args) -> i64 {
+    var m = noMsg();
+    let mp = borrow mut m as *mut MsgHdr;
+    if (copy_from_user(mp as *mut void, arg(a, 1), 56) != 0) {
+        return -EFAULT as i64;
+    }
+    let flags = argU32(a, 2);
+    if (m.iovlen > IOV_MAX) {
+        return -EINVAL as i64;
+    }
+    var iov = Iovec { base: 0, len: 0 };
+    let ip = borrow mut iov as *mut Iovec;
+    var total: usize = 0;
+    for (i in 0..m.iovlen) {
+        if (!iovAt(m.iov, i, ip)) {
+            return -EFAULT as i64;
+        }
+        if (!user_range_ok(iov.base, truncate<usize>(iov.len))) {
+            return -EFAULT as i64;
+        }
+        // One receive fills at most SOCK_MAX bytes, so the sum need not grow past it: saturated, as sendmsg's is
+        // bounded.
+        total = if (iov.len > (SOCK_MAX - total) as u64) SOCK_MAX else total + truncate<usize>(iov.len);
+    }
+    let s = sockOf(arg32(a, 0), HANDLE_RIGHT_READ);
+    if (s.isNull()) {
+        return -EBADF as i64;
+    }
+    let cap = if (total >= SOCK_MAX) SOCK_MAX else if (total != 0) total else 1;
+    let tmp = kmalloc(cap, 0) as *mut u8;
+    if (tmp.isNull()) {
+        sockPut(s);
+        return -ENOMEM as i64;
+    }
+    // Room for handles: what the control buffer can hold after a header.
+    var room: u32 = 0;
+    if (m.control != 0 && m.controllen >= CMSG_HDR + 4) {
+        room = truncate<u32>((m.controllen - CMSG_HDR) / 4);
+    }
+    if (room > HANDLES_MAX) {
+        room = HANDLES_MAX;
+    }
+    var words = [0u64; 49]; // a struct unix_handles
+    let hp = borrow mut words as *mut [u64; 49] as *mut unix_handles;
+    let hs = Ptr.toBorrowMut(hp);
+    hs.nr = room;
+    var from = noAddr();
+    let fp = borrow mut from as *mut AnyAddr;
+    var oflags: u32 = 0;
+    var n: i64 = 0;
+    let un = isUnix(s);
+    let want = if (total < cap) total else cap;
+    if (un) {
+        n = unix_recv(
+            s,
+            tmp as *mut void,
+            want,
+            uaMut(fp),
+            hp,
+            borrow mut oflags as *mut u32,
+            (flags & LX_MSG_DONTWAIT) != 0,
+        );
+    } else {
+        hs.nr = 0;
+        n = ksock_recvfrom(s, tmp as *mut void, want, naMut(fp));
+    }
+    // Scatter.
+    var at: usize = 0;
+    for (i in 0..m.iovlen) {
+        if (n <= 0 || at >= truncate<usize>(n)) {
+            break;
+        }
+        if (!iovAt(m.iov, i, ip)) {
+            n = -EFAULT as i64;
+            break;
+        }
+        let left = truncate<usize>(n) - at;
+        let c = if ((left as u64) < iov.len) left else truncate<usize>(iov.len);
+        if (c != 0 && copy_to_user(iov.base, tmp.add(at) as *void, c) != 0) {
+            n = -EFAULT as i64;
+            break;
+        }
+        at = at + c;
+    }
+    kfree(tmp as *mut void);
+    // The handles, in order until the first refusal (MSG_CTRUNC).
+    let t = handles();
+    var installed: usize = 0;
+    var fds = [0i32; 32];
+    var i: usize = 0;
+    while (i < hs.nr as usize && i < 32 && n >= 0) {
+        let hv = handle_install_flags(
+            t,
+            hs.objs[i],
+            hs.rights[i],
+            if ((flags & LX_MSG_CMSG_CLOEXEC) != 0) HANDLE_FLAG_CLOEXEC else 0,
+        );
+        if (hv < 0) {
+            oflags = oflags | COSMO_MSG_HTRUNC;
+            break;
+        }
+        fds[installed] = hv;
+        installed = installed + 1;
+        i = i + 1;
+    }
+    unix_handles_drop(hp);
+    var controllen: u64 = 0;
+    if (n >= 0 && installed > 0) {
+        let bytes = installed * 4;
+        var ch = CmsgHdr { len: CMSG_HDR + bytes as u64, level: LX_SOL_SOCKET, kind: LX_SCM_RIGHTS };
+        if (copy_to_user(m.control, borrow ch as *CmsgHdr as *void, 16) != 0 ||
+            copy_to_user(m.control.wrappingAdd(CMSG_HDR), borrow fds as *[i32; 32] as *void, bytes) != 0) {
+            var j: usize = 0;
+            while (j < installed) {
+                handle_close(t, fds[j]);
+                j = j + 1;
+            }
+            n = -EFAULT as i64;
+        }
+        controllen = cmsgAlign(ch.len);
+        if (controllen > m.controllen) {
+            controllen = m.controllen;
+        }
+    }
+    var mflags: u32 = 0;
+    if ((oflags & COSMO_MSG_HTRUNC) != 0) {
+        mflags = mflags | LX_MSG_CTRUNC;
+    }
+    if ((oflags & COSMO_MSG_TRUNC) != 0) {
+        mflags = mflags | LX_MSG_TRUNC;
+    }
+    if (n >= 0 && m.name != 0 && m.namelen != 0) {
+        // The sender's name, bounded by msg_namelen, the full size back.
+        var name = [0u16; 55]; // a struct lx_sockaddr_un
+        var full: usize = 0;
+        if (un) {
+            full = unix_addr_pack(uaOf(fp as *AnyAddr), UNIX_FAMILY, borrow mut name as *mut [u16; 55] as *mut void);
+        } else {
+            full = lx_sockaddr_from_netaddr(naOf(fp as *AnyAddr), borrow mut name as *mut [u16; 55] as *mut void, 110);
+        }
+        let c = if ((m.namelen as usize) < full) m.namelen as usize else full;
+        if (c != 0 && copy_to_user(m.name, borrow name as *[u16; 55] as *void, c) != 0) {
+            n = -EFAULT as i64;
+        }
+        m.namelen = truncate<u32>(full);
+    }
+    sockPut(s);
+    if (n < 0) {
+        return n;
+    }
+    m.controllen = controllen;
+    m.flags = truncate<i32>(mflags);
+    let umsg = arg(a, 1); // a struct lx_msghdr was read from here, so the offsets below stay in range
+    if (copy_to_user(umsg + 8, borrow m.namelen as *u32 as *void, 4) != 0 ||
+        copy_to_user(umsg + 40, borrow m.controllen as *u64 as *void, 8) != 0 ||
+        copy_to_user(umsg + 48, borrow m.flags as *i32 as *void, 4) != 0) {
+        return -EFAULT as i64;
+    }
+    return n;
+}
+
+/// Safety: the dispatcher's.
+@export("lx_socketpair")
+unsafe fn socketpair(a: *mut syscall_args) -> i64 {
+    if (arg32(a, 0) != LX_AF_UNIX) {
+        return -EAFNOSUPPORT as i64;
+    }
+    let bits = argU32(a, 1);
+    let kind = bits & ((LX_SOCK_NONBLOCK | LX_SOCK_CLOEXEC) ^ 0xFFFFFFFF);
+    let nonblock = (bits & LX_SOCK_NONBLOCK) != 0;
+    if (kind != LX_SOCK_STREAM && kind != LX_SOCK_DGRAM) {
+        return -ESOCKTNOSUPPORT as i64;
+    }
+    if (!user_range_ok(arg(a, 3), 8)) {
+        return -EFAULT as i64;
+    }
+    var x = 0 as *mut socket;
+    var y = 0 as *mut socket;
+    let rc = unix_socketpair(
+        if (kind == LX_SOCK_STREAM) COSMO_SOCK_STREAM else COSMO_SOCK_DGRAM,
+        borrow mut x as *mut *mut socket,
+        borrow mut y as *mut *mut socket,
+    );
+    if (rc != 0) {
+        return rc as i64;
+    }
+    if (nonblock) {
+        ksock_set_nonblock(x, true);
+        ksock_set_nonblock(y, true);
+    }
+    let t = handles();
+    var h = [0i32; 2];
+    let hf = if ((bits & LX_SOCK_CLOEXEC) != 0) HANDLE_FLAG_CLOEXEC else 0;
+    h[0] = handle_install_flags(t, objOf(x), HANDLE_RIGHT_SOCK_CONNECTED, hf);
+    h[1] = if (h[0] < 0) -EMFILE else handle_install_flags(t, objOf(y), HANDLE_RIGHT_SOCK_CONNECTED, hf);
+    sockPut(x);
+    sockPut(y);
+    if (h[0] < 0 || h[1] < 0) {
+        if (h[0] >= 0) {
+            handle_close(t, h[0]);
+        }
+        return -EMFILE as i64;
+    }
+    if (copy_to_user(arg(a, 3), borrow h as *[i32; 2] as *void, 8) != 0) {
+        handle_close(t, h[0]);
+        handle_close(t, h[1]);
+        return -EFAULT as i64;
+    }
+    return 0;
+}

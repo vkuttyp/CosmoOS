@@ -92,6 +92,72 @@ int64_t sys_vcpu_run(struct syscall_args *a);
 int64_t sys_vcpu_stop(struct syscall_args *a);
 int64_t sys_vcpu_irq(struct syscall_args *a);
 
+/* The native calls on reading, writing, the log and closing
+ * (kernel/syscall/io.cee). */
+int64_t sys_read(struct syscall_args *a);
+int64_t sys_write(struct syscall_args *a);
+int64_t sys_log(struct syscall_args *a);
+int64_t sys_close(struct syscall_args *a);
+
+/* The native calls on processes, the asynchronous I/O ring, pipes, handles,
+ * the working directory and introspection (kernel/syscall/procs.cee). */
+int64_t sys_spawn(struct syscall_args *a);
+int64_t sys_exec(struct syscall_args *a);
+int64_t sys_wait(struct syscall_args *a);
+int64_t sys_kill(struct syscall_args *a);
+int64_t sys_thread_kill(struct syscall_args *a);
+int64_t sys_aio_create(struct syscall_args *a);
+int64_t sys_timer_create(struct syscall_args *a);
+int64_t sys_aio_submit(struct syscall_args *a);
+int64_t sys_aio_wait(struct syscall_args *a);
+int64_t sys_pipe(struct syscall_args *a);
+int64_t sys_dup(struct syscall_args *a);
+int64_t sys_getppid(struct syscall_args *a);
+int64_t sys_chdir(struct syscall_args *a);
+int64_t sys_getcwd(struct syscall_args *a);
+int64_t sys_procinfo(struct syscall_args *a);
+int64_t sys_klog(struct syscall_args *a);
+int64_t sys_syscall_filter(struct syscall_args *a);
+int64_t sys_gethostname(struct syscall_args *a);
+int64_t sys_sethostname(struct syscall_args *a);
+
+/* The native sysctl read and write, reboot and getrandom
+ * (kernel/syscall/sysctl.cee). */
+int64_t sys_sysctl(struct syscall_args *a);
+int64_t sys_sysctl_set(struct syscall_args *a);
+int64_t sys_reboot(struct syscall_args *a);
+int64_t sys_getrandom(struct syscall_args *a);
+
+/* The native personality's claim on a program (the CosmoOS note) and the
+ * auxiliary vector it starts one with: at least 14 words, the count
+ * returned (kernel/syscall/personality.cee). */
+struct elf_info;
+struct personality_auxv_args;
+bool native_claims_elf(const struct elf_info *info);
+unsigned native_auxv(struct process *p, const struct elf_info *info, const struct personality_auxv_args *x,
+                     uint64_t *w, unsigned max);
+
+/* The native calls on sockets (kernel/syscall/sockets.cee). */
+int64_t sys_socket(struct syscall_args *a);
+int64_t sys_bind(struct syscall_args *a);
+int64_t sys_listen(struct syscall_args *a);
+int64_t sys_accept(struct syscall_args *a);
+int64_t sys_connect(struct syscall_args *a);
+int64_t sys_sendto(struct syscall_args *a);
+int64_t sys_recvfrom(struct syscall_args *a);
+int64_t sys_shutdown(struct syscall_args *a);
+int64_t sys_getsockname(struct syscall_args *a);
+int64_t sys_getsockopt(struct syscall_args *a);
+int64_t sys_sendmsg(struct syscall_args *a);
+int64_t sys_recvmsg(struct syscall_args *a);
+int64_t sys_socketpair(struct syscall_args *a);
+
+/* The native calls on mappings (kernel/syscall/mmap.cee). */
+int64_t sys_mmap(struct syscall_args *a);
+int64_t sys_msync(struct syscall_args *a);
+int64_t sys_munmap(struct syscall_args *a);
+int64_t sys_mprotect(struct syscall_args *a);
+
 /* The native calls on mounting and the root (kernel/syscall/mount.cee). */
 int64_t sys_mount(struct syscall_args *a);
 int64_t sys_umount(struct syscall_args *a);
