@@ -131,6 +131,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel/syscall/mount.c \
 	kernel/syscall/mmap.c \
 	kernel/syscall/io.c \
+	kernel/syscall/sockets.c \
 	kernel/syscall/personality.c \
 	kernel/syscall/uaccess.c \
 	kernel/syscall/uaccesstest.c \

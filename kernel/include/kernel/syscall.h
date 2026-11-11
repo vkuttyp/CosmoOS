@@ -99,6 +99,21 @@ int64_t sys_write(struct syscall_args *a);
 int64_t sys_log(struct syscall_args *a);
 int64_t sys_close(struct syscall_args *a);
 
+/* The native calls on sockets (kernel/syscall/sockets.cee). */
+int64_t sys_socket(struct syscall_args *a);
+int64_t sys_bind(struct syscall_args *a);
+int64_t sys_listen(struct syscall_args *a);
+int64_t sys_accept(struct syscall_args *a);
+int64_t sys_connect(struct syscall_args *a);
+int64_t sys_sendto(struct syscall_args *a);
+int64_t sys_recvfrom(struct syscall_args *a);
+int64_t sys_shutdown(struct syscall_args *a);
+int64_t sys_getsockname(struct syscall_args *a);
+int64_t sys_getsockopt(struct syscall_args *a);
+int64_t sys_sendmsg(struct syscall_args *a);
+int64_t sys_recvmsg(struct syscall_args *a);
+int64_t sys_socketpair(struct syscall_args *a);
+
 /* The native calls on mappings (kernel/syscall/mmap.cee). */
 int64_t sys_mmap(struct syscall_args *a);
 int64_t sys_msync(struct syscall_args *a);

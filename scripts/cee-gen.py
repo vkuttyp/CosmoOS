@@ -270,6 +270,7 @@ PORTS = [
     ("kernel/syscall/mmap.cee", "kernel/syscall/mmap.c", "The native calls on mappings (syscall.h)", None, False),
     ("kernel/syscall/io.cee", "kernel/syscall/io.c",
      "The bounce, reading and writing an object, and the native read, write, log and close (syscall.h)", None, True),
+    ("kernel/syscall/sockets.cee", "kernel/syscall/sockets.c", "The native calls on sockets (syscall.h)", None, False),
     ("kernel/module/modelf.cee", "kernel/module/modelf.c", "ET_REL module image validation and layout (modelf.h)", None,
      False),
     ("kernel/module/modspec.cee", "kernel/module/modspec.c", "The module.cycle= specification's parsers (module.h)", None,
