@@ -3686,3 +3686,12 @@ See the [history index](README.md).
   - No CeeSafe source changed; the 172 generated files match their sources.
   - Report: `docs/audit/2026-11-11-ceesafec-0.33.0-report.md`.
 
+- **K1, first PR: the native system calls and the Linux socket calls in
+  CeeSafe (2026-11-11, roadmap 1.3).**
+  - `kernel/syscall/native.c` (2,148 lines) is left as the call table, the
+    always-allowed list and the personality record (224 lines): its calls
+    are `mmap.cee`, `io.cee`, `sockets.cee`, `procs.cee`, `sysctl.cee` and
+    `personality.cee`.
+  - `compat/linux/lxsock.cee`: the Linux personality's socket calls, the
+    first section out of `syscalls.c` (4,223 lines left).
+  - Report: `docs/audit/2026-11-11-k1-sa8-syscalls-report.md`.

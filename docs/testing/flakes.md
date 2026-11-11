@@ -5450,3 +5450,28 @@ they failed earlier, on timing bounds. What would name the cause: print
 the source address and the frame's first 42 bytes when this check fails.
 Not on the list: one sighting, no mechanism.
 
+
+## `process-user` over its bound in `test-net-login`'s last boot, AArch64, 2026-11-11
+
+Local validation of K1's first PR (`kernel/syscall/` and
+`compat/linux/lxsock.cee` in CeeSafe, ceesafec 0.33.0), AArch64 debug
+`make test-net-login`, 21:54-22:10 local. The install boot, the net boot
+and the first boot of the reboot stage passed, with `process-user` at
+8700, 8425 and 6794 ms. The last boot, 22:06-22:10, the same image,
+failed `SELFTEST: process-user ... FAIL: check failed:
+clock_since_ns(t0) < 15000000000ULL at line 263 (20396 ms)`, so init did
+not switch to the disk root and the harness reported `no line matching
+'switched to the disk root'`. Its user-mode suite took 18102 ms against
+6656 ms in the boot before it, spread over the sections (`unix` 4893
+against 1134 ms, `fifo` 2932 against 635, `svc` 3692 against 1253, `mmap`
+3480 against 1529; `proc` 854 against 868), and its 525 self-tests
+187188 ms against 143502 ms. The host's one-minute load average was 38.37
+at 22:11:35, a minute after the boot ended, with a fifteen-minute figure
+of 15.49: the load was rising while the boot ran; what loaded the host
+was not identified. A rerun of the whole test, 22:11-22:26, passed in
+887.5 s with `process-user` at 9808, 8098, 7571 and 6621 ms, though the
+one-minute load was above 40 from 22:12 to 22:15 and reached 82.09. The
+matrix's fourteen debug boots of the same tree passed. Candidate, not a
+mechanism: the host's load, as in the entries of 2026-10-25 and above;
+the rerun's pass under a higher sampled load neither confirms nor
+excludes it. Nothing was changed.
