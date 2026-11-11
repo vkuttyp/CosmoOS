@@ -5405,3 +5405,22 @@ have; a rerun of the cancelled job passed (#499's) and is the workaround
 on an older branch. `test-be` prints its stages only when it ends, so a
 job cancelled inside it shows no stage: read the step's times above
 rather than its output.
+
+## An AArch64 debug boot slow throughout on a loaded host, 2026-11-11
+
+Local validation of the ceesafec 0.33.0 pin at `e9047c8c` (no kernel
+source changed), AArch64 debug `make test` at `QEMU_SMP=2`, 19:03-19:09
+local: `boot-test: FAIL after 387.6s`, `timed out after 380s`, with
+`SELFTEST: process-user ... FAIL: check failed: clock_since_ns(t0) <
+15000000000ULL at line 263 (35317 ms)`, `[WATCHDOG] no progress for 40009
+ms`, and `cosmofs-replay` 45850 ms, `syscall-fuzz` 14955 ms and
+`blk-bench` 11670 ms over their budgets. The 525 self-tests took
+336971 ms. The same tree rerun at 20:01-20:05 passed in 198.9 s: 152790 ms
+of self-tests, `cosmofs-replay` 19141 ms, `process-user` 7359 ms. Every
+part was slower by about the same factor (2.2 overall), as in
+[the 2026-10-25 entry](#debug-boots-slow-throughout-under-another-projects-builds-2026-10-25).
+The one-minute load average was 11.81 when the boot started and the
+five-minute figure 24.90 when it ended (1.86 after the rerun); what
+loaded the host was not identified. The matrix's boots before and after
+it (`QEMU_SMP=1`, 165485 ms of self-tests; `QEMU_SMP=4`, 184036 ms)
+passed. Nothing was changed.
