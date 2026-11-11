@@ -1,10 +1,11 @@
-# CosmoOS 1.3 roadmap: a release people can install (proposed)
+# CosmoOS 1.3 roadmap: a release people can install
 
 Written 2026-11-11 on main at `5a36f9c1`, at the owner's request to
-re-evaluate the [2.0 roadmap](roadmap-2.0.md). **Proposed, not adopted.**
-If adopted it replaces 2.0's *order*; 2.0's milestone texts stay as the
-record of the longer work, and [`AGENTS.md`](../AGENTS.md#scope-rules) is
-rewritten to match in the adopting PR.
+re-evaluate the [2.0 roadmap](roadmap-2.0.md). **Adopted by the owner
+2026-11-11** (#510), with the [decisions](#decisions-for-the-owner) as it
+proposed them. It replaces 2.0's *order*; 2.0's milestone texts stay as
+the record of the longer work, and
+[`AGENTS.md`](../AGENTS.md#scope-rules)'s scope rules follow this document.
 
 ## Why a new order
 
@@ -201,7 +202,7 @@ lines left, in sections.
 
 2.0's SA6 remainder, SA9 (drivers), SA10 (the core) and SA11
 (architecture code and the hypervisor), in that order, for three weeks
-from adoption. When the box closes, what is still C is written into the
+from adoption (to 2026-12-02). When the box closes, what is still C is written into the
 floor list with "not yet" beside it, and conversion stops until 1.3 is
 released.
 
@@ -259,8 +260,10 @@ write pays for it.
 
 ## Decisions for the owner
 
-1. **The definition.** This roadmap takes "distributable" to mean virtual
-   machines and one KVM cloud, with a physical machine first after 1.3.
-2. **The cloud** for R4.
-3. **K2's box:** three weeks, or stop the conversion at SA8.
-4. **Python** (1.2's A6): left out of 1.3 here.
+Adopted 2026-11-11 as proposed:
+
+1. **The definition.** "Distributable" means virtual machines and one KVM
+   cloud, with a physical machine first after 1.3.
+2. **The cloud** for R4: open; the owner names it before R4 starts.
+3. **K2's box:** three weeks from 2026-11-11, closing 2026-12-02.
+4. **Python** (1.2's A6): not in 1.3.
