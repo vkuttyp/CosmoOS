@@ -48,12 +48,12 @@ Open lines (struck lines are not counted):
 | Packages and upgrade | 2 | 0 | 2 | 2 | 6 |
 | Quiescence | 0 | 0 | 0 | 3 | 3 |
 | Scheduler and SMP | 0 | 0 | 1 | 5 | 6 |
-| Security and isolation | 0 | 10 | 1 | 2 | 13 |
+| Security and isolation | 0 | 11 | 1 | 2 | 14 |
 | Testing and CI | 9 | 0 | 0 | 9 | 18 |
 | Commands | 1 | 0 | 5 | 1 | 7 |
 | VFS | 3 | 0 | 5 | 3 | 11 |
 | Virtualisation | 3 | 0 | 0 | 6 | 9 |
-| **all** | **45** | **22** | **48** | **100** | **215** |
+| **all** | **45** | **23** | **48** | **100** | **216** |
 
 ## Block devices
 
@@ -300,6 +300,7 @@ Open lines (struck lines are not counted):
 - **SEC-11** usability, L. Container tooling over the existing primitives (with syscall filtering); Docker/Kubernetes compatibility after it.
 - **SEC-12** nice-to-have, S. No supplementary groups at login (`initgroups`).
 - **SEC-13** nice-to-have, M. No setuid/setgid bits or file capabilities (so `AT_SECURE` follows the credentials only).
+- **SEC-14** security, S. `SYS_spawn` copies its request twice (the first fields, then the whole struct once the flags say how long it is) and uses the second copy's flags unchecked: a thread rewriting them between the copies passes a combination the checks refuse (`SETSID` with `SETPGID`, `FOREGROUND` without `SETPGID`) to `process_spawn` (`kernel/syscall/procs.cee`, as `native.c` before it).
 
 ## Testing and CI
 

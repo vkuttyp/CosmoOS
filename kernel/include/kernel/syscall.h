@@ -99,6 +99,28 @@ int64_t sys_write(struct syscall_args *a);
 int64_t sys_log(struct syscall_args *a);
 int64_t sys_close(struct syscall_args *a);
 
+/* The native calls on processes, the asynchronous I/O ring, pipes, handles,
+ * the working directory and introspection (kernel/syscall/procs.cee). */
+int64_t sys_spawn(struct syscall_args *a);
+int64_t sys_exec(struct syscall_args *a);
+int64_t sys_wait(struct syscall_args *a);
+int64_t sys_kill(struct syscall_args *a);
+int64_t sys_thread_kill(struct syscall_args *a);
+int64_t sys_aio_create(struct syscall_args *a);
+int64_t sys_timer_create(struct syscall_args *a);
+int64_t sys_aio_submit(struct syscall_args *a);
+int64_t sys_aio_wait(struct syscall_args *a);
+int64_t sys_pipe(struct syscall_args *a);
+int64_t sys_dup(struct syscall_args *a);
+int64_t sys_getppid(struct syscall_args *a);
+int64_t sys_chdir(struct syscall_args *a);
+int64_t sys_getcwd(struct syscall_args *a);
+int64_t sys_procinfo(struct syscall_args *a);
+int64_t sys_klog(struct syscall_args *a);
+int64_t sys_syscall_filter(struct syscall_args *a);
+int64_t sys_gethostname(struct syscall_args *a);
+int64_t sys_sethostname(struct syscall_args *a);
+
 /* The native calls on sockets (kernel/syscall/sockets.cee). */
 int64_t sys_socket(struct syscall_args *a);
 int64_t sys_bind(struct syscall_args *a);
