@@ -121,6 +121,13 @@ int64_t sys_syscall_filter(struct syscall_args *a);
 int64_t sys_gethostname(struct syscall_args *a);
 int64_t sys_sethostname(struct syscall_args *a);
 
+/* The native sysctl read and write, reboot and getrandom
+ * (kernel/syscall/sysctl.cee). */
+int64_t sys_sysctl(struct syscall_args *a);
+int64_t sys_sysctl_set(struct syscall_args *a);
+int64_t sys_reboot(struct syscall_args *a);
+int64_t sys_getrandom(struct syscall_args *a);
+
 /* The native calls on sockets (kernel/syscall/sockets.cee). */
 int64_t sys_socket(struct syscall_args *a);
 int64_t sys_bind(struct syscall_args *a);

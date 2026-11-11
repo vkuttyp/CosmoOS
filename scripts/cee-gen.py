@@ -274,6 +274,8 @@ PORTS = [
     ("kernel/syscall/procs.cee", "kernel/syscall/procs.c",
      "The native calls on processes, the aio ring, pipes, handles and introspection, and the shared fstat (syscall.h)",
      None, True),
+    ("kernel/syscall/sysctl.cee", "kernel/syscall/sysctl.c",
+     "The native sysctl read and write, reboot and getrandom (syscall.h)", None, True),
     ("kernel/module/modelf.cee", "kernel/module/modelf.c", "ET_REL module image validation and layout (modelf.h)", None,
      False),
     ("kernel/module/modspec.cee", "kernel/module/modspec.c", "The module.cycle= specification's parsers (module.h)", None,

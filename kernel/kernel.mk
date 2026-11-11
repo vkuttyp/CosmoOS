@@ -133,6 +133,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel/syscall/io.c \
 	kernel/syscall/sockets.c \
 	kernel/syscall/procs.c \
+	kernel/syscall/sysctl.c \
 	kernel/syscall/personality.c \
 	kernel/syscall/uaccess.c \
 	kernel/syscall/uaccesstest.c \
