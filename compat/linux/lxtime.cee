@@ -188,6 +188,26 @@ unsafe fn nsFromTimespec(user: u64) -> Got {
     return Got { rc: 0, value: ts[0] * SECOND + ts[1] };
 }
 
+/// `int lx_ns_from_timespec(uint64_t uptr, uint64_t *ns)` (linux_internal.h): nsFromTimespec for the personality's
+/// other files; `ns` is written only on success.
+///
+/// Safety: `ns` is a place for the result; copy_from_user checks the user address.
+@export("lx_ns_from_timespec")
+unsafe fn nsFromTimespecC(user: u64, ns: *mut u64) -> i32 {
+    let got = nsFromTimespec(user);
+    if (got.rc == 0) {
+        ns.write(got.value);
+    }
+    return got.rc;
+}
+
+/// `int64_t lx_put_timespec(uint64_t uptr, uint64_t ns)` (linux_internal.h): putTimespec for the personality's other
+/// files.
+///
+/// Safety: copy_to_user checks the user address.
+@export("lx_put_timespec")
+unsafe fn putTimespecC(user: u64, ns: u64) -> i64 => putTimespec(user, ns);
+
 // --- reading the clocks ----------------------------------------------------------------------------------------------
 
 /// CLOCK_REALTIME and its coarse variant read the wall clock (the RTC at boot plus the monotonic clock, kernel/timer);

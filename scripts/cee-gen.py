@@ -293,6 +293,8 @@ PORTS = [
      "Linux's fork, vfork, clone, execve and the affinity calls (linux_internal.h)", None, False),
     ("compat/linux/lxsys.cee", "compat/linux/lxsys.c",
      "Linux's sysinfo, uname, sethostname and getrandom (linux_internal.h)", None, False),
+    ("compat/linux/lxpoll.cee", "compat/linux/lxpoll.c", "Linux's poll, ppoll, select and pselect6 (linux_internal.h)",
+     None, False),
     ("compat/linux/lxtime.cee", "compat/linux/lxtime.c",
      "Linux's calls on the clocks, sleeping, nice values and rebooting (linux_internal.h)", None, False),
     ("compat/linux/lxident.cee", "compat/linux/lxident.c",

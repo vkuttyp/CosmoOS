@@ -1,0 +1,433 @@
+// lxpoll.cee - The Linux personality's poll, ppoll, select and pselect6 (docs/compat/linux/design.md; kernel/io/poll.c),
+// in CeeSafe (roadmap 1.3 K1). syscalls.c's table names them (linux_internal.h).
+//
+// The two arrays a call allocates are read and written as words: a struct lx_pollfd is one (the fd in its low half,
+// then the events and the returned events, 16 bits each), and a struct io_pollfd two (the object, then the events
+// in the low half of the second and the returned events in its high half). The C compiler checks both layouts (the
+// extern block).
+
+@header(
+    "kernel/errno.h", "kernel/handle.h", "kernel/kmalloc.h", "kernel/object.h", "kernel/poll.h", "kernel/process.h",
+    "kernel/signal.h", "kernel/syscall.h", "kernel/uaccess.h", "linux_abi.h", "linux_internal.h",
+    "uapi/cosmo/syscall.h",
+)
+extern "C" {
+    struct syscall_args {
+        a: [u64; 6];
+    }
+    struct handle_table;
+    struct process {
+        handles: handle_table;
+    }
+    struct kobject;
+    struct kobject_io_type;
+    struct io_pollfd;
+
+    @cvalue(
+        "sizeof(struct lx_pollfd) == 8 && offsetof(struct lx_pollfd, fd) == 0 && offsetof(struct lx_pollfd, events) == 4 && offsetof(struct lx_pollfd, revents) == 6",
+    )
+    const POLLFD_LAYOUT: bool = true;
+    @cvalue(
+        "sizeof(struct io_pollfd) == 16 && offsetof(struct io_pollfd, obj) == 0 && offsetof(struct io_pollfd, events) == 8 && offsetof(struct io_pollfd, revents) == 12 && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__",
+    )
+    const IO_POLLFD_LAYOUT: bool = true;
+    @cvalue("sizeof(struct lx_timeval) == 16 && offsetof(struct lx_timeval, tv_usec) == 8")
+    const TIMEVAL_LAYOUT: bool = true;
+    const LX_POLLIN: u32 = 0x001;
+    const LX_POLLPRI: u32 = 0x002;
+    const LX_POLLOUT: u32 = 0x004;
+    const LX_POLLERR: u32 = 0x008;
+    const LX_POLLHUP: u32 = 0x010;
+    const LX_POLLNVAL: u32 = 0x020;
+    const LX_POLLRDNORM: u32 = 0x040;
+    const LX_POLLWRNORM: u32 = 0x100;
+    const LX_POLLRDHUP: u32 = 0x2000;
+    const LX_POLL_MAX: u32 = 1024;
+    const LX_FD_SETSIZE: i32 = 1024;
+    const COSMO_IO_READABLE: u32 = 1;
+    const COSMO_IO_WRITABLE: u32 = 2;
+    const COSMO_IO_HANGUP: u32 = 4;
+    const COSMO_IO_ERROR: u32 = 8;
+    const IO_POLL_FOREVER: u64 = 0xFFFFFFFFFFFFFFFF;
+    const KMEM_ZERO: u32 = 1;
+    const EBADF: i32 = 9;
+    const ENOMEM: i32 = 12;
+    const EFAULT: i32 = 14;
+    const EINVAL: i32 = 22;
+    fn process_current() -> *mut process;
+    fn copy_to_user(userDst: u64, src: *void, len: usize) -> i32;
+    fn copy_from_user(dst: *mut void, userSrc: u64, len: usize) -> i32;
+    fn kmalloc(size: usize, flags: u32) -> *mut void;
+    fn kfree(ptr: *mut void);
+    fn handle_get(t: *mut handle_table, h: i32, rightsOut: *mut u32) -> *mut kobject;
+    fn kobject_io_of(obj: *kobject) -> *kobject_io_type;
+    fn kobject_put(obj: *mut kobject);
+    fn io_poll(fds: *mut io_pollfd, n: u32, timeoutNs: u64) -> i32;
+    fn signal_blocked() -> u64;
+    fn signal_set_blocked(mask: u64);
+    fn signal_set_blocked_saved(saved: u64);
+    fn lx_ns_from_timespec(uptr: u64, ns: *mut u64) -> i32;
+}
+
+/// select's fd_set: LX_FD_SETSIZE bits.
+const FD_WORDS: usize = 16;
+
+/// Safety: the dispatcher's: `a` is the call's arguments.
+unsafe fn arg(a: *mut syscall_args, i: usize) -> u64 => Ptr.toBorrow(a as *syscall_args).a[i];
+
+/// Safety: in a process's thread.
+unsafe fn handles() -> *mut handle_table {
+    let p = Ptr.toBorrowMut(process_current());
+    return borrow mut p.handles as *mut handle_table;
+}
+
+/// The object handle `fd` names if it can be polled, referenced; null otherwise.
+///
+/// Safety: in a process's thread; the caller puts the object.
+unsafe fn pollable(fd: i32) -> *mut kobject {
+    var rights: u32 = 0;
+    let obj = handle_get(handles(), fd, borrow mut rights as *mut u32);
+    if (obj.isNull()) {
+        return obj;
+    }
+    if (kobject_io_of(obj as *kobject).isNull()) {
+        kobject_put(obj);
+        return 0 as *mut kobject;
+    }
+    return obj;
+}
+
+// --- poll, ppoll ------------------------------------------------------------------------------------------------------
+
+fn pollEventsToIo(ev: u32) -> u32 {
+    var io: u32 = 0;
+    if ((ev & (LX_POLLIN | LX_POLLRDNORM | LX_POLLPRI)) != 0) {
+        io = io | COSMO_IO_READABLE;
+    }
+    if ((ev & (LX_POLLOUT | LX_POLLWRNORM)) != 0) {
+        io = io | COSMO_IO_WRITABLE;
+    }
+    return io;
+}
+
+fn pollEventsFromIo(io: u32, asked: u32) -> u32 {
+    var ev: u32 = 0;
+    if ((io & COSMO_IO_READABLE) != 0) {
+        ev = ev | (asked & (LX_POLLIN | LX_POLLRDNORM | LX_POLLPRI));
+    }
+    if ((io & COSMO_IO_WRITABLE) != 0) {
+        ev = ev | (asked & (LX_POLLOUT | LX_POLLWRNORM));
+    }
+    if ((io & COSMO_IO_HANGUP) != 0) {
+        ev = ev | LX_POLLHUP | (asked & LX_POLLRDHUP);
+    }
+    if ((io & COSMO_IO_ERROR) != 0) {
+        ev = ev | LX_POLLERR;
+    }
+    return ev;
+}
+
+/// A struct lx_pollfd word with its returned events replaced by `revents`.
+fn withRevents(pfd: u64, revents: u32) -> u64 => (pfd & 0x0000FFFFFFFFFFFF) | ((revents & 0xFFFF) as u64 << 48);
+
+/// The shared body: `timeoutNs` already decided (IO_POLL_FOREVER: none).
+///
+/// Safety: in a process's thread; copy_from_user and copy_to_user check the user address.
+unsafe fn doPoll(ufds: u64, n: u32, timeoutNs: u64) -> i64 {
+    if (n > LX_POLL_MAX) {
+        return -EINVAL as i64;
+    }
+    let count = n as usize;
+    var pfds = 0 as *mut u64; // n struct lx_pollfd
+    var fds = 0 as *mut u64;  // n struct io_pollfd, two words each
+    if (count != 0) {
+        pfds = kmalloc(count * 8, 0) as *mut u64;
+        fds = kmalloc(count * 16, KMEM_ZERO) as *mut u64;
+        if (pfds.isNull() || fds.isNull()) {
+            kfree(pfds as *mut void);
+            kfree(fds as *mut void);
+            return -ENOMEM as i64;
+        }
+        if (copy_from_user(pfds as *mut void, ufds, count * 8) != 0) {
+            kfree(pfds as *mut void);
+            kfree(fds as *mut void);
+            return -EFAULT as i64;
+        }
+    }
+    // Resolve the handles once; a closed one is POLLNVAL at once.
+    var nval: i64 = 0;
+    for (i in 0..count) {
+        let pfd = withRevents(pfds.add(i).read(), 0);
+        pfds.add(i).write(pfd);
+        let fd = truncate<i32>(pfd);
+        if (fd < 0) {
+            continue;
+        }
+        let obj = pollable(fd);
+        if (obj.isNull()) {
+            pfds.add(i).write(withRevents(pfd, LX_POLLNVAL));
+            nval += 1;
+            continue;
+        }
+        fds.add(2 * i).write(obj as usize as u64);
+        fds.add(2 * i + 1).write(pollEventsToIo(truncate<u32>(pfd >> 32) & 0xFFFF) as u64);
+    }
+    var rc: i64 = 0;
+    if (nval != 0) {
+        rc = io_poll(fds as *mut io_pollfd, n, 0) as i64 + nval;
+    } else {
+        rc = io_poll(fds as *mut io_pollfd, n, timeoutNs) as i64;
+    }
+    for (i in 0..count) {
+        let obj = fds.add(2 * i).read();
+        if (obj != 0) {
+            if (rc >= 0) {
+                let pfd = pfds.add(i).read();
+                let revents = truncate<u32>(fds.add(2 * i + 1).read() >> 32);
+                pfds.add(i).write(withRevents(pfd, pollEventsFromIo(revents, truncate<u32>(pfd >> 32) & 0xFFFF)));
+            }
+            kobject_put(truncate<usize>(obj) as *mut kobject);
+        }
+    }
+    if (rc >= 0 && count != 0 && copy_to_user(ufds, pfds as *void, count * 8) != 0) {
+        rc = -EFAULT as i64;
+    }
+    kfree(pfds as *mut void);
+    kfree(fds as *mut void);
+    return rc;
+}
+
+/// x86-64's table only: AArch64 has ppoll alone.
+/// Safety: the dispatcher's.
+@export("lx_poll")
+unsafe fn poll(a: *mut syscall_args) -> i64 {
+    let timeoutMs = truncate<i32>(arg(a, 2));
+    let timeoutNs = if (timeoutMs < 0) IO_POLL_FOREVER else truncate<u32>(timeoutMs) as u64 * 1000000;
+    return doPoll(arg(a, 0), truncate<u32>(arg(a, 1)), timeoutNs);
+}
+
+/// ppoll: a timespec (NULL: forever) and a signal mask swapped in for the wait (the core's saved-mask rule restores
+/// it, or a handler's frame records it, exactly as rt_sigsuspend).
+///
+/// Safety: the dispatcher's.
+@export("lx_ppoll")
+unsafe fn ppoll(a: *mut syscall_args) -> i64 {
+    var timeoutNs = IO_POLL_FOREVER;
+    if (arg(a, 2) != 0) {
+        let rc = lx_ns_from_timespec(arg(a, 2), borrow mut timeoutNs as *mut u64);
+        if (rc != 0) {
+            return rc as i64;
+        }
+    }
+    let swap = arg(a, 3) != 0;
+    var mask: u64 = 0;
+    var old: u64 = 0;
+    if (swap) {
+        if (arg(a, 4) != 8) {
+            return -EINVAL as i64;
+        }
+        if (copy_from_user(borrow mut mask as *mut u64 as *mut void, arg(a, 3), 8) != 0) {
+            return -EFAULT as i64;
+        }
+        old = signal_blocked();
+        signal_set_blocked(mask);
+    }
+    let rc = doPoll(arg(a, 0), truncate<u32>(arg(a, 1)), timeoutNs);
+    if (swap) {
+        signal_set_blocked_saved(old);
+    }
+    return rc;
+}
+
+// --- select, pselect6 (the device-readiness unit) --------------------------------------------------------------------
+// Three fd_sets of `nfds` bits, one io_pollfd per fd that has a read or write bit, io_poll, and the sets rewritten
+// with what came back. Linux's own sets are: readable = POLLIN|POLLHUP|POLLERR, writable = POLLOUT|POLLERR,
+// exceptional = POLLPRI -- and no object in this tree reports a priority event (there is no urgent-data path;
+// COSMO_IO_ERROR is POLLERR, which select never puts in the except set), so the except set is polled for nothing and
+// always comes back clear. A bit for a closed fd is -EBADF, as Linux answers; nfds above LX_FD_SETSIZE is -EINVAL.
+// The result is the number of bits set across the three sets.
+
+/// A set read from user memory: `words` words of it, the rest clear; all clear for a null set. Not 0 when the copy
+/// faults.
+///
+/// Safety: copy_from_user checks the user address.
+unsafe fn fdsetIn(bits: *mut [u64; FD_WORDS], user: u64, words: usize) -> i32 {
+    if (user == 0 || words == 0) {
+        return 0;
+    }
+    return if (copy_from_user(bits as *mut void, user, words * 8) != 0) -EFAULT else 0;
+}
+
+fn fdsetTest(bits: borrow [u64; FD_WORDS], fd: u32) -> bool => ((bits[(fd / 64) as usize] >> (fd % 64)) & 1) != 0;
+
+/// Safety: in a process's thread; the copies check the user addresses.
+unsafe fn doSelect(nfds: i32, urd: u64, uwr: u64, uex: u64, timeoutNs: u64) -> i64 {
+    if (nfds < 0 || nfds > LX_FD_SETSIZE) {
+        return -EINVAL as i64;
+    }
+    let limit = truncate<u32>(nfds);
+    let words = ((limit + 63) / 64) as usize;
+    var rd = [0u64; FD_WORDS];
+    var wr = [0u64; FD_WORDS];
+    var ex = [0u64; FD_WORDS];
+    var rc = fdsetIn(borrow mut rd as *mut [u64; FD_WORDS], urd, words);
+    if (rc == 0) {
+        rc = fdsetIn(borrow mut wr as *mut [u64; FD_WORDS], uwr, words);
+    }
+    if (rc == 0) {
+        rc = fdsetIn(borrow mut ex as *mut [u64; FD_WORDS], uex, words);
+    }
+    if (rc != 0) {
+        return rc as i64;
+    }
+    // One entry per fd with a read or write bit. An fd in the except set alone is checked for existence and not
+    // polled: with no event of interest, io_poll would still end the wait on its HANGUP or ERROR and select would
+    // report 0 bits at once -- a timeout that never waited.
+    var n: usize = 0;
+    for (fd in 0..limit) {
+        if (fdsetTest(borrow rd, fd) || fdsetTest(borrow wr, fd)) {
+            n += 1;
+        }
+    }
+    var fds = 0 as *mut u64;   // n struct io_pollfd, two words each
+    var fdnum = 0 as *mut u32; // the fd each entry polls
+    if (n != 0) {
+        fds = kmalloc(n * 16, KMEM_ZERO) as *mut u64;
+        fdnum = kmalloc(n * 4, 0) as *mut u32;
+        if (fds.isNull() || fdnum.isNull()) {
+            kfree(fds as *mut void);
+            kfree(fdnum as *mut void);
+            return -ENOMEM as i64;
+        }
+    }
+    var k: usize = 0;
+    var result: i64 = 0;
+    for (fd in 0..limit) {
+        let r = fdsetTest(borrow rd, fd);
+        let w = fdsetTest(borrow wr, fd);
+        let x = fdsetTest(borrow ex, fd);
+        if (!r && !w && !x) {
+            continue;
+        }
+        let obj = pollable(truncate<i32>(fd));
+        if (obj.isNull()) {
+            result = -EBADF as i64; // Linux: a bit for a closed fd
+            break;
+        }
+        if (!r && !w) {
+            kobject_put(obj); // except only: exists, and that is all select can say of it
+            continue;
+        }
+        fds.add(2 * k).write(obj as usize as u64);
+        fds.add(2 * k + 1).write(((if (r) COSMO_IO_READABLE else 0) | (if (w) COSMO_IO_WRITABLE else 0)) as u64);
+        fdnum.add(k).write(fd);
+        k += 1;
+    }
+    if (result == 0) {
+        result = io_poll(fds as *mut io_pollfd, truncate<u32>(k), timeoutNs) as i64;
+    }
+    // The sets, rewritten: Linux's readable set is POLLIN|POLLHUP|POLLERR, its writable set POLLOUT|POLLERR; the
+    // except set is always clear.
+    if (result >= 0) {
+        rd = [0u64; FD_WORDS];
+        wr = [0u64; FD_WORDS];
+        ex = [0u64; FD_WORDS];
+        result = 0;
+        for (i in 0..k) {
+            let entry = fds.add(2 * i + 1).read();
+            let events = truncate<u32>(entry);
+            let ev = truncate<u32>(entry >> 32);
+            let fd = fdnum.add(i).read();
+            let word = (fd / 64) as usize;
+            if ((events & COSMO_IO_READABLE) != 0 &&
+                (ev & (COSMO_IO_READABLE | COSMO_IO_HANGUP | COSMO_IO_ERROR)) != 0) {
+                rd[word] = rd[word] | (1 << (fd % 64));
+                result += 1;
+            }
+            if ((events & COSMO_IO_WRITABLE) != 0 && (ev & (COSMO_IO_WRITABLE | COSMO_IO_ERROR)) != 0) {
+                wr[word] = wr[word] | (1 << (fd % 64));
+                result += 1;
+            }
+        }
+    }
+    for (i in 0..k) {
+        kobject_put(truncate<usize>(fds.add(2 * i).read()) as *mut kobject);
+    }
+    kfree(fds as *mut void);
+    kfree(fdnum as *mut void);
+    if (result >= 0 && words != 0) {
+        if ((urd != 0 && copy_to_user(urd, borrow rd as *[u64; FD_WORDS] as *void, words * 8) != 0) ||
+            (uwr != 0 && copy_to_user(uwr, borrow wr as *[u64; FD_WORDS] as *void, words * 8) != 0) ||
+            (uex != 0 && copy_to_user(uex, borrow ex as *[u64; FD_WORDS] as *void, words * 8) != 0)) {
+            result = -EFAULT as i64;
+        }
+    }
+    return result;
+}
+
+/// pselect6's sixth argument is Linux's pair { const sigset_t *ss; size_t ss_len }.
+///
+/// Safety: the dispatcher's.
+@export("lx_pselect6")
+unsafe fn pselect6(a: *mut syscall_args) -> i64 {
+    var timeoutNs = IO_POLL_FOREVER;
+    if (arg(a, 4) != 0) {
+        let rc = lx_ns_from_timespec(arg(a, 4), borrow mut timeoutNs as *mut u64);
+        if (rc != 0) {
+            return rc as i64;
+        }
+    }
+    var mask: u64 = 0;
+    var old: u64 = 0;
+    var swap = false;
+    if (arg(a, 5) != 0) {
+        var sa = [0u64; 2]; // ss, ss_len
+        if (copy_from_user(borrow mut sa as *mut [u64; 2] as *mut void, arg(a, 5), 16) != 0) {
+            return -EFAULT as i64;
+        }
+        if (sa[0] != 0) {
+            if (sa[1] != 8) {
+                return -EINVAL as i64;
+            }
+            if (copy_from_user(borrow mut mask as *mut u64 as *mut void, sa[0], 8) != 0) {
+                return -EFAULT as i64;
+            }
+            swap = true;
+        }
+    }
+    if (swap) {
+        old = signal_blocked();
+        signal_set_blocked(mask);
+    }
+    let rc = doSelect(truncate<i32>(arg(a, 0)), arg(a, 1), arg(a, 2), arg(a, 3), timeoutNs);
+    if (swap) {
+        signal_set_blocked_saved(old);
+    }
+    return rc;
+}
+
+/// The legacy select (x86-64's table only): a timeval, which Linux writes the time left back into and this door
+/// leaves as given (documented deviation).
+///
+/// Safety: the dispatcher's.
+@export("lx_select")
+unsafe fn select(a: *mut syscall_args) -> i64 {
+    var timeoutNs = IO_POLL_FOREVER;
+    if (arg(a, 4) != 0) {
+        var tv = [0u64; 2]; // a struct lx_timeval
+        if (copy_from_user(borrow mut tv as *mut [u64; 2] as *mut void, arg(a, 4), 16) != 0) {
+            return -EFAULT as i64;
+        }
+        if (truncate<i64>(tv[0]) < 0 || truncate<i64>(tv[1]) < 0 || truncate<i64>(tv[1]) >= 1000000) {
+            return -EINVAL as i64;
+        }
+        // Clamped as lx_ns_from_timespec clamps: beyond 2^62 ns is "never", and the multiplication below must not
+        // wrap a huge wait into a short one.
+        if (tv[0] >= (1 << 62) / 1000000000) {
+            timeoutNs = 1 << 62;
+        } else {
+            timeoutNs = tv[0] * 1000000000 + tv[1] * 1000;
+        }
+    }
+    return doSelect(truncate<i32>(arg(a, 0)), arg(a, 1), arg(a, 2), arg(a, 3), timeoutNs);
+}
