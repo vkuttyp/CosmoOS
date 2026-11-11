@@ -36,9 +36,11 @@ Backlog SEC-15.
 
 ## Validation
 
-Local, macOS host, at `da65326b`. No step needed a rerun. The matrix ran with a ceesafec 0.37.0 built on this
+Local, macOS host, at `8c005340`'s tree. No step needed a rerun. The matrix ran with a ceesafec 0.37.0 built on this
 machine from the release commit's tree (CeeSafe `e1ed24a`), because the release's binaries were not yet published
-when it started; branch CI uses the published Linux binary.
+when it started. The published macOS binary, run afterwards, generates the same 179 files byte for byte
+(`make cee-check`, and `diff -r` against the matrix's `out/cee`); branch CI uses the published Linux binary
+(SHA-256 `ce9289c43be31d8bb7ce65d7172078ca26b23832b265a68839bce382efa072c3`).
 
 | Step | x86-64 | AArch64 |
 |---|---|---|
