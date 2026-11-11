@@ -286,6 +286,7 @@ PORTS = [
      "Linux's interface ioctls on a socket (linux_internal.h)", None, True),
     ("compat/linux/sigcalls.cee", "compat/linux/sigcalls.c",
      "Linux's signal system calls (linux_internal.h)", None, True),
+    ("compat/linux/lxsock.cee", "compat/linux/lxsock.c", "Linux's socket system calls (linux_internal.h)", None, False),
     ("kernel-services/network/netparse.cee", "kernel-services/network/netparse.c",
      "The network receive path's decoders: frames, TCP segments, DHCP and DNS (netparse_types.h)",
      "kernel/include/kernel/net/netparse_types.h", False),
