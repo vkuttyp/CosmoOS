@@ -123,6 +123,14 @@ analyzer builds exited, a standalone `gmake host-test` passed
 `online-late`; no assertion or budget was changed. The test's startup
 coordination remains a follow-up if it recurs.
 
+**Second sighting, 2026-11-11:** the same two lines
+(`tests/host/test_quiesce.c:425-426`), in a `gmake -j6 host-test` on a
+developer's Mac whose one-minute load average was above 50 (another
+project's test suite, twelve-wide, beside this tree's builds), on the
+branch that pins ceesafec 0.33.0. Three `gmake host-test` runs of the same
+tree at a load near 10 passed `online-late`, as did the run before the
+failing one. The mechanism above fits: nothing was changed.
+
 **Observed once, firmware handover in `test-harness-retry` (2026-10-09):**
 the first x86-64 QEMU process printed no `cosmoboot-uefi` banner during the
 30 s handover window, so `tests/boot/run_boot_test.py` killed it and
