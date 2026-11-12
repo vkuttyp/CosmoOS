@@ -74,6 +74,7 @@ Keys the kernel reads:
 | `random.firmware=off` | the kernel neither mixes nor credits the firmware's seed (boot protocol v10): for a machine whose firmware is not trusted to generate, and for the entropy boot that must be seeded by its virtio-rng alone (`make test-entropy`) |
 | `random.jitter=off` | no timing-jitter collection (docs/kernel/security/design.md §6, "Timing jitter"): on a machine with no other source the pool then stays unseeded, which is what the no-source entropy boot tests |
 | `serial=none` | AArch64: no serial console even when the firmware names one (boot protocol v9, "The serial console"): the framebuffer is the console from the first line. Read by the early console before `bootinfo_init`, with the same bounds. For testing the path a machine without a serial port takes (`make test-platforms`) |
+| `verbose` | the screen shows every line of the kernel's log, as the serial port does; without it the framebuffer console shows the ERROR and PANIC lines and what programs print (docs/kernel/diagnostics/design.md, "The quiet screen"). An image is built with it by `make CMDLINE='root=boot-disk verbose' image` |
 
 The kernel only resolves `root=` (after its partition scan, `root:` log
 line; sysctls `kernel.root` and `kernel.rootdev`); it always starts on

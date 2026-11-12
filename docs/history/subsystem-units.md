@@ -3747,3 +3747,14 @@ See the [history index](README.md).
     root. `make test-upgrade` runs it on both architectures.
   - `docs/releases/v1.1.0.md`.
   - Report: `docs/audit/2026-11-12-r0-upgrade-from-last-report.md`.
+- **R0, second PR: the quiet screen (2026-11-13, roadmap 1.3; the owner's
+  request, for v1.1.0).**
+  - A console sink has a log floor; the framebuffer console's is ERROR,
+    so a screen shows the kernel's errors and what programs print, and
+    the serial port and `dmesg` keep every line. `verbose` on the command
+    line shows the log on the screen again.
+  - The rules are CeeSafe (`kernel/core/fbrules.cee`), with fbcon.c's
+    colour packing and font scale; `kernel/` has no more C than before.
+    Self-test `console-log-floor`; `fb-switch` checks the cursor by a
+    mark of its own.
+  - Report: `docs/audit/2026-11-13-quiet-screen-report.md`.

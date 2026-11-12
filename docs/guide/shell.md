@@ -64,8 +64,10 @@ bin   boot  dev   etc   lib   mnt   proc  root  run   sbin  tmp   usr   var
 `uname` says `Linux`: BusyBox is a static Linux program, and CosmoOS
 runs it under its Linux personality, which answers as Linux does. The
 kernel also logs each program it starts and the status it exits with
-(`[ INFO] process: pid N 'id' exited with status 0`) on the console,
-between the lines the programs print.
+(`[ INFO] process: pid N 'id' exited with status 0`) on the serial
+console, between the lines the programs print. A screen (a virtual
+machine's window) does not show the kernel's informational lines since
+v1.1.0, only its errors and what programs print; `dmesg` has them all.
 
 The commands are BusyBox applets, linked in `/bin`, and CosmoOS's own
 tools in `/sbin`. `/lib` holds musl's `libc.so` and its dynamic linker,

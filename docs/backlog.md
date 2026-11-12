@@ -34,7 +34,7 @@ Open lines (struck lines are not counted):
 | | correctness | security | usability | nice-to-have | total |
 |---|---|---|---|---|---|
 | Block devices | 3 | 0 | 2 | 4 | 9 |
-| Boot chain and verified boot | 0 | 6 | 2 | 1 | 9 |
+| Boot chain and verified boot | 0 | 6 | 3 | 1 | 10 |
 | Build and tooling | 0 | 2 | 0 | 4 | 6 |
 | cosmofs and storage | 4 | 1 | 7 | 13 | 25 |
 | Documentation | 0 | 0 | 1 | 1 | 2 |
@@ -50,10 +50,10 @@ Open lines (struck lines are not counted):
 | Scheduler and SMP | 1 | 0 | 1 | 5 | 7 |
 | Security and isolation | 0 | 11 | 1 | 2 | 14 |
 | Testing and CI | 9 | 0 | 0 | 11 | 20 |
-| Commands | 1 | 0 | 5 | 1 | 7 |
+| Commands | 1 | 0 | 6 | 1 | 8 |
 | VFS | 3 | 0 | 5 | 3 | 11 |
 | Virtualisation | 3 | 0 | 0 | 6 | 9 |
-| **all** | **47** | **23** | **48** | **102** | **220** |
+| **all** | **47** | **23** | **50** | **102** | **222** |
 
 ## Block devices
 
@@ -78,6 +78,7 @@ Open lines (struck lines are not counted):
 - **BOOT-7** usability, S. The loader allocates below 4 GiB only (`LOADER_ALLOC_LIMIT`); a machine with all RAM above cannot boot.
 - **BOOT-9** security, M. No TPM-sealed key: an encrypted root (roadmap 1.2 B5) unlocks unattended only through a key file on the unencrypted ESP; sealing the master key to measured PCRs (needs BOOT-3) is out of B5's scope.
 - **BOOT-8** nice-to-have, S. `direct_map_size` covers the RSDP's tables, not those reached through the FADT (DSDT, FACS).
+- **BOOT-10** usability, S. The loader prints its progress on the screen; the lines show until the kernel clears it for the quiet screen (`docs/kernel/diagnostics/design.md`, "The quiet screen").
 
 ## Build and tooling
 
@@ -345,6 +346,7 @@ Open lines (struck lines are not counted):
 - **USR-6** correctness, S. `cosmo-sh` hands the terminal to a foreground job as its last stage is spawned (COSMO_SPAWN_FOREGROUND), so the group holds every stage when it takes ^C; the earlier stages of a pipeline start in the background for the moment the spawns take, and one that checks the terminal at its first instruction can still stop itself. A start barrier (spawn stopped, continue the group) would close it (Codex on #424).
 - **USR-7** usability, S. No `/dev/urandom` or `/dev/random`: a shell script wanting random or incompressible bytes reads nothing (`head -c N /dev/urandom` gives at most the error); tests use awk's `rand()` or gzip output instead (test-pkgtx, test-fsck).
 - ~~**USR-8** correctness, S. On the installed system `/run/svc` is on the root disk and nothing clears it at boot, so a pid file outlives its service; `svc`'s `running()` trusts any pid `kill(p, 0)` can signal, and a boot where another process has that pid says `svc: dropbear is already running` and never starts it. Seen on the Parallels VM 2026-10-23: `dropbear.pid` held 13 from 2026-10-22, pid 13 was `syslogd` at every boot, and ssh was refused through several boots and upgrades (cleared by hand). Clear `/run` at boot (or mount a ramfs on it), or check the pid is the service's supervisor.~~ Done by #446 (a fresh ramfs on `/run` at every boot; a pid file records the start time and is checked against the supervisor's cmdline; U14).
+- **USR-9** usability, S. The quiet screen shows init's and the services' lines as they print them: there is no one line per service started or failed, as a Linux distribution's boot has.
 
 ## VFS
 

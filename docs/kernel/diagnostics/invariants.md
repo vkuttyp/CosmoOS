@@ -162,3 +162,14 @@ dispatches whatever handler is registered on the NMI vector regardless;
 only with no handler registered does the answer decide the outcome.
 **Checked by** `selftest-nmi` (`arch/testhooks.h`, the paranoid path
 under test) and review of `x86_trap_paranoid`.
+
+## I-DIAG-21: A sink's log floor hides log lines only, and nothing in a panic
+
+A sink with a floor is not given the kernel's log lines below it. It is
+given every write that is not a log line (a program's output, `kprintf`,
+`dmesg`'s copy of the ring), and in panic mode it is given everything.
+A sink with no floor, as the serial port's is, loses nothing, and the
+ring holds every line: what the screen does not show is in `dmesg`.
+**Checked by** `console-log-floor` (two sinks, the same four writes),
+and by review of `console_write_log`'s panic path, which calls
+`write_unlocked` before any floor is read.
