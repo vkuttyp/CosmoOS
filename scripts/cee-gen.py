@@ -315,6 +315,8 @@ PORTS = [
      "Linux's eventfd, signalfd, timerfd, memfd_create, ftruncate and epoll (linux_internal.h)", None, True),
     ("compat/linux/lxdir.cee", "compat/linux/lxdir.c",
      "Linux's getdents64, mkdir, rmdir, unlink, access and mknod (linux_internal.h)", None, True),
+    ("compat/linux/lxhooks.cee", "compat/linux/lxhooks.c",
+     "The Linux personality's process hooks, auxiliary vector and prctl (linux_internal.h)", None, True),
     ("compat/linux/lxtime.cee", "compat/linux/lxtime.c",
      "Linux's calls on the clocks, sleeping, nice values and rebooting (linux_internal.h)", None, False),
     ("compat/linux/lxident.cee", "compat/linux/lxident.c",

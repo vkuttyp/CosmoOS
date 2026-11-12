@@ -22,7 +22,7 @@ int linux_signal_frame(struct arch_user_regs *regs, const struct sigaction_k *ac
  * address stored in *where; not mapped on x86-64 (*where 0), where a frame
  * needs SA_RESTORER. */
 int linux_sigtramp_map(struct process *p, uint64_t *where);
-/* syscalls.c: where the calling process's trampoline is (0: none). */
+/* lxhooks.cee: where the calling process's trampoline is (0: none). */
 uint64_t linux_sigtramp_addr(const struct process *p);
 
 int64_t lx_rt_sigaction(struct syscall_args *a);
@@ -143,7 +143,7 @@ struct lx_shm_attach {
     struct shm_segment *seg;
 };
 
-/* A process's state at the Linux door (process->linux): syscalls.c makes
+/* A process's state at the Linux door (process->linux): lxhooks.cee makes
  * it at exec and fork and releases it; lxmem.cee moves the break and
  * keeps the attaches. */
 struct linux_state {
@@ -154,6 +154,8 @@ struct linux_state {
     struct lx_shm_attach *shm_attaches;   /* singly linked; head insert */
     spinlock_t shm_lock;                  /* guards shm_attaches (threads share it) */
 };
+/* sizeof(struct linux_state), as a C constant macro CeeSafe can read (lxhooks.cee). */
+#define LX_STATE_BYTES() sizeof(struct linux_state)
 
 /* lxmem.cee: the break, mappings and System V shared memory. */
 int64_t lx_brk(struct syscall_args *a);
@@ -252,6 +254,20 @@ int64_t lx_unlink(struct syscall_args *a);
 int64_t lx_access(struct syscall_args *a);
 int64_t lx_mknod(struct syscall_args *a);
 int64_t lx_mknodat(struct syscall_args *a);
+
+/* lxhooks.cee: what the personality's record names (process.c calls them
+ * through it), prctl, and the handler of a number with no call. */
+struct elf_info;
+struct personality_auxv_args;
+int linux_process_init(struct process *p, const struct elf_info *info);
+void linux_process_release(struct process *p);
+int linux_process_fork(struct process *parent, struct process *child);
+int linux_process_exec(struct process *p, const struct elf_info *info);
+unsigned linux_auxv(struct process *p, const struct elf_info *info, const struct personality_auxv_args *x, uint64_t *w,
+                    unsigned max);
+bool linux_claims_elf(const struct elf_info *info);
+int64_t lx_prctl(struct syscall_args *a);
+int64_t lx_unknown(struct syscall_args *a);
 
 /* lxsock.cee: the socket calls. lx_accept is accept4 too (its fourth
  * argument, the flags, is 0 from accept). */
