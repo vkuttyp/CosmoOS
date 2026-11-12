@@ -200,6 +200,9 @@ int64_t lx_sync(struct syscall_args *a);
 int64_t lx_fsync(struct syscall_args *a);
 int64_t lx_umask(struct syscall_args *a);
 
+/* lxtty.cee: ioctl. */
+int64_t lx_ioctl(struct syscall_args *a);
+
 /* lxsock.cee: the socket calls. lx_accept is accept4 too (its fourth
  * argument, the flags, is 0 from accept). */
 int64_t lx_socket(struct syscall_args *a);

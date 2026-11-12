@@ -305,6 +305,8 @@ PORTS = [
      "Linux's chmod, chown, chroot and utimensat families (linux_internal.h)", None, False),
     ("compat/linux/lxname.cee", "compat/linux/lxname.c",
      "Linux's calls on names and descriptors: unlinkat, rename, dup, pipe, fcntl (linux_internal.h)", None, True),
+    ("compat/linux/lxtty.cee", "compat/linux/lxtty.c",
+     "Linux's ioctl: a terminal's requests, a character device's, a socket's (linux_internal.h)", None, False),
     ("compat/linux/lxtime.cee", "compat/linux/lxtime.c",
      "Linux's calls on the clocks, sleeping, nice values and rebooting (linux_internal.h)", None, False),
     ("compat/linux/lxident.cee", "compat/linux/lxident.c",
