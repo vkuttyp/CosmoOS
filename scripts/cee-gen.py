@@ -309,6 +309,8 @@ PORTS = [
      "Linux's ioctl: a terminal's requests, a character device's, a socket's (linux_internal.h)", None, False),
     ("compat/linux/lxio.cee", "compat/linux/lxio.c",
      "Linux's reads, writes and opens: read, pread64, writev, openat, lseek (linux_internal.h)", None, True),
+    ("compat/linux/lxstat.cee", "compat/linux/lxstat.c",
+     "Linux's stat calls and symbolic links (linux_internal.h)", None, True),
     ("compat/linux/lxtime.cee", "compat/linux/lxtime.c",
      "Linux's calls on the clocks, sleeping, nice values and rebooting (linux_internal.h)", None, False),
     ("compat/linux/lxident.cee", "compat/linux/lxident.c",

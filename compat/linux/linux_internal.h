@@ -216,6 +216,17 @@ int64_t lx_openat(struct syscall_args *a);
 int64_t lx_close(struct syscall_args *a);
 int64_t lx_lseek(struct syscall_args *a);
 
+/* lxstat.cee: the stat calls and symbolic links. */
+int64_t lx_stat(struct syscall_args *a);
+int64_t lx_lstat(struct syscall_args *a);
+int64_t lx_fstat(struct syscall_args *a);
+int64_t lx_newfstatat(struct syscall_args *a);
+int64_t lx_statx(struct syscall_args *a);
+int64_t lx_readlink(struct syscall_args *a);
+int64_t lx_readlinkat(struct syscall_args *a);
+int64_t lx_symlink(struct syscall_args *a);
+int64_t lx_symlinkat(struct syscall_args *a);
+
 /* lxsock.cee: the socket calls. lx_accept is accept4 too (its fourth
  * argument, the flags, is 0 from accept). */
 int64_t lx_socket(struct syscall_args *a);
