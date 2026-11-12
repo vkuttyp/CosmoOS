@@ -252,6 +252,14 @@ unsafe fn processFork(parent: *mut process, child: *mut process) -> i32 {
             while (!a.isNull()) {
                 let src = Ptr.toBorrow(a as *lx_shm_attach);
                 let r = pool;
+                if (r.isNull()) {
+                    // m <= n under the lock: the pool holds a record for each of the parent's.
+                    var buffer: [u8; 128] = [0; 128];
+                    var line = TextWriter.create(mut buffer[..]);
+                    line.text("assertion failed: fork's attach pool ran out at compat/linux/lxhooks.cee");
+                    KernelLog.panic(line);
+                    break; // not reached: the panic does not return
+                }
                 let rec = Ptr.toBorrowMut(r);
                 pool = rec.next;
                 rec.next = 0 as *mut lx_shm_attach;
