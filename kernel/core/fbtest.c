@@ -318,8 +318,9 @@ bool selftest_fb_switch(const char **reason)
         }
         /* Another CPU's line between ours and the switch's: tried again. */
         kept = false;
+        console_puts("!");   /* at the cursor: after the typed text on a quiet screen, under the switch's notice on a verbose one */
         for (row = 1; row < g.rows && !kept; row++)
-            kept = cells_are(&g, 0, row, "fb-switch typed") &&   /* then, on a verbose screen, the switch's notice */
+            kept = cells_are(&g, 0, row, fbcon_log_floor() ? "fb-switch typed!" : "fb-switch typed[ INFO] fbcon: ") &&
                    cells_are(&g, 0, row - 1, "fb-switch kept");
         tty_get_size(con, &sz);
         sized = sz.cols == 40 && sz.rows == 12;
