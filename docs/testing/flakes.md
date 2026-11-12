@@ -5475,3 +5475,29 @@ matrix's fourteen debug boots of the same tree passed. Candidate, not a
 mechanism: the host's load, as in the entries of 2026-10-25 and above;
 the rerun's pass under a higher sampled load neither confirms nor
 excludes it. Nothing was changed.
+
+
+## `sched-load`: a placement probe on the spinner's CPU, AArch64 chaos boot, 2026-11-11
+
+Branch CI of K1's second PR (#513, the native table in CeeSafe), run
+43122157926 on `07056a82`, job 130865168731 (`build, boot, analyze
+(aarch64, stress)`), the step "Boot test under a chaos migrator
+(debug)": `[ERROR] selftest: sched-load: 1 of 4 new threads were placed
+on cpu 0, which was running a thread (load 1)`, then `SELFTEST:
+sched-load ... FAIL: placement chose a CPU that was already running a
+thread over an idle one (30 ms)`. It was the boot's one failure of 525;
+`sched-spread`, the test before it, passed. The spare CPU read load 0
+before the probes were made, or the placement half would have been
+skipped. The same job passed on the branch's previous commit
+(`a078f468`, run 43110341470); `07056a82` changes the kernel's objects
+by the location constants of `out/cee/kernel/syscall/files.c` alone (a
+build-time assertion and three source lines), and `sched-load` makes
+kernel threads only. First sighting of this message
+(`kernel/scheduler/smptest.c`, `sched_load_pinned`). Candidate, not a
+mechanism: a probe is not pinned and records the CPU it ran on, not the
+one it was placed on, and the chaos migrator moves threads between the
+two; the test reads the spare CPU's load once, before making four
+probes one after another. What would name the cause: record the CPU
+`thread_create` chose beside the one the probe ran on, and the
+migrator's move count across the probes. Not on the list: one sighting,
+no mechanism. Nothing was changed.
