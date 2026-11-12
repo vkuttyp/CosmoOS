@@ -371,7 +371,7 @@ that file. Each stage boots the one installed disk; logs in
 | `crash-set` | stopped after the set switch: the next boot is already A, A |
 | `space` | a root rollback pending (`cosmo-snap rollback --no-reboot`): the upgrade refused; then the root filled: refused, naming the KiB needed and free; the ESP byte for byte as it was |
 | `pending` | an upgrade to B stopped after its set switch: `--repair` finishes its base pass; then B, B |
-| `last` | on a disk of its own, from the published `BE_LAST_TAG` (v1.0.14), the release before this build (roadmap 1.3 R0): it installs itself, its own `cosmo-upgrade` takes the environment and switches to A; A boots verified with the build's key on its own base system and `--list` names the environment; A's `--rollback` reboots into v1.0.14 verified with the release key, with the `/etc` file as it was before the upgrade. `BE_ONLY=last` runs it alone |
+| `last` | on a disk of its own, from the published `BE_LAST_TAG` (v1.0.14), the release before this build (roadmap 1.3 R0): it installs itself, its own `cosmo-upgrade` takes the environment and switches to A; A boots verified on its own base system, whose version `--list` gives and which is not v1.0.14's, and `--list` names the environment; A's `--rollback` reboots into v1.0.14 verified with the release key, with the `/etc` file as it was before the upgrade. `BE_ONLY=last` runs it alone |
 
 ## `make test-net-login` (`tests/boot/net_login_test.py`)
 

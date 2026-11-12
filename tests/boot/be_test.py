@@ -381,12 +381,13 @@ def stage_last(args, port, results):
         raise
     b = boot("last-new", sub)
     try:
+        # Which set booted is told by its version, not its key: a release-signed build has v1.0.14's key.
         key = need(b.text(), r"^\[ INFO\] boot: verified boot, key ([0-9a-f]+) ", "A's verified boot").group(1)
-        if key == RELEASE_KEY:
-            raise Fail(f"last-new: the boot after the upgrade is still verified with the release key: {LAST}'s set")
         out = sh(b, f"cosmo-upgrade --list && echo after > {mark} && sync", "list")
         a = need(out, r"^cosmo-upgrade: the root's base system is the current set's \((v\S+), ([0-9a-f]{12})\)$",
                  "--list on A: what the root's files are")
+        if a.group(1) == LAST:
+            raise Fail(f"last-new: the set that booted after the upgrade is still {LAST}'s")
         if re.search(r"^cosmo-upgrade: the root's record says", out, re.M):
             raise Fail(f"last-new: --list says the record is wrong: {out[-600:]!r}")
         need(out, rf"^{re.escape(env)}\s+previous\s+[0-9a-f]{{12}}\s+on the root$", f"--list: {LAST}'s environment")
@@ -407,8 +408,8 @@ def stage_last(args, port, results):
     except Exception:
         b.kill()
         raise
-    results.append(f"last: {LAST} -> A ({LAST}'s cosmo-upgrade, environment {env}); A booted verified with the "
-                   f"build's key on its own base system ({a.group(1)}); A's --rollback returned {LAST}'s set and the "
+    results.append(f"last: {LAST} -> A ({LAST}'s cosmo-upgrade, environment {env}); A booted verified (key {key}) on its "
+                   f"own base system ({a.group(1)}); A's --rollback returned {LAST}'s set and the "
                    f"environment's root; {time.monotonic() - t0:.1f}s")
 
 

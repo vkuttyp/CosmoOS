@@ -16,8 +16,9 @@ Branch `r0-v110` from main at `3b05eeb8` (#516).
   1. the published v1.0.14's live image installs itself and boots verified with the release key;
   2. the build's key is trusted, a file `/etc/r0-note` says `before`, and v1.0.14's own `/sbin/cosmo-upgrade`
      takes an environment and switches to this build's set;
-  3. the build boots verified with a key that is not the release key; `cosmo-upgrade --list` says the root's base
-     system is the current set's, names the environment, and does not say the record is wrong; the note is
+  3. the build boots verified; `cosmo-upgrade --list` says the root's base system is the current set's, with a
+     version that is not v1.0.14 (the key does not tell: a release-signed build has v1.0.14's), names the
+     environment, and does not say the record is wrong; the note is
      rewritten `after`;
   4. the build's `cosmo-upgrade --rollback` records the root's rollback and reboots;
   5. v1.0.14 boots verified with the release key and the note reads `before`.

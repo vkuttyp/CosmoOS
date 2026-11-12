@@ -498,16 +498,18 @@ BE_OLDER_DIR := $(ROOT)/.cache/releases/$(BE_OLDER_TAG)
 # release's own cosmo-upgrade to this build's set, and back. BE_ONLY=last runs it alone.
 BE_LAST_TAG ?= v1.0.14
 BE_LAST_DIR := $(ROOT)/.cache/releases/$(BE_LAST_TAG)
+# Fetched only for a run that has the stage: all of them, or BE_ONLY=last.
+BE_USES_LAST = $(if $(BE_ONLY),$(filter last,$(BE_ONLY)),yes)
 BE_ONLY ?=
 test-be: RELEASE_DIR = $(UPGRADE_SET_DIR)
 test-encrypt test-encrypt-b1b4: RELEASE_DIR = $(UPGRADE_SET_DIR)
 test-be: release-set $(IMAGE)
 	$(Q)$(PYTHON) $(ROOT)/tools/fetch-release.py --tag $(BE_OLDER_TAG) --arch $(ARCH) --dest $(BE_OLDER_DIR)
-	$(Q)$(PYTHON) $(ROOT)/tools/fetch-release.py --tag $(BE_LAST_TAG) --arch $(ARCH) --dest $(BE_LAST_DIR)
+	$(Q)$(if $(BE_USES_LAST),$(PYTHON) $(ROOT)/tools/fetch-release.py --tag $(BE_LAST_TAG) --arch $(ARCH) --dest $(BE_LAST_DIR),true)
 	$(Q)QEMU_ARCH=$(ARCH) QEMU_MEM=$(QEMU_MEM) QEMU_SMP=$(QEMU_SMP) QEMU_ACCEL=$(QEMU_ACCEL) \
 		$(PYTHON) $(ROOT)/tests/boot/be_test.py --image $(IMAGE) --set $(UPGRADE_SET_DIR) --key $(MODSIGN_KEY) \
 		--arch $(ARCH) --workdir $(OUT)/test-be --timeout $(BOOT_TIMEOUT) \
-		--older $(BE_OLDER_DIR)/cosmoos-$(ARCH).img --last $(BE_LAST_DIR)/cosmoos-$(ARCH).img \
+		--older $(BE_OLDER_DIR)/cosmoos-$(ARCH).img $(if $(BE_USES_LAST),--last $(BE_LAST_DIR)/cosmoos-$(ARCH).img) \
 		$(if $(BE_ONLY),--only $(BE_ONLY))
 
 # CFS-32's acceptance test (tests/boot/large_test.py): the published
