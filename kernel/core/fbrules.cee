@@ -1,0 +1,256 @@
+// fbrules.cee - The framebuffer console's rules that draw nothing (docs/kernel/diagnostics/design.md, "fbcon.c" and
+// "The quiet screen"), in CeeSafe: which of the kernel's log lines the screen shows, a colour as a pixel of the
+// screen's format, how large the font is drawn; and the self-test console-log-floor. fbcon.c does the drawing and
+// owns the sink.
+//
+// The quiet screen: the framebuffer shows the kernel's errors and panics, and everything that is not a log line --
+// the banner, programs' output, the shell. The informational lines stay on the serial port and in the ring (`dmesg`).
+// `verbose` on the command line shows every line here too.
+
+@header(
+    "kernel/bootinfo.h", "kernel/cmdline.h", "kernel/console.h", "kernel/fbcon.h", "kernel/log.h",
+    "kernel/selftest.h",
+)
+extern "C" {
+    /// bootinfo.h: a validated framebuffer's colour channels.
+    struct bootinfo_framebuffer {
+        red_shift: u8;
+        red_bits: u8;
+        green_shift: u8;
+        green_bits: u8;
+        blue_shift: u8;
+        blue_bits: u8;
+    }
+    /// console.h: an output device.
+    struct console_sink {
+        name: *CChar;
+        write: extern "C" fn(*mut console_sink, *CChar, usize);
+        log_floor: i32;
+    }
+
+    fn cmdline_get(key: *CChar, out: *mut CChar, outLen: usize) -> i32;
+    fn console_register(sink: *mut console_sink);
+    fn console_unregister(sink: *mut console_sink);
+    fn console_puts(s: *CChar);
+    fn klog(level: u32, format: *CChar, ...);
+
+    // log.h's levels, which the C compiler checks.
+    const KLOG_DEBUG: i32 = 0;
+    const KLOG_INFO: i32 = 1;
+    const KLOG_WARN: i32 = 2;
+    const KLOG_ERROR: i32 = 3;
+    const KLOG_PANIC: i32 = 4;
+}
+
+/// Above every level: what is not a log line passes every floor.
+const NOT_A_LOG_LINE: i32 = 2147483647;
+/// The length of a level's tag, `[ INFO] `.
+const TAG: usize = 8;
+const NEWLINE: u8 = 10;
+
+// ---- Which log lines the screen shows ----
+
+/// Whether `line[at..]` begins with `s`.
+fn beginsAt(line: Slice<u8>, at: usize, s: StringView) -> bool {
+    let b = s.bytes();
+    if (line.length < at || line.length - at < b.length) {
+        return false;
+    }
+    var i: usize = 0;
+    while (i < b.length) {
+        if (line[at + i] != b[i]) {
+            return false;
+        }
+        i += 1;
+    }
+    return true;
+}
+
+/// The level a log line's first bytes name, by log.c's tags, or NOT_A_LOG_LINE.
+fn levelOf(head: Slice<u8>) -> i32 {
+    if (beginsAt(head, 0, "[DEBUG] ")) { return KLOG_DEBUG; }
+    if (beginsAt(head, 0, "[ INFO] ")) { return KLOG_INFO; }
+    if (beginsAt(head, 0, "[ WARN] ")) { return KLOG_WARN; }
+    if (beginsAt(head, 0, "[ERROR] ")) { return KLOG_ERROR; }
+    if (beginsAt(head, 0, "[PANIC] ")) { return KLOG_PANIC; }
+    return NOT_A_LOG_LINE;
+}
+
+/// The log's text without the lines below `floor`, in place: the new length. A line is hidden if it begins with the
+/// tag of a level below the floor; the text is the ring's (klog_copy), whole lines.
+fn dropHidden(buf: SliceMut<u8>, floor: i32) -> usize {
+    var out: usize = 0;
+    var at: usize = 0;
+    while (at < buf.length) {
+        var end = at;
+        while (end < buf.length && buf[end] != NEWLINE) {
+            end += 1;
+        }
+        if (end < buf.length) {
+            end += 1;
+        }
+        var head: [u8; 8] = [0; 8];
+        var h: usize = 0;
+        while (h < TAG && at + h < end) {
+            head[h] = buf[at + h];
+            h += 1;
+        }
+        if (levelOf(head[..h]) >= floor) {
+            var k = at;
+            while (k < end) {
+                buf[out] = buf[k];
+                out += 1;
+                k += 1;
+            }
+        }
+        at = end;
+    }
+    return out;
+}
+
+/// Safety: fbcon.h's contract: `buf` points to `n` writable bytes nothing else uses during the call.
+@export("fbcon_drop_hidden")
+unsafe fn dropHiddenC(buf: *mut CChar, n: usize, floor: i32) -> usize =>
+    dropHidden(SliceMut.fromRaw(buf as *mut u8, n), floor);
+
+/// The screen's log floor: ERROR, or none with `verbose` on the command line.
+/// Safety: after bootinfo_init, which the command line needs.
+@export("fbcon_log_floor")
+unsafe fn logFloorC() -> i32 {
+    var value: [u8; 2] = [0; 2];
+    let found = cmdline_get("verbose\0".ptr as *CChar, borrow mut value[0] as *mut u8 as *mut CChar, 2);
+    return if (found == -1) KLOG_ERROR else 0;
+}
+
+// ---- Colours and the font's size ----
+
+/// An eight-bit intensity in a channel of `bits` bits. Deeper channels exist (ten bits a colour is a real mode) and
+/// the validator allows them, so this scales both ways. A channel the validator would refuse gives 0, not a failed
+/// shift.
+fn channel(value8: u32, bits: u8, shift: u8) -> u32 {
+    if (bits > 32 || shift >= 32) {
+        return 0;
+    }
+    let scaled = if (bits >= 8) value8.wrappingShl((bits - 8) as u32) else value8 >> ((8 - bits) as u32);
+    return scaled.wrappingShl(shift as u32);
+}
+
+/// Safety: fbcon.h's contract: `fb` points to a live framebuffer description.
+@export("fbcon_pack")
+unsafe fn packC(fb: *bootinfo_framebuffer, r: u32, g: u32, b: u32) -> u32 {
+    let f = Ptr.toBorrow(fb);
+    return channel(r & 0xff, f.red_bits, f.red_shift) | channel(g & 0xff, f.green_bits, f.green_shift) |
+        channel(b & 0xff, f.blue_bits, f.blue_shift);
+}
+
+/// How many screen pixels a font pixel is, each way. The face is 8x16, the size of a PC or Linux text console, and is
+/// drawn one-to-one up to 1920x1080 (Parallels Desktop's 1024x768: 128x48 cells, the owner's choice on 2026-10-13
+/// after trying 2x). A screen of twice that each way (4K) and up draws it larger: min(width / 1920, height / 1080),
+/// 1 to `max`.
+@export("fbcon_scale")
+fn scaleC(width: u32, height: u32, max: u32) -> u32 {
+    let s = if (width / 1920 < height / 1080) width / 1920 else height / 1080;
+    if (s < 1) {
+        return 1;
+    }
+    return if (s > max) max else s;
+}
+
+// ---- The self-test console-log-floor ----
+
+/// The two sinks' addresses, and what each was given of the test's lines.
+static QUIET_SINK: AtomicUSize = AtomicUSize.constant(0);
+static QUIET_DEBUG: AtomicU32 = AtomicU32.constant(0);
+static QUIET_INFO: AtomicU32 = AtomicU32.constant(0);
+static QUIET_PLAIN: AtomicU32 = AtomicU32.constant(0);
+static ALL_DEBUG: AtomicU32 = AtomicU32.constant(0);
+static ALL_INFO: AtomicU32 = AtomicU32.constant(0);
+static ALL_PLAIN: AtomicU32 = AtomicU32.constant(0);
+
+/// Count one of the test's lines: a DEBUG or an INFO log line that carries the test's mark, or the mark alone.
+/// Safety: the console's call, under its lock: `s` points to `len` readable bytes.
+@callback
+@context(atomic)
+unsafe fn countLine(sink: *mut console_sink, s: *CChar, len: usize) {
+    let line = Slice.fromRaw(s as *u8, len);
+    let quiet = sink as usize == QUIET_SINK.load();
+    if (beginsAt(line, TAG, "console-log-floor: ")) {
+        if (beginsAt(line, 0, "[DEBUG] ")) {
+            if (quiet) { QUIET_DEBUG.fetchAdd(1); } else { ALL_DEBUG.fetchAdd(1); }
+        } else if (beginsAt(line, 0, "[ INFO] ")) {
+            if (quiet) { QUIET_INFO.fetchAdd(1); } else { ALL_INFO.fetchAdd(1); }
+        }
+    } else if (beginsAt(line, 0, "console-log-floor: ")) {
+        if (quiet) { QUIET_PLAIN.fetchAdd(1); } else { ALL_PLAIN.fetchAdd(1); }
+    }
+}
+
+/// Safety: `reason` is the runner's; `why` is a zero-terminated literal.
+unsafe fn failed(reason: *mut *CChar, why: StringView) -> bool {
+    reason.write(why.ptr as *CChar);
+    return false;
+}
+
+/// console-log-floor: a sink with a floor is given the log lines at or above it and everything that is not a log
+/// line; a sink without one is given all of it. Two sinks, the same four writes; then the replay's filter on a text.
+/// Safety: the self-test runner's call; `reason` is its.
+@export("selftest_console_log_floor")
+unsafe fn logFloorTest(reason: *mut *CChar) -> bool {
+    var quiet: console_sink;
+    var all: console_sink;
+    quiet.name = "selftest-floor\0".ptr as *CChar;
+    quiet.write = countLine;
+    quiet.log_floor = KLOG_INFO;
+    all.name = "selftest-nofloor\0".ptr as *CChar;
+    all.write = countLine;
+    let quietSink = borrow mut quiet as *mut console_sink;
+    let allSink = borrow mut all as *mut console_sink;
+    QUIET_SINK.store(quietSink as usize);
+    QUIET_DEBUG.store(0);
+    QUIET_INFO.store(0);
+    QUIET_PLAIN.store(0);
+    ALL_DEBUG.store(0);
+    ALL_INFO.store(0);
+    ALL_PLAIN.store(0);
+
+    console_register(quietSink);
+    console_register(allSink);
+    klog(truncate<u32>(KLOG_DEBUG), "console-log-floor: a line below the floor\0".ptr as *CChar);
+    klog(truncate<u32>(KLOG_DEBUG), "console-log-floor: another\0".ptr as *CChar);
+    klog(truncate<u32>(KLOG_INFO), "console-log-floor: a line at the floor\0".ptr as *CChar);
+    console_puts("console-log-floor: not a log line\n\0".ptr as *CChar);
+    console_unregister(allSink);
+    console_unregister(quietSink);
+
+    klog(
+        truncate<u32>(KLOG_INFO),
+        "selftest: console-log-floor: the sink with a floor at INFO was given %u DEBUG, %u INFO and %u plain line(s); the sink with none %u, %u and %u\0".ptr as *CChar,
+        QUIET_DEBUG.load(), QUIET_INFO.load(), QUIET_PLAIN.load(), ALL_DEBUG.load(), ALL_INFO.load(), ALL_PLAIN.load(),
+    );
+    if (ALL_DEBUG.load() != 2 || ALL_INFO.load() != 1 || ALL_PLAIN.load() != 1) {
+        return failed(reason, "check failed: the sink with no floor was given 2 DEBUG, 1 INFO and 1 plain line\0");
+    }
+    if (QUIET_DEBUG.load() != 0) {
+        return failed(reason, "check failed: the sink with a floor at INFO was given no DEBUG line\0");
+    }
+    if (QUIET_INFO.load() != 1) {
+        return failed(reason, "check failed: the sink with a floor at INFO was given the INFO line\0");
+    }
+    if (QUIET_PLAIN.load() != 1) {
+        return failed(reason, "check failed: the sink with a floor at INFO was given what is not a log line\0");
+    }
+
+    // The replay's filter: a ring's text, with the floor at ERROR.
+    var text: [u8; 64] = [0; 64];
+    let ring = "[ INFO] a\n[ERROR] b\nplain\n[ WARN] c\n[DEBUG] d".bytes();
+    var i: usize = 0;
+    while (i < ring.length) {
+        text[i] = ring[i];
+        i += 1;
+    }
+    let kept = dropHidden(mut text[..ring.length], KLOG_ERROR);
+    if (kept != 16 || !beginsAt(text[..kept], 0, "[ERROR] b\nplain\n")) {
+        return failed(reason, "check failed: the replay's filter keeps the ERROR line and the plain one\0");
+    }
+    return true;
+}

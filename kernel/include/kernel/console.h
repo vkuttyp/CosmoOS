@@ -30,9 +30,8 @@ struct console_sink {
      * to it, so a stalled device costs one wait a write, not one a line. */
     bool dropped;
     /* The kernel's log lines below this level (enum klog_level) are not
-     * passed to this sink; 0 passes every one. What is not a log line --
-     * a program's output, kprintf, a panic's report -- always is. Set
-     * before console_register. */
+     * passed to this sink; 0 passes every one. What is not a log line (a
+     * program's output, kprintf) always is. Set before console_register. */
     int log_floor;
     uint64_t skip_call;        /* owned by the console; do not touch */
     struct console_sink *next; /* owned by the console; do not touch */
@@ -50,9 +49,8 @@ bool console_any_sink(void);
  * console lock: interrupts are off for one line's drawing at a time. */
 #define CONSOLE_HOLD_MAX 256u
 void console_write(const char *s, size_t len);
-/* As console_write, for one line of the kernel's log at `level`: a sink
- * whose log_floor is above it is not given the line. In panic mode every
- * sink is given everything. */
+/* As console_write, for a line of the kernel's log at `level`: no sink whose
+ * log_floor is above it is given the line, but in panic mode every sink is. */
 void console_write_log(int level, const char *s, size_t len);
 void console_puts(const char *s);
 /* CONFIG_SELFTEST: the most bytes one hold of console_write has passed

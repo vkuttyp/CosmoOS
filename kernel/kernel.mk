@@ -17,6 +17,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel/core/console.c \
 	kernel/core/fbvalid.c \
 	kernel/core/fbcon.c \
+	kernel/core/fbrules.c \
 	kernel/core/fbtest.c \
 	kernel/core/font8x16.c \
 	kernel/core/utsns.c \

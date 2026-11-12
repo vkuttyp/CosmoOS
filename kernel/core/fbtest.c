@@ -319,8 +319,7 @@ bool selftest_fb_switch(const char **reason)
         /* Another CPU's line between ours and the switch's: tried again. */
         kept = false;
         for (row = 1; row < g.rows && !kept; row++)
-            /* The switch's own notice follows on this row only on a verbose screen (the quiet screen). */
-            kept = cells_are(&g, 0, row, "fb-switch typed") &&
+            kept = cells_are(&g, 0, row, "fb-switch typed") &&   /* then, on a verbose screen, the switch's notice */
                    cells_are(&g, 0, row - 1, "fb-switch kept");
         tty_get_size(con, &sz);
         sized = sz.cols == 40 && sz.rows == 12;
@@ -421,54 +420,6 @@ static void csd_write(struct console_sink *sink, const char *s, size_t len)
     }
     g_csd_given++;
     sink->dropped = true;
-}
-
-/*
- * A sink's log floor (docs/kernel/diagnostics/design.md, "The quiet
- * screen"): a sink with a floor is given the log lines at or above it and
- * everything that is not a log line; a sink without one is given all of
- * it. Two sinks, the same four writes.
- */
-#define CLF_MARK "console-log-floor: "
-struct clf_sink {
-    struct console_sink sink;
-    unsigned debug, info, plain;
-};
-
-static void clf_write(struct console_sink *sink, const char *s, size_t len)
-{
-    struct clf_sink *c = (struct clf_sink *)sink;
-    if (len >= 8 + sizeof(CLF_MARK) - 1 && memcmp(s + 8, CLF_MARK, sizeof(CLF_MARK) - 1) == 0) {
-        if (memcmp(s, "[DEBUG] ", 8) == 0)
-            c->debug++;
-        else if (memcmp(s, "[ INFO] ", 8) == 0)
-            c->info++;
-    } else if (len >= sizeof(CLF_MARK) - 1 && memcmp(s, CLF_MARK, sizeof(CLF_MARK) - 1) == 0) {
-        c->plain++;
-    }
-}
-
-bool selftest_console_log_floor(const char **reason)
-{
-    static struct clf_sink quiet = { .sink = { .name = "selftest-floor", .write = clf_write, .log_floor = KLOG_INFO } };
-    static struct clf_sink all = { .sink = { .name = "selftest-nofloor", .write = clf_write } };
-    quiet.debug = quiet.info = quiet.plain = all.debug = all.info = all.plain = 0;
-    console_register(&quiet.sink);
-    console_register(&all.sink);
-    kdebug(CLF_MARK "a line below the floor");
-    kdebug(CLF_MARK "another");
-    kinfo(CLF_MARK "a line at the floor");
-    console_puts(CLF_MARK "not a log line\n");
-    console_unregister(&all.sink);
-    console_unregister(&quiet.sink);
-    kinfo("selftest: console-log-floor: the sink with a floor at INFO was given %u DEBUG, %u INFO and %u plain "
-          "line(s); the sink with none %u, %u and %u", quiet.debug, quiet.info, quiet.plain, all.debug, all.info,
-          all.plain);
-    CHECK(all.debug == 2 && all.info == 1 && all.plain == 1);
-    CHECK(quiet.debug == 0);
-    CHECK(quiet.info == 1);
-    CHECK(quiet.plain == 1);
-    return true;
 }
 
 bool selftest_console_sink_drop(const char **reason)
