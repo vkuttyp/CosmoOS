@@ -6,7 +6,9 @@
 #   MAKE              the GNU make to run (default: gmake if there is one, else make)
 #   MATRIX_ARCHES     the architectures (default "x86_64 aarch64")
 #   MATRIX_JOBS       -j for the builds (default 6)
-#   MATRIX_LOAD       boots wait until the one-minute load average is under this (default: the CPU count)
+#   MATRIX_LOAD       a boot waits until the one-minute load average is under this (default: the CPU count), and
+#                     fails unrun if it is not within half an hour
+#   MATRIX_LOAD_WAIT  that wait's limit in seconds (default 1800)
 #   MATRIX_LOGS       where each step's output goes (default out/matrix)
 #   MATRIX_BOOTS=0    stop after the steps that boot nothing
 #   MATRIX_REMOTE     an ssh destination that runs x86_64 while this machine runs aarch64 (optional)
@@ -49,14 +51,26 @@ step() {
     return $rc
 }
 
-# Wait, at most half an hour, for the load to fall under the limit. (A function's variables are the script's: this
-# one must not be the boots' loop variable.)
+# Wait, at most half an hour, for the load to fall under the limit; fail if it does not. (A function's variables are
+# the script's: this one must not be the boots' loop variable.)
 calm() {
     waited=0
-    while [ $waited -lt 60 ] && [ "$(load1 | awk -v l="$limit" '{print ($1 >= l) ? 1 : 0}')" = 1 ]; do
+    while [ "$(load1 | awk -v l="$limit" '{print ($1 >= l) ? 1 : 0}')" = 1 ]; do
+        [ $waited -lt "${MATRIX_LOAD_WAIT:-1800}" ] || return 1
         sleep 30
-        waited=$((waited + 1))
+        waited=$((waited + 30))
     done
+}
+
+# boot LABEL command...: a step that boots, run only on a quiet machine. A boot under load fails its timing bounds
+# and proves nothing, so a load that never falls is a failure of the step, not a reason to boot anyway.
+boot() {
+    if calm; then
+        step "$@"
+    else
+        echo "FAIL  $1  (not run: the load average stayed at or above $limit for ${MATRIX_LOAD_WAIT:-1800} s)"
+        failed=1
+    fi
 }
 
 # The x86_64 half on another machine, beside this one's aarch64 half. It is started detached there and its output
@@ -81,14 +95,18 @@ if [ -n "${MATRIX_REMOTE:-}" ]; then
 fi
 
 for a in $arches; do
-    step "build-$a-debug" $MAKE -j"$jobs" ARCH="$a"
+    step "build-$a-debug" $MAKE -j"$jobs" ARCH="$a" BUILD=debug
     step "build-$a-release" $MAKE -j"$jobs" ARCH="$a" BUILD=release
+    # The images test-chaos and test-harness-retry boot, as those targets build them: built here, a build error is
+    # found before any boot and their load is gone before the boots' load check.
+    step "build-$a-chaos" $MAKE -j"$jobs" ARCH="$a" BUILD=debug SCHED_CHAOS=1 OUT="$root/out/$a-debug-chaos" image
+    step "build-$a-hbreak" $MAKE -j"$jobs" ARCH="$a" BUILD=debug HARNESS_BREAK=1 OUT="$root/out/$a-debug-hbreak" image
 done
 step cee-check $MAKE cee-check
 for a in $arches; do
-    step "host-test-$a" $MAKE -j"$jobs" ARCH="$a" host-test
-    step "fuzz-$a" $MAKE -j"$jobs" ARCH="$a" fuzz
-    step "analyze-$a" $MAKE -j"$jobs" ARCH="$a" analyze
+    step "host-test-$a" $MAKE -j"$jobs" ARCH="$a" BUILD=debug host-test
+    step "fuzz-$a" $MAKE -j"$jobs" ARCH="$a" BUILD=debug fuzz
+    step "analyze-$a" $MAKE -j"$jobs" ARCH="$a" BUILD=debug analyze
 done
 
 if [ $failed -ne 0 ]; then
@@ -96,15 +114,12 @@ if [ $failed -ne 0 ]; then
 elif [ "${MATRIX_BOOTS:-1}" != 0 ]; then
     for a in $arches; do
         for n in 1 2 4; do
-            calm
-            step "test-$a-smp$n" $MAKE ARCH="$a" QEMU_SMP=$n test
+            boot "test-$a-smp$n" $MAKE ARCH="$a" BUILD=debug QEMU_SMP=$n test
         done
         for t in test-smp2 test-chaos test-harness-retry; do
-            calm
-            step "$t-$a" $MAKE ARCH="$a" $t
+            boot "$t-$a" $MAKE ARCH="$a" BUILD=debug $t
         done
-        calm
-        step "test-release-$a" $MAKE ARCH="$a" BUILD=release test
+        boot "test-release-$a" $MAKE ARCH="$a" BUILD=release test
     done
 fi
 

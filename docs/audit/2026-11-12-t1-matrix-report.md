@@ -36,30 +36,44 @@ Branch `t1-matrix` from main at `6588f973` (#515).
 | first | The ssh connection that carried the remote run timed out; the Mac waited 112 minutes for a run that had ended | the remote run is detached and polled |
 | second | The connection dropped again ("Can't assign requested address"); the remote verdicts were lost | the same |
 
+## Found in review
+
+| Finding (#516) | Fix |
+|---|---|
+| A `BUILD=release` in the environment turned the debug steps into release ones, which run no self-tests | the debug steps pass `BUILD=debug` |
+| `test-chaos` and `test-harness-retry` built their images after the load check, just before booting | both images are built with the other builds |
+| A load that never fell let the boot start after half an hour | the boot fails without running (`MATRIX_LOAD_WAIT`) |
+| The other machine's `run.sh` was described nowhere | `docs/development.md` gives the image's build and the wrapper |
+
 ## Validation
 
 The other machine: Xeon E3-1245 v2, 8 threads, Debian 13, the CI image built there from `ci/Dockerfile`, each run in
-one container limited to 4 CPUs and 6 GiB. Third run, 2026-11-12, 15:33:24 to 16:10:24: 37 minutes, `matrix: PASS`.
-The Mac alone takes about 90 minutes for both architectures.
+one container limited to 4 CPUs and 6 GiB. The run below is the fifth, with the review's fixes and `BUILD=release`
+in the Mac's environment: 2026-11-12, 17:45:50 to 18:24:20, 38.5 minutes, `matrix: PASS`. The third run, before the
+review, took 37 minutes and also passed. The Mac alone takes about 90 minutes for both architectures.
 
 | Step | AArch64 (Mac) | x86-64 (other machine) |
 |---|---|---|
-| debug and release build, `make cee-check` | PASS | PASS |
+| debug, release, chaos and harness-retry builds, `make cee-check` | PASS | PASS |
 | `make host-test`, `make fuzz` | PASS | PASS |
 | `make analyze` | clean (14 baselined, 0 unexpected, 0 stale) | clean (15 baselined, 0 unexpected, 0 stale) |
-| debug `make test`, `QEMU_SMP=1` | PASS in 178.5 s | PASS in 254.7 s |
-| debug `make test`, `QEMU_SMP=2` | PASS in 199.0 s | PASS in 267.7 s |
-| debug `make test`, `QEMU_SMP=4` | PASS in 204.7 s | PASS in 267.5 s |
-| `make test-smp2` | PASS in 183.8 s | PASS in 259.9 s |
-| `make test-chaos` | PASS in 203.6 s | PASS in 262.1 s |
-| `make test-harness-retry` | PASS in 208.0 s | PASS in 269.7 s |
-| `make BUILD=release test` | PASS in 21.3 s | PASS in 19.5 s |
+| debug `make test`, `QEMU_SMP=1` | PASS in 192.4 s | PASS in 262.9 s |
+| debug `make test`, `QEMU_SMP=2` | PASS in 191.2 s | PASS in 266.9 s |
+| debug `make test`, `QEMU_SMP=4` | PASS in 191.4 s | PASS in 278.7 s |
+| `make test-smp2` | PASS in 194.1 s | PASS in 268.4 s |
+| `make test-chaos` | PASS in 207.8 s | PASS in 268.6 s |
+| `make test-harness-retry` | PASS in 200.3 s | PASS in 274.9 s |
+| `make BUILD=release test` | PASS in 21.6 s | PASS in 19.9 s |
 
-`MATRIX_BOOTS=0 MATRIX_REMOTE=…` also ran to `matrix: PASS`.
+Also run:
+
+- `MATRIX_BOOTS=0 MATRIX_REMOTE=…`: `matrix: PASS`.
+- `BUILD=release MATRIX_ARCHES=aarch64 MATRIX_LOAD=0 MATRIX_LOAD_WAIT=0`: the eight steps that boot nothing pass,
+  each of the seven boots prints `FAIL … (not run: the load average stayed at or above 0 for 0 s)`, `matrix: FAIL`.
 
 ## Limits
 
-- The other machine is slow: its debug boots take 255 s to 270 s against the 300 s budget, and `process-user`
+- The other machine is slow: its debug boots take 255 s to 279 s against the 300 s budget, and `process-user`
   took 11.0 s there against its 15 s bound. A timing failure there is to be rerun on the Mac before it is believed;
   no budget is widened for it.
 - The x86-64 analysis baseline counts 15 diagnostics under the CI image's clang and 14 under the Mac's.
