@@ -3726,7 +3726,7 @@ See the [history index](README.md).
   - KVM on a Linux host does not finish an x86-64 debug boot: four CPUs
     reset the machine, the emulated VT-d stops the virtio block driver,
     and with one CPU and no IOMMU 372 of 528 self-tests pass before a
-    stop in `net-accept-race` (backlog SMP-7, DRV-18, TEST-24).
+    stop in `net-accept-race` (backlog SMP-7, DRV-18, TEST-25).
   - Those 372 tests take 71.4 s under KVM and 116.6 s under TCG on the
-    same host: the self-tests wait on the clock (backlog TEST-25).
+    same host: the self-tests wait on the clock (backlog TEST-26).
   - Report: `docs/audit/2026-11-12-t2-faster-boot-report.md`.

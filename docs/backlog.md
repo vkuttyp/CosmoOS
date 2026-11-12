@@ -38,7 +38,7 @@ Open lines (struck lines are not counted):
 | Build and tooling | 0 | 2 | 0 | 4 | 6 |
 | cosmofs and storage | 4 | 1 | 7 | 13 | 25 |
 | Documentation | 0 | 0 | 1 | 1 | 2 |
-| Drivers and platforms | 3 | 0 | 2 | 12 | 17 |
+| Drivers and platforms | 4 | 0 | 2 | 12 | 18 |
 | Kernel modules | 1 | 0 | 0 | 1 | 2 |
 | Linux personality | 7 | 0 | 11 | 6 | 24 |
 | Lock validator and concurrency | 3 | 0 | 0 | 7 | 10 |
@@ -47,13 +47,13 @@ Open lines (struck lines are not counted):
 | Observability | 1 | 0 | 0 | 6 | 7 |
 | Packages and upgrade | 2 | 0 | 2 | 2 | 6 |
 | Quiescence | 0 | 0 | 0 | 3 | 3 |
-| Scheduler and SMP | 0 | 0 | 1 | 5 | 6 |
+| Scheduler and SMP | 1 | 0 | 1 | 5 | 7 |
 | Security and isolation | 0 | 11 | 1 | 2 | 14 |
-| Testing and CI | 9 | 0 | 0 | 9 | 18 |
+| Testing and CI | 9 | 0 | 0 | 11 | 20 |
 | Commands | 1 | 0 | 5 | 1 | 7 |
 | VFS | 3 | 0 | 5 | 3 | 11 |
 | Virtualisation | 3 | 0 | 0 | 6 | 9 |
-| **all** | **45** | **23** | **48** | **100** | **216** |
+| **all** | **47** | **23** | **48** | **102** | **220** |
 
 ## Block devices
 
@@ -331,8 +331,8 @@ Open lines (struck lines are not counted):
 - **TEST-21** correctness, S. x86-64 OVMF sometimes never reaches the loader after a guest-initiated reset inside one QEMU (`reboot: restart through the ACPI reset register`, then only screen clears; three sightings, flakes.md), and the boot harnesses retry a stalled firmware only at launch (`firmware_stall.py`).
 - ~~**TEST-22** correctness, S. `ash.sh`'s `ps-nice` reads `$!` before the forked shell has run `nice` (main red, CI run 40703059019).~~ Fixed 2026-10-28: it waits until the process is `sleep` (`docs/audit/2026-10-28-ps-nice-report.md`).
 - **TEST-23** nice-to-have, M. `test-large` sets main's CI time: 32-80 min per architecture (every other job within about 35), the spread runner speed (run 40680963987: aarch64 40 min, x86-64 62, every stage scaling together). Its summary gives no time for the remount and old-kernel stages, about 60% of it; print each stage's time, then see whether a pool and file smaller than 1 GiB still prove CFS-32 (a file past the old run bound, about 128 MiB).
-- **TEST-24** nice-to-have, M. Under KVM (one CPU, no IOMMU) `vm-replace-race` fails (`e.probes > 0`, line 832) and the boot stops in `net-accept-race` with kmain blocked on a socket (`docs/audit/2026-11-12-t2-faster-boot-report.md`). Neither diagnosed.
-- **TEST-25** nice-to-have, M. Twenty self-tests are 55% of the debug boot's 155 s of test time under TCG, and 24 of those measured take the same time under KVM: they wait on the clock (timeouts, settles). `cosmofs-replay` alone is 24 s. Shorten the waits that are not the test's subject (`docs/audit/2026-11-12-t2-faster-boot-report.md`).
+- **TEST-25** nice-to-have, M. Under KVM (one CPU, no IOMMU) `vm-replace-race` fails (`e.probes > 0`, line 832) and the boot stops in `net-accept-race` with kmain blocked on a socket (`docs/audit/2026-11-12-t2-faster-boot-report.md`). Neither diagnosed.
+- **TEST-26** nice-to-have, M. Twenty self-tests are 55% of the debug boot's 155 s of test time under TCG, and 24 of those measured take the same time under KVM: they wait on the clock (timeouts, settles). `cosmofs-replay` alone is 24 s. Shorten the waits that are not the test's subject (`docs/audit/2026-11-12-t2-faster-boot-report.md`).
 - ~~**TEST-24** correctness, S. `test-net-login` stage j's RTC bound allows 2 s below and the x86-64 firmware's century write (edk2, every boot, the clock running) rewinds QEMU's RTC by up to a second more (main red, CI run 40739284519).~~ Fixed 2026-10-28: 3 s below on x86-64 (`docs/audit/2026-10-28-rtc-century-report.md`).
 
 ## Commands

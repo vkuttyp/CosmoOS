@@ -47,7 +47,7 @@ For comparison, the Mac's TCG debug boots in today's matrix took 179.0 s to 208.
   paging off exited with rc 0 kind 3 pc 0x80000000 (wanted kind 1)".
 - **One CPU, no IOMMU.** `vm-replace-race` fails (`e.probes > 0`, line 832). The boot then stops in
   `net-accept-race`, the test that follows `net-neigh-down-race` under TCG, with `kmain` blocked on a socket.
-  Neither is diagnosed (backlog TEST-24).
+  Neither is diagnosed (backlog TEST-25).
 
 ## What KVM would buy
 
@@ -83,7 +83,7 @@ Neither. The matrix stays on TCG.
 - The Linux host's TCG boot (199.3 s to 211.7 s in a 4-CPU container) is as fast as the Mac's. Running the x86-64
   half of the matrix there while the Mac runs AArch64 would halve the matrix's wall time with no kernel change.
   The host runs production services, so whether to use it that way is the owner's decision.
-- The waits inside the self-tests are the larger lever (backlog TEST-25).
+- The waits inside the self-tests are the larger lever (backlog TEST-26).
 
 ## What this does not do
 
