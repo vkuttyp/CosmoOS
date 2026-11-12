@@ -658,6 +658,12 @@ test-chaos:
 		--image $(OUT)-chaos/cosmoos.img --log $(OUT)-chaos/boot-test-chaos.log \
 		--kernel $(OUT)-chaos/kernel/kernel.elf --symbolizer $(LLVM_PREFIX)llvm-symbolizer
 
+# The validation matrix (AGENTS.md), in the order that fails soonest: what boots nothing, then, once the machine
+# is quiet, the boots; one verdict per step (scripts/matrix.sh; docs/development.md, "Running the matrix").
+.PHONY: matrix
+matrix:
+	$(Q)MAKE="$(MAKE)" $(ROOT)/scripts/matrix.sh
+
 # Build a kernel whose net-harness back-connection fails on purpose the
 # first time and boot it: the retry that exists for a QEMU defect seen on
 # one boot in twenty, exercised on this one

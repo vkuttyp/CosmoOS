@@ -100,8 +100,12 @@ about 100, and boot tests started straight after it fail their timing
 bounds (seen 2026-11-11: `process-user` at 22.9 s against 15 s). The
 matrix runs its boots first, or waits for the load to fall.
 
-- [ ] **Acceptance:** `docs/development.md` states the order; a
+- [x] **Acceptance:** `docs/development.md` states the order; a
   `make matrix` target runs it that way and prints one verdict per step.
+  Done 2026-11-12 (`docs/audit/2026-11-12-t1-matrix-report.md`): what boots
+  nothing runs first and the boots wait for the load; `MATRIX_REMOTE`
+  runs the x86-64 half on a second machine, 37 minutes for the whole
+  matrix against about 90 on the Mac alone.
 
 ### T2 A faster place to boot
 

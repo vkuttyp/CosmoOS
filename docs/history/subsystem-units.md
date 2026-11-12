@@ -3730,3 +3730,12 @@ See the [history index](README.md).
   - Those 372 tests take 71.4 s under KVM and 116.6 s under TCG on the
     same host: the self-tests wait on the clock (backlog TEST-26).
   - Report: `docs/audit/2026-11-12-t2-faster-boot-report.md`.
+- **T1: `make matrix`, in the order that fails soonest (2026-11-12,
+  roadmap 1.3).**
+  - `scripts/matrix.sh` runs the validation matrix: the builds,
+    `cee-check`, host tests, fuzzing and the analyser first, and the boots
+    only if those pass, each once the load average is under the CPU count.
+    One verdict line per step.
+  - `MATRIX_REMOTE` runs the x86-64 half on a second machine, started
+    detached there and its result fetched at the end.
+  - Report: `docs/audit/2026-11-12-t1-matrix-report.md`.

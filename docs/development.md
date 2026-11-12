@@ -686,6 +686,50 @@ The release key's public half is the only `tools/keys/*.pub`
 (`tools/keys/README.md`); developer builds keep their per-machine key
 and trust the release key too.
 
+## Running the matrix
+
+`make matrix` runs the [validation matrix](../AGENTS.md#validation-matrix)
+and prints one verdict line per step, `matrix: PASS` or `matrix: FAIL` at
+the end, and exits non-zero on a failure. Each step's output is kept under
+`out/matrix/`.
+
+The order is the one that fails soonest:
+
+1. What boots nothing, per architecture: the debug and release builds,
+   the images `test-chaos` and `test-harness-retry` boot,
+   `make cee-check`, `make host-test`, `make fuzz`, `make analyze`. If one
+   fails the boots are not run: a static failure found after the boots
+   costs the boots again (2026-11-12: `make analyze` failed after a
+   45-minute run of boots that had to be repeated).
+2. The boots, each started only when the one-minute load average is under
+   the CPU count (`MATRIX_LOAD`); a boot whose wait reaches half an hour
+   fails without running. The debug steps pass `BUILD=debug` themselves,
+   so a `BUILD` in the environment does not turn them into release boots. The builds and the analyser raise the
+   load far above that, and a boot started while it falls fails its timing
+   bounds ([flakes.md](testing/flakes.md), `process-user`).
+
+`MATRIX_ARCHES` limits the architectures and `MATRIX_BOOTS=0` stops after
+the first part. With `MATRIX_REMOTE` set to an ssh destination, that
+machine runs the x86-64 half while this one runs AArch64: the tree is
+copied to `tree/` under `MATRIX_REMOTE_DIR` (default `/root/cosmoos-ci`)
+and that directory's `run.sh` runs `scripts/matrix.sh` there in a
+container of the CI image (`ci/Dockerfile`) with whatever limits `run.sh`
+sets. Its verdict lines are printed with `remote:` before them.
+
+Setting the other machine up, once: Docker, then from a copy of the tree
+`docker build --target toolchain -t cosmoos-ci:local ci`, and a `run.sh`
+in that directory which runs its arguments as one command in that image
+with the tree mounted, limited to what the machine can spare:
+
+```sh
+#!/bin/sh
+exec docker run --rm --cpus=4 --cpu-shares=128 --memory=6g \
+    -v /root/cosmoos-ci/tree:/work -w /work cosmoos-ci:local sh -c "$*"
+```
+
+The acceptance tests a change needs (`make test-busybox` and the like) are
+not part of the matrix.
+
 ## Workflow for a change
 
 Constitution section 66 applies to every subsystem change. In practice:
