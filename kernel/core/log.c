@@ -101,7 +101,7 @@ void kvlog(enum klog_level level, const char *fmt, va_list ap)
     line[n++] = '\n';
     line[n] = '\0';
     ring_put(line, n);
-    console_write(line, n);
+    console_write_log((int)level, line, n);
 }
 
 void klog(enum klog_level level, const char *fmt, ...)

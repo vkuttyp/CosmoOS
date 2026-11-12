@@ -29,6 +29,7 @@
  */
 
 #include <kernel/bootinfo.h>
+#include <kernel/cmdline.h>
 #include <kernel/console.h>
 #include <kernel/errno.h>
 #include <kernel/fbcon.h>
@@ -337,12 +338,61 @@ static void fbcon_write(struct console_sink *sink, const char *s, size_t len)
  * megabytes of bus traffic to draw frames nobody sees, and `dmesg` has
  * the whole ring either way.
  */
+/*
+ * The quiet screen (docs/kernel/diagnostics/design.md, "The quiet
+ * screen"): the framebuffer shows the kernel's errors and panics, and
+ * everything that is not a log line -- the banner, programs' output, the
+ * shell. The informational lines stay on the serial port and in the ring
+ * (`dmesg`). `verbose` on the command line shows every line here too.
+ */
+static int screen_floor(void)
+{
+    char v[2];
+    return cmdline_get("verbose", v, sizeof(v)) == -1 ? KLOG_ERROR : 0;
+}
+
+static void sink_register(void)
+{
+    g_sink.log_floor = screen_floor();
+    console_register(&g_sink);
+    g_registered = true;
+}
+
+/* The log's text without the lines the sink's floor hides: a line is one
+ * of those if it begins with the tag of a level below the floor. In place;
+ * returns the new length. */
+static size_t drop_hidden(char *buf, size_t n)
+{
+    static const char *const tag[] = { "[DEBUG] ", "[ INFO] ", "[ WARN] " };
+    int floor = screen_floor();
+    size_t out = 0;
+    for (size_t i = 0; i < n;) {
+        size_t end = i;
+        while (end < n && buf[end] != '\n')
+            end++;
+        if (end < n)
+            end++;
+        bool hidden = false;
+        for (int l = 0; l < (int)ARRAY_SIZE(tag) && l < floor; l++) {
+            size_t tl = strlen(tag[l]);
+            if (end - i >= tl && memcmp(buf + i, tag[l], tl) == 0)
+                hidden = true;
+        }
+        if (!hidden) {
+            memmove(buf + out, buf + i, end - i);
+            out += end - i;
+        }
+        i = end;
+    }
+    return out;
+}
+
 static void replay_log(struct fbcon *c)
 {
     char *buf = kmalloc(KLOG_RING_SIZE, 0);
     if (buf == NULL)
         return;
-    size_t n = klog_copy(buf, KLOG_RING_SIZE);
+    size_t n = drop_hidden(buf, klog_copy(buf, KLOG_RING_SIZE));
 
     /* Walk back over at most `rows` newlines. */
     size_t start = n;
@@ -453,8 +503,7 @@ void fbcon_early_init(void)
     }
     c->text = g_early_text;
     fbcon_start(c);
-    console_register(&g_sink);
-    g_registered = true;
+    sink_register();
     kinfo("fbcon: no serial console: the framebuffer is the console from the first line (%ux%u cells)", c->cols,
           c->rows);
 }
@@ -499,8 +548,7 @@ void fbcon_init(void)
     }
     fbcon_start(c);
     replay_log(c);
-    console_register(&g_sink);
-    g_registered = true;
+    sink_register();
     kinfo("fbcon: %ux%u cells of %ux%u pixels at %p, scrolling %u rows at a time", c->cols, c->rows,
           c->cell_w, c->cell_h, (void *)(uintptr_t)c->base, c->scroll_rows);
 }
@@ -648,7 +696,7 @@ int fbcon_attach(const struct fbcon_surface *s)
         carry_text(n, prev);
     } else if (log != NULL) {
         /* No screen before: the newest screenful, as fbcon_init shows it. */
-        size_t log_len = klog_copy(log, KLOG_RING_SIZE);
+        size_t log_len = drop_hidden(log, klog_copy(log, KLOG_RING_SIZE));
         size_t start = log_len;
         unsigned lines = 0;
         while (start > 0 && lines < n->rows) {
@@ -662,10 +710,8 @@ int fbcon_attach(const struct fbcon_surface *s)
     }
     __atomic_store_n(&g_fb, n, __ATOMIC_RELEASE);
     bool panicking = switch_done();
-    if (!g_registered) {
-        console_register(&g_sink);   /* writers walk the list under this lock */
-        g_registered = true;
-    }
+    if (!g_registered)
+        sink_register();   /* writers walk the list under this lock */
     char *old_text = prev->surface != NULL && !panicking ? prev->text : NULL;
     bool resized = !prev->ready || prev->cols != n->cols || prev->rows != n->rows;
     uint32_t gen = resized ? __atomic_add_fetch(&g_switches, 1, __ATOMIC_RELEASE) : 0;
