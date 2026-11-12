@@ -203,6 +203,19 @@ int64_t lx_umask(struct syscall_args *a);
 /* lxtty.cee: ioctl. */
 int64_t lx_ioctl(struct syscall_args *a);
 
+/* lxio.cee: reads, writes and opens. */
+int64_t lx_read(struct syscall_args *a);
+int64_t lx_write(struct syscall_args *a);
+int64_t lx_pread64(struct syscall_args *a);
+int64_t lx_pwrite64(struct syscall_args *a);
+int64_t lx_readv(struct syscall_args *a);
+int64_t lx_writev(struct syscall_args *a);
+int64_t lx_open(struct syscall_args *a);
+int64_t lx_creat(struct syscall_args *a);
+int64_t lx_openat(struct syscall_args *a);
+int64_t lx_close(struct syscall_args *a);
+int64_t lx_lseek(struct syscall_args *a);
+
 /* lxsock.cee: the socket calls. lx_accept is accept4 too (its fourth
  * argument, the flags, is 0 from accept). */
 int64_t lx_socket(struct syscall_args *a);

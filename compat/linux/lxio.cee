@@ -1,0 +1,515 @@
+// lxio.cee - The Linux personality's reads, writes and opens (docs/compat/linux/design.md), in CeeSafe (roadmap 1.3
+// K1): read, write, pread64, pwrite64, readv, writev, open, creat, openat, close and lseek. syscalls.c's table names
+// them (linux_internal.h).
+//
+// A struct lx_iovec is two words and a struct io_bounce three; the C compiler checks them (the extern block). An
+// object's write is a C function pointer in its kobject_io_type, called through.
+
+@header(
+    "kernel/errno.h", "kernel/handle.h", "kernel/kmalloc.h", "kernel/object.h", "kernel/process.h", "kernel/syscall.h",
+    "kernel/uaccess.h", "kernel/vfs.h", "uapi/cosmo/syscall.h", "convert.h", "linux_abi.h", "linux_internal.h",
+)
+extern "C" {
+    struct syscall_args {
+        a: [u64; 6];
+    }
+    struct handle_table;
+    struct process {
+        handles: handle_table;
+        umask: u32; // read atomically (umaskNow)
+    }
+    struct kobject_io_type {
+        write: extern "C" fn(*mut kobject, *void, usize) -> i64;
+    }
+    struct io_bounce {
+        buf: *mut CChar;
+        cap: usize;
+        heap: bool;
+    }
+    struct vnode {
+        @cname("type")
+        kind: u32;
+    }
+    struct file {
+        obj: kobject;
+        vn: *mut vnode;
+    }
+
+    @cvalue(
+        "IO_CHUNK == 1024 && sizeof(struct io_bounce) <= 3 * sizeof(uint64_t) && sizeof(struct lx_iovec) == 16 && offsetof(struct lx_iovec, iov_base) == 0 && offsetof(struct lx_iovec, iov_len) == 8 && VFS_PATH_MAX == 1024 && sizeof(enum vnode_type) == sizeof(uint32_t)",
+    )
+    const SIZES: bool = true;
+    const VFS_PATH_MAX: usize = 1024;
+    const VNODE_DIR: u32 = 2;
+    const HANDLE_RIGHT_READ: u32 = 1;
+    const HANDLE_RIGHT_WRITE: u32 = 2;
+    const HANDLE_RIGHT_OWNER: u32 = 28;
+    const HANDLE_FLAG_CLOEXEC: u32 = 1;
+    const COSMO_O_RDONLY: u32 = 0x0000;
+    const COSMO_O_WRONLY: u32 = 0x0001;
+    const COSMO_O_RDWR: u32 = 0x0002;
+    const COSMO_O_ACCMODE: u32 = 0x0003;
+    const COSMO_O_CREAT: u32 = 0x0040;
+    const COSMO_O_TRUNC: u32 = 0x0200;
+    const LX_O_WRONLY: u32 = 0o1;
+    const LX_O_CREAT: u32 = 0o100;
+    const LX_O_TRUNC: u32 = 0o1000;
+    const LX_O_CLOEXEC: u32 = 0o2000000;
+    const EBADF: i32 = 9;
+    const ENOMEM: i32 = 12;
+    const EFAULT: i32 = 14;
+    const EINVAL: i32 = 22;
+    const ESPIPE: i32 = 29;
+
+    fn process_current() -> *mut process;
+    fn user_range_ok(addr: u64, len: usize) -> bool;
+    fn copy_to_user(userDst: u64, src: *void, len: usize) -> i32;
+    fn copy_from_user(dst: *mut void, userSrc: u64, len: usize) -> i32;
+    fn syscall_handle_read(h: i32, ubuf: u64, len: usize) -> i64;
+    fn syscall_handle_write(h: i32, ubuf: u64, len: usize) -> i64;
+    fn syscall_bounce_get(b: *mut io_bounce, stack: *mut CChar, len: usize);
+    fn syscall_bounce_put(b: *mut io_bounce);
+    fn handle_lookup(t: *mut handle_table, h: i32, rightsNeeded: u32) -> *mut kobject;
+    fn handle_install_flags(t: *mut handle_table, obj: *mut kobject, rights: u32, flags: u32) -> i32;
+    fn handle_close(t: *mut handle_table, h: i32) -> i32;
+    fn kobject_io_of(obj: *kobject) -> *kobject_io_type;
+    fn file_put(f: *mut file);
+    fn file_pread(f: *mut file, buf: *mut void, len: usize, off: u64) -> i64;
+    fn file_pwrite(f: *mut file, buf: *void, len: usize, off: u64) -> i64;
+    fn file_seek(f: *mut file, off: i64, whence: i32) -> i64;
+    fn file_set_dir_path(f: *mut file, name: *CChar);
+    fn vnode_put(vn: *mut vnode);
+    fn vfs_open_named(
+        start: *mut vnode,
+        startname: *CChar,
+        path: *CChar,
+        flags: u32,
+        mode: u32,
+        out: *mut *mut file,
+        name: *mut CChar,
+        n: usize,
+    ) -> i32;
+    fn lx_open_flags(lx: u32, native: *mut u32) -> i32;
+    fn lx_get_path(uptr: u64, buf: *mut CChar) -> i32;
+    fn lx_at_base(
+        dirfd: i64,
+        path: *CChar,
+        rights: u32,
+        out: *mut *mut vnode,
+        basepath: *mut CChar,
+        n: usize,
+        have: *mut u32,
+    ) -> i32;
+    fn lx_file_of(h: i32, rights: u32) -> *mut file;
+}
+
+const IOV_MAX: i64 = 1024;
+const FAST_IOV: i64 = 8; // Linux's UIO_FASTIOV: a vector this short stays on the stack
+const INT64_MAX: u64 = 0x7FFFFFFFFFFFFFFF;
+const NOT: u32 = 0xFFFFFFFF;
+const CWD: i64 = -100; // LX_AT_FDCWD as a register holds it
+
+/// The panic of a broken invariant (the C's KASSERT).
+fn check(ok: bool, what: StringView) {
+    if (!ok) {
+        var buffer: [u8; 128] = [0; 128];
+        var line = TextWriter.create(mut buffer[..]);
+        line.text("assertion failed: ");
+        line.text(what);
+        line.text(" at compat/linux/lxio.cee");
+        KernelLog.panic(line);
+    }
+}
+
+/// Safety: the dispatcher's: `a` is the call's arguments.
+unsafe fn arg(a: *mut syscall_args, i: usize) -> u64 => Ptr.toBorrow(a as *syscall_args).a[i];
+
+/// Argument `i` as Linux's `int`.
+/// Safety: the dispatcher's.
+unsafe fn arg32(a: *mut syscall_args, i: usize) -> i32 => truncate<i32>(arg(a, i));
+
+/// Safety: in a process's thread.
+unsafe fn handles() -> *mut handle_table {
+    let p = Ptr.toBorrowMut(process_current());
+    return borrow mut p.handles as *mut handle_table;
+}
+
+/// The calling process's file-creation mask (umask).
+/// Safety: in a process's thread.
+unsafe fn umaskNow() -> u32 {
+    let p = Ptr.toBorrowMut(process_current());
+    return Ptr.toBorrow(borrow mut p.umask as *mut u32 as *AtomicU32).loadWith(LoadOrdering.Relaxed);
+}
+
+/// Safety: the dispatcher's.
+@export("lx_read")
+unsafe fn read(a: *mut syscall_args) -> i64 => syscall_handle_read(arg32(a, 0), arg(a, 1), truncate<usize>(arg(a, 2)));
+
+/// Safety: the dispatcher's.
+@export("lx_write")
+unsafe fn write(a: *mut syscall_args) -> i64 =>
+    syscall_handle_write(arg32(a, 0), arg(a, 1), truncate<usize>(arg(a, 2)));
+
+/// pread64 and pwrite64: a file's bytes at an offset, the position left alone.
+///
+/// Safety: the dispatcher's.
+unsafe fn rwAt(a: *mut syscall_args, writing: bool) -> i64 {
+    let ubuf = arg(a, 1);
+    let len = truncate<usize>(arg(a, 2));
+    let off = truncate<i64>(arg(a, 3));
+    if (off < 0) {
+        return -EINVAL as i64;
+    }
+    if (!user_range_ok(ubuf, len)) {
+        return -EFAULT as i64;
+    }
+    let f = lx_file_of(arg32(a, 0), if (writing) HANDLE_RIGHT_WRITE else HANDLE_RIGHT_READ);
+    if (f.isNull()) {
+        return -EBADF as i64;
+    }
+    // The syscall layer's bounce (kernel/syscall.h): up to 64 KiB per file call, the stack chunk when the heap
+    // refuses.
+    var stack = [0u8; 1024];
+    var words = [0u64; 3];
+    let bp = borrow mut words as *mut [u64; 3] as *mut io_bounce;
+    syscall_bounce_get(bp, borrow mut stack as *mut [u8; 1024] as *mut CChar, len);
+    let b = Ptr.toBorrow(bp as *io_bounce);
+    var done: i64 = 0;
+    var rc: i64 = 0;
+    while (truncate<usize>(done) < len) {
+        let left = len - truncate<usize>(done);
+        let n = if (left < b.cap) left else b.cap;
+        let at = truncate<u64>(off).wrappingAdd(truncate<u64>(done));
+        let uat = ubuf.wrappingAdd(truncate<u64>(done));
+        if (writing) {
+            if (copy_from_user(b.buf as *mut void, uat, n) != 0) {
+                rc = -EFAULT as i64;
+                break;
+            }
+            rc = file_pwrite(f, b.buf as *void, n, at);
+        } else {
+            rc = file_pread(f, b.buf as *mut void, n, at);
+            if (rc > 0 && copy_to_user(uat, b.buf as *void, truncate<usize>(rc)) != 0) {
+                rc = -EFAULT as i64;
+            }
+        }
+        if (rc <= 0) {
+            break;
+        }
+        done += rc;
+        if (truncate<usize>(rc) < n) {
+            break;
+        }
+    }
+    syscall_bounce_put(bp);
+    file_put(f);
+    return if (done > 0) done else rc;
+}
+
+/// Safety: the dispatcher's.
+@export("lx_pread64")
+unsafe fn pread64(a: *mut syscall_args) -> i64 => rwAt(a, false);
+
+/// Safety: the dispatcher's.
+@export("lx_pwrite64")
+unsafe fn pwrite64(a: *mut syscall_args) -> i64 => rwAt(a, true);
+
+/// Safety: the dispatcher's.
+@export("lx_readv")
+unsafe fn readv(a: *mut syscall_args) -> i64 {
+    let h = arg32(a, 0);
+    let uiov = arg(a, 1);
+    let cnt = truncate<i64>(arg(a, 2));
+    if (cnt < 0 || cnt > IOV_MAX) {
+        return -EINVAL as i64;
+    }
+    var done: i64 = 0;
+    var i: i64 = 0;
+    while (i < cnt) {
+        var iov = [0u64; 2]; // a struct lx_iovec: the base and the length
+        let from = uiov.wrappingAdd(truncate<u64>(i) * 16);
+        i += 1;
+        if (copy_from_user(borrow mut iov as *mut [u64; 2] as *mut void, from, 16) != 0) {
+            return if (done != 0) done else -EFAULT as i64;
+        }
+        if (iov[1] == 0) {
+            continue;
+        }
+        let rc = syscall_handle_read(h, iov[0], truncate<usize>(iov[1]));
+        if (rc < 0) {
+            return if (done != 0) done else rc;
+        }
+        done += rc;
+        if (truncate<u64>(rc) < iov[1]) {
+            break;
+        }
+    }
+    return done;
+}
+
+/// What writev has gathered and written.
+struct Gather {
+    fill: usize; // bytes in the bounce not yet handed over
+    done: i64;   // bytes the object has taken
+    rc: i64;     // the last result
+}
+
+/// Hands the gathered bytes to the object; false when writev must stop (an error in `g.rc`, or a short write).
+///
+/// Safety: `obj` is referenced and `send` is its write; `buf` holds `g.fill` bytes.
+unsafe fn flush(
+    send: extern "C" fn(*mut kobject, *void, usize) -> i64,
+    obj: *mut kobject,
+    buf: *void,
+    g: borrow mut Gather,
+) -> bool {
+    if (g.fill == 0) {
+        return true;
+    }
+    g.rc = send(obj, buf, g.fill);
+    if (g.rc < 0) {
+        return false;
+    }
+    check(g.rc <= truncate<i64>(g.fill), "*rc <= (int64_t)*fill");
+    g.done += g.rc;
+    let whole = truncate<usize>(g.rc) == g.fill;
+    g.fill = 0;
+    return whole;
+}
+
+/// writev is one write, as on Linux: the vector is gathered into the syscall layer's bounce and handed to the object
+/// whole, so a datagram socket sends one datagram, and a terminal or pipe gets the pieces of a line in one call, with
+/// no other writer's line between them. A vector longer than the bounce (64 KiB) goes in bounce-sized calls, as one
+/// long write does.
+///
+/// Safety: the dispatcher's.
+@export("lx_writev")
+unsafe fn writev(a: *mut syscall_args) -> i64 {
+    let h = arg32(a, 0);
+    let uiov = arg(a, 1);
+    let cnt = truncate<i64>(arg(a, 2));
+    if (cnt < 0 || cnt > IOV_MAX) {
+        return -EINVAL as i64;
+    }
+    let obj = handle_lookup(handles(), h, HANDLE_RIGHT_WRITE);
+    if (obj.isNull()) {
+        return -EBADF as i64;
+    }
+    let io = kobject_io_of(obj as *kobject);
+    if (io.isNull() || Ptr.toBorrow(io).write.isNull()) {
+        kobject_put(obj);
+        return -EBADF as i64;
+    }
+    let send = Ptr.toBorrow(io).write;
+    let count = truncate<usize>(cnt);
+    // The vector is copied in once, as Linux imports it: the total that sizes the bounce and the entries gathered are
+    // the same snapshot, whatever another thread does to the user array meanwhile. A short vector stays on the stack.
+    var fast = [0u64; 16]; // eight struct lx_iovec: a base and a length each
+    var vec = borrow mut fast as *mut [u64; 16] as *mut u64;
+    let onHeap = cnt > FAST_IOV;
+    if (onHeap) {
+        vec = kmalloc(count * 16, 0) as *mut u64;
+        if (vec.isNull()) {
+            kobject_put(obj);
+            return -ENOMEM as i64;
+        }
+    }
+    var g = Gather { fill: 0, done: 0, rc: 0 };
+    var total: usize = 0;
+    if (cnt > 0 && copy_from_user(vec as *mut void, uiov, count * 16) != 0) {
+        g.rc = -EFAULT as i64;
+    }
+    var i: usize = 0;
+    while (i < count && g.rc == 0) {
+        let len = vec.add(i * 2 + 1).read();
+        if (len > INT64_MAX - total as u64) {
+            g.rc = -EINVAL as i64;
+        } else {
+            total += truncate<usize>(len);
+        }
+        i += 1;
+    }
+    if (g.rc != 0) {
+        if (onHeap) {
+            kfree(vec as *mut void);
+        }
+        kobject_put(obj);
+        return g.rc;
+    }
+    var stack = [0u8; 1024];
+    var words = [0u64; 3];
+    let bp = borrow mut words as *mut [u64; 3] as *mut io_bounce;
+    syscall_bounce_get(bp, borrow mut stack as *mut [u8; 1024] as *mut CChar, total);
+    let b = Ptr.toBorrow(bp as *io_bounce);
+    let bytes = b.buf as *mut u8;
+    var more = true;
+    i = 0;
+    while (i < count && more) {
+        let base = vec.add(i * 2).read();
+        let len = vec.add(i * 2 + 1).read();
+        i += 1;
+        var off: u64 = 0;
+        while (off < len && more) {
+            let room = b.cap - g.fill;
+            let n = if (len - off < room as u64) truncate<usize>(len - off) else room;
+            let from = base.wrappingAdd(off);
+            if (!user_range_ok(from, n) || copy_from_user(bytes.add(g.fill) as *mut void, from, n) != 0) {
+                g.rc = -EFAULT as i64;
+                more = false;
+                break;
+            }
+            g.fill += n;
+            off += n as u64;
+            if (g.fill == b.cap) {
+                more = flush(send, obj, bytes as *void, mut g);
+            }
+        }
+    }
+    // What was gathered before a fault is still written, as Linux writes what it copied.
+    if (g.rc >= 0 || g.rc == -EFAULT as i64) {
+        let gathered = g.rc;
+        if (flush(send, obj, bytes as *void, mut g)) {
+            g.rc = gathered;
+        }
+    }
+    syscall_bounce_put(bp);
+    if (onHeap) {
+        kfree(vec as *mut void);
+    }
+    kobject_put(obj);
+    return if (g.done > 0) g.done else g.rc;
+}
+
+/// The open itself, the paths in `path` (three buffers of VFS_PATH_MAX: the path, the base's name and the name the
+/// walk took).
+///
+/// Safety: in a process's thread; `path` holds 3 * VFS_PATH_MAX bytes.
+unsafe fn openIn(path: *mut u8, dirfd: i64, upath: u64, lxflags: u32, mode: u32) -> i64 {
+    let name0 = path as *mut CChar;
+    let base = path.add(VFS_PATH_MAX) as *mut CChar;
+    let name = path.add(2 * VFS_PATH_MAX) as *mut CChar;
+    var rc = lx_get_path(upath, name0);
+    if (rc != 0) {
+        return rc as i64;
+    }
+    var flags: u32 = 0;
+    if (lx_open_flags(lxflags, borrow mut flags as *mut u32) < 0) {
+        return -EINVAL as i64;
+    }
+    // Creating, truncating or opening for writing puts data in through the base: it needs WRITE, as an entry change
+    // does.
+    let acc = flags & COSMO_O_ACCMODE;
+    let writes = (flags & (COSMO_O_CREAT | COSMO_O_TRUNC)) != 0 || acc == COSMO_O_WRONLY || acc == COSMO_O_RDWR;
+    let need = if (writes) HANDLE_RIGHT_READ | HANDLE_RIGHT_WRITE else HANDLE_RIGHT_READ;
+    var start = 0 as *mut vnode;
+    var have: u32 = 0;
+    rc = lx_at_base(
+        dirfd,
+        name0 as *CChar,
+        need,
+        borrow mut start as *mut *mut vnode,
+        base,
+        VFS_PATH_MAX,
+        borrow mut have as *mut u32,
+    );
+    if (rc != 0) {
+        return rc as i64;
+    }
+    // A directory remembers the name its own walk took to it, for fchdir (P31, P32); a relative path from a base with
+    // no name gives it none, and fchdir then refuses it.
+    var f = 0 as *mut file;
+    rc = vfs_open_named(
+        start,
+        base as *CChar,
+        name0 as *CChar,
+        flags,
+        mode & 0o7777 & (umaskNow() ^ NOT),
+        borrow mut f as *mut *mut file,
+        name,
+        VFS_PATH_MAX,
+    );
+    vnode_put(start);
+    if (rc != 0) {
+        return rc as i64;
+    }
+    let opened = Ptr.toBorrowMut(f);
+    let isDir = Ptr.toBorrow(opened.vn as *vnode).kind == VNODE_DIR;
+    if (isDir) {
+        file_set_dir_path(f, name as *CChar);
+    }
+    var rights = HANDLE_RIGHT_OWNER; // as the native open: the file is the caller's to dup and pass
+    if (acc == COSMO_O_RDONLY || acc == COSMO_O_RDWR) {
+        rights |= HANDLE_RIGHT_READ;
+    }
+    if (acc == COSMO_O_WRONLY || acc == COSMO_O_RDWR) {
+        rights |= HANDLE_RIGHT_WRITE;
+    }
+    // A directory opens read-only and is written through by the *at calls: its handle carries WRITE, the right to
+    // change its entries, which a delegation may narrow away (P31). Writing to it as a file is still -EISDIR.
+    if (isDir) {
+        rights |= HANDLE_RIGHT_READ | HANDLE_RIGHT_WRITE;
+    }
+    // Rights only shrink on the way down: what is derived through a descriptor carries no data right the descriptor
+    // lacks (P31).
+    rights &= have | ((HANDLE_RIGHT_READ | HANDLE_RIGHT_WRITE) ^ NOT);
+    rc = handle_install_flags(
+        handles(),
+        borrow mut opened.obj as *mut kobject,
+        rights,
+        if ((lxflags & LX_O_CLOEXEC) != 0) HANDLE_FLAG_CLOEXEC else 0,
+    );
+    file_put(f);
+    return rc as i64;
+}
+
+/// The three path buffers (3 KiB) live on the heap, not the 16 KiB kernel stack (scripts/frame-baseline.txt).
+///
+/// Safety: in a process's thread.
+unsafe fn openCommon(dirfd: i64, upath: u64, lxflags: u32, mode: u32) -> i64 {
+    let path = kmalloc(3 * VFS_PATH_MAX, 0) as *mut u8;
+    if (path.isNull()) {
+        return -ENOMEM as i64;
+    }
+    let rc = openIn(path, dirfd, upath, lxflags, mode);
+    kfree(path as *mut void);
+    return rc;
+}
+
+/// x86-64's table only: AArch64 has openat alone.
+/// Safety: the dispatcher's.
+@export("lx_open")
+unsafe fn open(a: *mut syscall_args) -> i64 =>
+    openCommon(CWD, arg(a, 0), truncate<u32>(arg(a, 1)), truncate<u32>(arg(a, 2)));
+
+/// x86-64's table only.
+/// Safety: the dispatcher's.
+@export("lx_creat")
+unsafe fn creat(a: *mut syscall_args) -> i64 =>
+    openCommon(CWD, arg(a, 0), LX_O_WRONLY | LX_O_CREAT | LX_O_TRUNC, truncate<u32>(arg(a, 1)));
+
+/// Safety: the dispatcher's.
+@export("lx_openat")
+unsafe fn openat(a: *mut syscall_args) -> i64 =>
+    openCommon(truncate<i64>(arg(a, 0)), arg(a, 1), truncate<u32>(arg(a, 2)), truncate<u32>(arg(a, 3)));
+
+/// Safety: the dispatcher's.
+@export("lx_close")
+unsafe fn close(a: *mut syscall_args) -> i64 => handle_close(handles(), arg32(a, 0)) as i64;
+
+/// Safety: the dispatcher's.
+@export("lx_lseek")
+unsafe fn lseek(a: *mut syscall_args) -> i64 {
+    let f = lx_file_of(arg32(a, 0), 0);
+    if (f.isNull()) {
+        // pipes, sockets, the console: not seekable
+        let obj = handle_lookup(handles(), arg32(a, 0), 0);
+        if (obj.isNull()) {
+            return -EBADF as i64;
+        }
+        kobject_put(obj);
+        return -ESPIPE as i64;
+    }
+    let rc = file_seek(f, truncate<i64>(arg(a, 1)), arg32(a, 2)); // SEEK_* values coincide
+    file_put(f);
+    return rc;
+}
