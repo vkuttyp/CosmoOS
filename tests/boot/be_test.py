@@ -349,6 +349,69 @@ def stage_forward(args, port, results):
                    f"took {env}; B booted on B's base system, its record B's; {time.monotonic() - t0:.1f}s")
 
 
+LAST = "v1.0.14"
+
+
+def stage_last(args, port, results):
+    """The upgrade a user of the last release makes (roadmap 1.3 R0), on a disk
+    of its own: v1.0.14 installs itself, its own cosmo-upgrade takes an
+    environment and switches to A, A boots and --rollback returns to v1.0.14
+    on that environment."""
+    sub = argparse.Namespace(base=args.last, workdir=os.path.join(args.workdir, "last"), timeout=args.timeout,
+                             arch=args.arch)
+    os.makedirs(sub.workdir)
+    upgrade_test.BASE = LAST
+    upgrade_test.stage_install(sub, results)   # sets sub.target
+    t0 = time.monotonic()
+    mark = "/etc/r0-note"
+
+    b = boot("last-upgrade", sub)
+    try:
+        need(b.text(), rf"^\[ INFO\] boot: verified boot, key {RELEASE_KEY} ", f"the installed {LAST}")
+        sh(b, f"wget -q -O /etc/pkg/keys/build.pub http://10.0.2.2:{port}/trust.pub && echo before > {mark} && sync",
+           "trust")
+        fetch(b, port, args.arch, "a", UPA)
+        out = sh(b, f"/sbin/cosmo-upgrade {UPA}", "up")
+        env = need(out, r"^cosmo-upgrade: boot environment (be-\S+): the root as it is now, paired with the current "
+                        r"set$", f"the environment {LAST}'s cosmo-upgrade takes").group(1)
+        need(out, r"^cosmo-upgrade: upgraded; reboot to run it", f"{LAST}'s cosmo-upgrade to A")
+        end(b, "last-upgrade")
+    except Exception:
+        b.kill()
+        raise
+    b = boot("last-new", sub)
+    try:
+        key = need(b.text(), r"^\[ INFO\] boot: verified boot, key ([0-9a-f]+) ", "A's verified boot").group(1)
+        if key == RELEASE_KEY:
+            raise Fail(f"last-new: the boot after the upgrade is still verified with the release key: {LAST}'s set")
+        out = sh(b, f"cosmo-upgrade --list && echo after > {mark} && sync", "list")
+        a = need(out, r"^cosmo-upgrade: the root's base system is the current set's \((v\S+), ([0-9a-f]{12})\)$",
+                 "--list on A: what the root's files are")
+        if re.search(r"^cosmo-upgrade: the root's record says", out, re.M):
+            raise Fail(f"last-new: --list says the record is wrong: {out[-600:]!r}")
+        need(out, rf"^{re.escape(env)}\s+previous\s+[0-9a-f]{{12}}\s+on the root$", f"--list: {LAST}'s environment")
+        out = rebooting(b, "cosmo-upgrade --rollback", "last-new")
+        need(out, rf"^cosmo-upgrade: the root rolls back to {re.escape(env)} at the next boot; the tree it replaces "
+                  r"is kept as be-\S+$", "A's --rollback: the root's record")
+        need(out, r"^cosmo-upgrade: rolled back: the boot set now, and the root -- packages, /etc and the base "
+                  r"system as they were in ", "A's --rollback")
+    except Exception:
+        b.kill()
+        raise
+    b = boot("last-back", sub)
+    try:
+        need(b.text(), rf"^\[ INFO\] boot: verified boot, key {RELEASE_KEY} ", f"{LAST} again")
+        out = sh(b, f"cat {mark}", "note")
+        need(out, r"^before$", f"the environment's /etc, as it was before the upgrade")
+        end(b, "last-back")
+    except Exception:
+        b.kill()
+        raise
+    results.append(f"last: {LAST} -> A ({LAST}'s cosmo-upgrade, environment {env}); A booted verified with the "
+                   f"build's key on its own base system ({a.group(1)}); A's --rollback returned {LAST}'s set and the "
+                   f"environment's root; {time.monotonic() - t0:.1f}s")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--image", required=True)
@@ -358,10 +421,13 @@ def main():
     ap.add_argument("--workdir", required=True)
     ap.add_argument("--timeout", type=float, default=240.0, help="per boot")
     ap.add_argument("--older", help=f"the published {OLDER}'s live image: the forward stage")
-    ap.add_argument("--only", choices=("forward", "space"), help="that stage alone (space: after the install)")
+    ap.add_argument("--last", help=f"the published {LAST}'s live image: the last stage")
+    ap.add_argument("--only", choices=("forward", "last", "space"), help="that stage alone (space: after the install)")
     args = ap.parse_args()
     if args.only == "forward" and not args.older:
         ap.error("--only forward needs --older")
+    if args.only == "last" and not args.last:
+        ap.error("--only last needs --last")
     if not math.isfinite(args.timeout) or args.timeout <= 0:
         ap.error(f"--timeout must be a finite number of seconds above 0, not {args.timeout}")
     shutil.rmtree(args.workdir, ignore_errors=True)
@@ -378,6 +444,10 @@ def main():
     results = []
     t0 = time.monotonic()
     try:
+        if args.last and args.only in (None, "last"):
+            stage_last(args, port, results)
+        if args.only == "last":
+            raise Done()
         if args.older and args.only != "space":
             stage_forward(args, port, results)
         if args.only == "forward":

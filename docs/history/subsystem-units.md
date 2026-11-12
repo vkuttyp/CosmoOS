@@ -3739,3 +3739,11 @@ See the [history index](README.md).
   - `MATRIX_REMOTE` runs the x86-64 half on a second machine, started
     detached there and its result fetched at the end.
   - Report: `docs/audit/2026-11-12-t1-matrix-report.md`.
+- **R0, first PR: the upgrade from v1.0.14 tested, and 1.1.0's notes
+  (2026-11-12, roadmap 1.3).**
+  - `test-be` gains the stage `last`: the published v1.0.14 installs
+    itself, upgrades to this build with its own `cosmo-upgrade`, the build
+    boots, and its `--rollback` returns to v1.0.14 on the environment's
+    root. `make test-upgrade` runs it on both architectures.
+  - `docs/releases/v1.1.0.md`.
+  - Report: `docs/audit/2026-11-12-r0-upgrade-from-last-report.md`.
