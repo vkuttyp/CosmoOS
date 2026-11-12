@@ -108,8 +108,13 @@ matrix runs its boots first, or waits for the load to fall.
 Two candidates, each measured before it is chosen: the Debian host under
 KVM for x86-64, and QEMU's `hvf` accelerator on the Mac for AArch64.
 
-- [ ] **Acceptance:** a dated report with the debug boot's time under TCG,
+- [x] **Acceptance:** a dated report with the debug boot's time under TCG,
   KVM and HVF, which self-tests fail under each and why, and the choice.
+  Done 2026-11-12 (`docs/audit/2026-11-12-t2-faster-boot-report.md`):
+  neither is chosen. HVF does not boot the kernel (DRV-15); KVM does not
+  finish a boot (DRV-18, SMP-7, TEST-25, causes not established) and is
+  1.6 times faster on the self-tests it ran, because the tests wait on
+  the clock (TEST-26).
 
 Size: about 0.2x for both.
 
