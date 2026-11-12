@@ -3695,3 +3695,11 @@ See the [history index](README.md).
   - `compat/linux/lxsock.cee`: the Linux personality's socket calls, the
     first section out of `syscalls.c` (4,223 lines left).
   - Report: `docs/audit/2026-11-11-k1-sa8-syscalls-report.md`.
+- **K1, second PR: ceesafec 0.37.0 and the native call table in CeeSafe
+  (2026-11-12, roadmap 1.3).**
+  - The pin moves to ceesafec 0.37.0, which emits a plain static of
+    integers `const` (CeeSafe ADR 0098).
+  - `kernel/syscall/native.cee` replaces `native.c`: the table by index,
+    the always-allowed list and `personality_native`, all in read-only
+    data as they were in C.
+  - Report: `docs/audit/2026-11-12-k1-native-table-report.md`.

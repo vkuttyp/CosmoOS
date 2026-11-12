@@ -61,7 +61,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
-CEESAFEC_VERSION = "0.33.0"
+CEESAFEC_VERSION = "0.37.0"
 
 # Each port: its CeeSafe source, the C it generates, what that C is, the header ceesafec generates for it (None
 # when the port's header is hand-written C, imported by the source), and whether it uses CeeSafe's kernel library
@@ -259,6 +259,8 @@ PORTS = [
      "The self-tests of the exception fixups and the user-access guard: uaccess, uaccess-guard", None, True),
     ("kernel/syscall/syscall.cee", "kernel/syscall/syscall.c",
      "The system-call dispatcher, the filter and the counters (syscall.h)", None, True),
+    ("kernel/syscall/native.cee", "kernel/syscall/native.c",
+     "The native personality's system-call table and its record (process.h)", None, False),
     ("kernel/syscall/jobctl.cee", "kernel/syscall/jobctl.c",
      "The native calls on sessions, the terminal, credentials, limits and blocking (syscall.h)", None, False),
     ("kernel/syscall/threads.cee", "kernel/syscall/threads.c",

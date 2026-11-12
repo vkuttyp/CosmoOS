@@ -36,6 +36,9 @@ extern "C" {
     const STAT_IS_7_WORDS: bool = true;
     @cvalue("sizeof(enum vnode_type) == sizeof(uint32_t)")
     const VNODE_TYPE_IS_A_WORD: bool = true;
+    /// sys_chown passes the user's "keep" straight through to vfs_chown.
+    @cvalue("COSMO_ID_KEEP == VFS_ID_KEEP")
+    const ID_KEEP_IS_THE_SAME: bool = true;
     const VFS_PATH_MAX: usize = 1024;
     const COSMO_O_ACCMODE: u32 = 0x0003;
     const COSMO_O_RDONLY: u32 = 0x0000;

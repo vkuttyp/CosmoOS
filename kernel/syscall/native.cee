@@ -1,0 +1,413 @@
+// native.cee - The CosmoOS native personality: its system-call table and its record, in CeeSafe (roadmap 1.3 K1).
+//
+// Numbers come from uapi/cosmo/syscall.h, and the C compiler holds each constant below to that header. The calls are
+// this directory's (io.cee, threads.cee, mmap.cee, files.cee, mount.cee, sockets.cee, procs.cee, sysctl.cee,
+// jobctl.cee) and the subsystems' that syscall.h declares. The table, the list and the record are C's `const`
+// objects, in read-only data (CeeSafe ADRs 0091 and 0098).
+
+@header("kernel/elf.h", "kernel/process.h", "kernel/syscall.h", "uapi/cosmo/syscall.h")
+extern "C" {
+    struct syscall_args;
+    struct process;
+    struct elf_info;
+    struct personality_auxv_args;
+    struct arch_user_regs;
+    struct sigaction_k;
+    struct signal_info;
+    @ctype("syscall_fn")
+    struct syscall_fn;
+    struct personality {
+        name: *CChar;
+        table: *syscall_fn;
+        count: u32;
+        always_allowed: *u16;
+        nr_always_allowed: u32;
+        signal_frame: extern "C" fn(*mut arch_user_regs, *sigaction_k, *signal_info, u64) -> i32;
+        claims_elf: extern "C" fn(*elf_info) -> bool;
+        auxv: extern "C" fn(*mut process, *elf_info, *personality_auxv_args, *mut u64, u32) -> u32;
+    }
+    const SYS_exit: u16 = 0;
+    const SYS_write: u16 = 1;
+    const SYS_read: u16 = 2;
+    const SYS_getpid: u16 = 3;
+    const SYS_yield: u16 = 4;
+    const SYS_sleep_ns: u16 = 5;
+    const SYS_clock_ns: u16 = 6;
+    const SYS_mmap: u16 = 7;
+    const SYS_munmap: u16 = 8;
+    const SYS_log: u16 = 9;
+    const SYS_close: u16 = 10;
+    const SYS_open: u16 = 11;
+    const SYS_stat: u16 = 12;
+    const SYS_fstat: u16 = 13;
+    const SYS_lseek: u16 = 14;
+    const SYS_mkdir: u16 = 15;
+    const SYS_unlink: u16 = 16;
+    const SYS_rmdir: u16 = 17;
+    const SYS_rename: u16 = 18;
+    const SYS_getdents: u16 = 19;
+    const SYS_sync: u16 = 20;
+    const SYS_mount: u16 = 21;
+    const SYS_umount: u16 = 22;
+    const SYS_socket: u16 = 23;
+    const SYS_bind: u16 = 24;
+    const SYS_listen: u16 = 25;
+    const SYS_accept: u16 = 26;
+    const SYS_connect: u16 = 27;
+    const SYS_sendto: u16 = 28;
+    const SYS_recvfrom: u16 = 29;
+    const SYS_shutdown: u16 = 30;
+    const SYS_getsockname: u16 = 31;
+    const SYS_spawn: u16 = 32;
+    const SYS_wait: u16 = 33;
+    const SYS_kill: u16 = 34;
+    const SYS_pipe: u16 = 35;
+    const SYS_dup: u16 = 36;
+    const SYS_getppid: u16 = 37;
+    const SYS_chdir: u16 = 38;
+    const SYS_getcwd: u16 = 39;
+    const SYS_procinfo: u16 = 40;
+    const SYS_klog: u16 = 41;
+    const SYS_sysctl: u16 = 42;
+    const SYS_vm_create: u16 = 43;
+    const SYS_vm_mem: u16 = 44;
+    const SYS_vm_mem_rw: u16 = 45;
+    const SYS_vcpu_create: u16 = 46;
+    const SYS_vcpu_regs: u16 = 47;
+    const SYS_vcpu_run: u16 = 48;
+    const SYS_vcpu_irq: u16 = 49;
+    const SYS_setresuid: u16 = 50;
+    const SYS_setresgid: u16 = 51;
+    const SYS_getresuid: u16 = 52;
+    const SYS_getresgid: u16 = 53;
+    const SYS_setgroups: u16 = 54;
+    const SYS_getgroups: u16 = 55;
+    const SYS_getrlimit: u16 = 56;
+    const SYS_setrlimit: u16 = 57;
+    const SYS_ioready: u16 = 58;
+    const SYS_setnonblock: u16 = 59;
+    const SYS_aio_create: u16 = 60;
+    const SYS_aio_submit: u16 = 61;
+    const SYS_aio_wait: u16 = 62;
+    const SYS_gethostname: u16 = 63;
+    const SYS_sethostname: u16 = 64;
+    const SYS_syscall_filter: u16 = 65;
+    const SYS_sigaction: u16 = 66;
+    const SYS_sigprocmask: u16 = 67;
+    const SYS_sigreturn: u16 = 68;
+    const SYS_sigpending: u16 = 69;
+    const SYS_setpgid: u16 = 70;
+    const SYS_getpgid: u16 = 71;
+    const SYS_setsid: u16 = 72;
+    const SYS_getsid: u16 = 73;
+    const SYS_tcgetpgrp: u16 = 74;
+    const SYS_tcsetpgrp: u16 = 75;
+    const SYS_tcgetattr: u16 = 76;
+    const SYS_tcsetattr: u16 = 77;
+    const SYS_ttysize: u16 = 78;
+    const SYS_vm_raise_spi: u16 = 79;
+    const SYS_vm_lower_spi: u16 = 80;
+    const SYS_fsync: u16 = 81;
+    const SYS_thread_self: u16 = 82;
+    const SYS_futex_wait: u16 = 83;
+    const SYS_futex_wake: u16 = 84;
+    const SYS_thread_create: u16 = 85;
+    const SYS_thread_exit: u16 = 86;
+    const SYS_set_tls: u16 = 87;
+    const SYS_vcpu_stop: u16 = 88;
+    const SYS_symlink: u16 = 89;
+    const SYS_readlink: u16 = 90;
+    const SYS_lstat: u16 = 91;
+    const SYS_getsockopt: u16 = 92;
+    const SYS_mprotect: u16 = 93;
+    const SYS_futex_requeue: u16 = 94;
+    const SYS_thread_kill: u16 = 95;
+    const SYS_msync: u16 = 96;
+    const SYS_sendmsg: u16 = 97;
+    const SYS_recvmsg: u16 = 98;
+    const SYS_socketpair: u16 = 99;
+    const SYS_mknod: u16 = 100;
+    const SYS_timer_create: u16 = 101;
+    const SYS_switch_root: u16 = 102;
+    const SYS_exec: u16 = 103;
+    const SYS_sysctl_set: u16 = 104;
+    const SYS_reboot: u16 = 105;
+    const SYS_getrandom: u16 = 106;
+    const SYS_link: u16 = 107;
+    const SYS_chmod: u16 = 108;
+    const SYS_chown: u16 = 109;
+    const SYS_utimes: u16 = 110;
+    const SYS_umask: u16 = 111;
+    const SYS_chroot: u16 = 112;
+    const SYS_COUNT: u16 = 113;
+    fn native_claims_elf(info: *elf_info) -> bool;
+    fn native_auxv(p: *mut process, info: *elf_info, x: *personality_auxv_args, w: *mut u64, max: u32) -> u32;
+    fn native_signal_frame(
+        regs: *mut arch_user_regs,
+        act: *sigaction_k,
+        info: *signal_info,
+        blocked_before: u64,
+    ) -> i32;
+    fn sys_exit(a: *mut syscall_args) -> i64;
+    fn sys_write(a: *mut syscall_args) -> i64;
+    fn sys_read(a: *mut syscall_args) -> i64;
+    fn sys_getpid(a: *mut syscall_args) -> i64;
+    fn sys_yield(a: *mut syscall_args) -> i64;
+    fn sys_sleep_ns(a: *mut syscall_args) -> i64;
+    fn sys_clock_ns(a: *mut syscall_args) -> i64;
+    fn sys_mmap(a: *mut syscall_args) -> i64;
+    fn sys_munmap(a: *mut syscall_args) -> i64;
+    fn sys_log(a: *mut syscall_args) -> i64;
+    fn sys_close(a: *mut syscall_args) -> i64;
+    fn sys_open(a: *mut syscall_args) -> i64;
+    fn sys_stat(a: *mut syscall_args) -> i64;
+    fn sys_fstat(a: *mut syscall_args) -> i64;
+    fn sys_lseek(a: *mut syscall_args) -> i64;
+    fn sys_mkdir(a: *mut syscall_args) -> i64;
+    fn sys_unlink(a: *mut syscall_args) -> i64;
+    fn sys_rmdir(a: *mut syscall_args) -> i64;
+    fn sys_rename(a: *mut syscall_args) -> i64;
+    fn sys_getdents(a: *mut syscall_args) -> i64;
+    fn sys_sync(a: *mut syscall_args) -> i64;
+    fn sys_mount(a: *mut syscall_args) -> i64;
+    fn sys_umount(a: *mut syscall_args) -> i64;
+    fn sys_socket(a: *mut syscall_args) -> i64;
+    fn sys_bind(a: *mut syscall_args) -> i64;
+    fn sys_listen(a: *mut syscall_args) -> i64;
+    fn sys_accept(a: *mut syscall_args) -> i64;
+    fn sys_connect(a: *mut syscall_args) -> i64;
+    fn sys_sendto(a: *mut syscall_args) -> i64;
+    fn sys_recvfrom(a: *mut syscall_args) -> i64;
+    fn sys_shutdown(a: *mut syscall_args) -> i64;
+    fn sys_getsockname(a: *mut syscall_args) -> i64;
+    fn sys_spawn(a: *mut syscall_args) -> i64;
+    fn sys_wait(a: *mut syscall_args) -> i64;
+    fn sys_kill(a: *mut syscall_args) -> i64;
+    fn sys_pipe(a: *mut syscall_args) -> i64;
+    fn sys_dup(a: *mut syscall_args) -> i64;
+    fn sys_getppid(a: *mut syscall_args) -> i64;
+    fn sys_chdir(a: *mut syscall_args) -> i64;
+    fn sys_getcwd(a: *mut syscall_args) -> i64;
+    fn sys_procinfo(a: *mut syscall_args) -> i64;
+    fn sys_klog(a: *mut syscall_args) -> i64;
+    fn sys_sysctl(a: *mut syscall_args) -> i64;
+    fn sys_vm_create(a: *mut syscall_args) -> i64;
+    fn sys_vm_mem(a: *mut syscall_args) -> i64;
+    fn sys_vm_mem_rw(a: *mut syscall_args) -> i64;
+    fn sys_vcpu_create(a: *mut syscall_args) -> i64;
+    fn sys_vcpu_regs(a: *mut syscall_args) -> i64;
+    fn sys_vcpu_run(a: *mut syscall_args) -> i64;
+    fn sys_vcpu_irq(a: *mut syscall_args) -> i64;
+    fn sys_setresuid(a: *mut syscall_args) -> i64;
+    fn sys_setresgid(a: *mut syscall_args) -> i64;
+    fn sys_getresuid(a: *mut syscall_args) -> i64;
+    fn sys_getresgid(a: *mut syscall_args) -> i64;
+    fn sys_setgroups(a: *mut syscall_args) -> i64;
+    fn sys_getgroups(a: *mut syscall_args) -> i64;
+    fn sys_getrlimit(a: *mut syscall_args) -> i64;
+    fn sys_setrlimit(a: *mut syscall_args) -> i64;
+    fn sys_ioready(a: *mut syscall_args) -> i64;
+    fn sys_setnonblock(a: *mut syscall_args) -> i64;
+    fn sys_aio_create(a: *mut syscall_args) -> i64;
+    fn sys_aio_submit(a: *mut syscall_args) -> i64;
+    fn sys_aio_wait(a: *mut syscall_args) -> i64;
+    fn sys_gethostname(a: *mut syscall_args) -> i64;
+    fn sys_sethostname(a: *mut syscall_args) -> i64;
+    fn sys_syscall_filter(a: *mut syscall_args) -> i64;
+    fn sys_sigaction(a: *mut syscall_args) -> i64;
+    fn sys_sigprocmask(a: *mut syscall_args) -> i64;
+    fn sys_sigreturn(a: *mut syscall_args) -> i64;
+    fn sys_sigpending(a: *mut syscall_args) -> i64;
+    fn sys_setpgid(a: *mut syscall_args) -> i64;
+    fn sys_getpgid(a: *mut syscall_args) -> i64;
+    fn sys_setsid(a: *mut syscall_args) -> i64;
+    fn sys_getsid(a: *mut syscall_args) -> i64;
+    fn sys_tcgetpgrp(a: *mut syscall_args) -> i64;
+    fn sys_tcsetpgrp(a: *mut syscall_args) -> i64;
+    fn sys_tcgetattr(a: *mut syscall_args) -> i64;
+    fn sys_tcsetattr(a: *mut syscall_args) -> i64;
+    fn sys_ttysize(a: *mut syscall_args) -> i64;
+    fn sys_vm_raise_spi(a: *mut syscall_args) -> i64;
+    fn sys_vm_lower_spi(a: *mut syscall_args) -> i64;
+    fn sys_fsync(a: *mut syscall_args) -> i64;
+    fn sys_thread_self(a: *mut syscall_args) -> i64;
+    fn sys_futex_wait(a: *mut syscall_args) -> i64;
+    fn sys_futex_wake(a: *mut syscall_args) -> i64;
+    fn sys_thread_create(a: *mut syscall_args) -> i64;
+    fn sys_thread_exit(a: *mut syscall_args) -> i64;
+    fn sys_set_tls(a: *mut syscall_args) -> i64;
+    fn sys_vcpu_stop(a: *mut syscall_args) -> i64;
+    fn sys_symlink(a: *mut syscall_args) -> i64;
+    fn sys_readlink(a: *mut syscall_args) -> i64;
+    fn sys_lstat(a: *mut syscall_args) -> i64;
+    fn sys_getsockopt(a: *mut syscall_args) -> i64;
+    fn sys_mprotect(a: *mut syscall_args) -> i64;
+    fn sys_futex_requeue(a: *mut syscall_args) -> i64;
+    fn sys_thread_kill(a: *mut syscall_args) -> i64;
+    fn sys_msync(a: *mut syscall_args) -> i64;
+    fn sys_sendmsg(a: *mut syscall_args) -> i64;
+    fn sys_recvmsg(a: *mut syscall_args) -> i64;
+    fn sys_socketpair(a: *mut syscall_args) -> i64;
+    fn sys_mknod(a: *mut syscall_args) -> i64;
+    fn sys_timer_create(a: *mut syscall_args) -> i64;
+    fn sys_switch_root(a: *mut syscall_args) -> i64;
+    fn sys_exec(a: *mut syscall_args) -> i64;
+    fn sys_sysctl_set(a: *mut syscall_args) -> i64;
+    fn sys_reboot(a: *mut syscall_args) -> i64;
+    fn sys_getrandom(a: *mut syscall_args) -> i64;
+    fn sys_link(a: *mut syscall_args) -> i64;
+    fn sys_chmod(a: *mut syscall_args) -> i64;
+    fn sys_chown(a: *mut syscall_args) -> i64;
+    fn sys_utimes(a: *mut syscall_args) -> i64;
+    fn sys_umask(a: *mut syscall_args) -> i64;
+    fn sys_chroot(a: *mut syscall_args) -> i64;
+}
+
+/// The table's length: SYS_COUNT, so a number added to the header without a call here is a null entry, which the
+/// dispatcher answers with -ENOSYS, and never an index past the end.
+const CALLS: usize = SYS_COUNT as usize;
+
+/// The table: each call by its number, as C's `[SYS_exit] = sys_exit`.
+static TABLE: [extern "C" fn(*mut syscall_args) -> i64; CALLS] = [
+    SYS_exit: sys_exit,
+    SYS_write: sys_write,
+    SYS_read: sys_read,
+    SYS_getpid: sys_getpid,
+    SYS_yield: sys_yield,
+    SYS_sleep_ns: sys_sleep_ns,
+    SYS_clock_ns: sys_clock_ns,
+    SYS_mmap: sys_mmap,
+    SYS_munmap: sys_munmap,
+    SYS_log: sys_log,
+    SYS_close: sys_close,
+    SYS_open: sys_open,
+    SYS_stat: sys_stat,
+    SYS_fstat: sys_fstat,
+    SYS_lseek: sys_lseek,
+    SYS_mkdir: sys_mkdir,
+    SYS_unlink: sys_unlink,
+    SYS_rmdir: sys_rmdir,
+    SYS_rename: sys_rename,
+    SYS_getdents: sys_getdents,
+    SYS_sync: sys_sync,
+    SYS_mount: sys_mount,
+    SYS_umount: sys_umount,
+    SYS_socket: sys_socket,
+    SYS_bind: sys_bind,
+    SYS_listen: sys_listen,
+    SYS_accept: sys_accept,
+    SYS_connect: sys_connect,
+    SYS_sendto: sys_sendto,
+    SYS_recvfrom: sys_recvfrom,
+    SYS_shutdown: sys_shutdown,
+    SYS_getsockname: sys_getsockname,
+    SYS_spawn: sys_spawn,
+    SYS_wait: sys_wait,
+    SYS_kill: sys_kill,
+    SYS_pipe: sys_pipe,
+    SYS_dup: sys_dup,
+    SYS_getppid: sys_getppid,
+    SYS_chdir: sys_chdir,
+    SYS_getcwd: sys_getcwd,
+    SYS_procinfo: sys_procinfo,
+    SYS_klog: sys_klog,
+    SYS_sysctl: sys_sysctl,
+    SYS_vm_create: sys_vm_create,
+    SYS_vm_mem: sys_vm_mem,
+    SYS_vm_mem_rw: sys_vm_mem_rw,
+    SYS_vcpu_create: sys_vcpu_create,
+    SYS_vcpu_regs: sys_vcpu_regs,
+    SYS_vcpu_run: sys_vcpu_run,
+    SYS_vcpu_irq: sys_vcpu_irq,
+    SYS_setresuid: sys_setresuid,
+    SYS_setresgid: sys_setresgid,
+    SYS_getresuid: sys_getresuid,
+    SYS_getresgid: sys_getresgid,
+    SYS_setgroups: sys_setgroups,
+    SYS_getgroups: sys_getgroups,
+    SYS_getrlimit: sys_getrlimit,
+    SYS_setrlimit: sys_setrlimit,
+    SYS_ioready: sys_ioready,
+    SYS_setnonblock: sys_setnonblock,
+    SYS_aio_create: sys_aio_create,
+    SYS_aio_submit: sys_aio_submit,
+    SYS_aio_wait: sys_aio_wait,
+    SYS_gethostname: sys_gethostname,
+    SYS_sethostname: sys_sethostname,
+    SYS_syscall_filter: sys_syscall_filter,
+    SYS_sigaction: sys_sigaction,
+    SYS_sigprocmask: sys_sigprocmask,
+    SYS_sigreturn: sys_sigreturn,
+    SYS_sigpending: sys_sigpending,
+    SYS_setpgid: sys_setpgid,
+    SYS_getpgid: sys_getpgid,
+    SYS_setsid: sys_setsid,
+    SYS_getsid: sys_getsid,
+    SYS_tcgetpgrp: sys_tcgetpgrp,
+    SYS_tcsetpgrp: sys_tcsetpgrp,
+    SYS_tcgetattr: sys_tcgetattr,
+    SYS_tcsetattr: sys_tcsetattr,
+    SYS_ttysize: sys_ttysize,
+    SYS_vm_raise_spi: sys_vm_raise_spi,
+    SYS_vm_lower_spi: sys_vm_lower_spi,
+    SYS_fsync: sys_fsync,
+    SYS_thread_self: sys_thread_self,
+    SYS_futex_wait: sys_futex_wait,
+    SYS_futex_wake: sys_futex_wake,
+    SYS_thread_create: sys_thread_create,
+    SYS_thread_exit: sys_thread_exit,
+    SYS_set_tls: sys_set_tls,
+    SYS_vcpu_stop: sys_vcpu_stop,
+    SYS_symlink: sys_symlink,
+    SYS_readlink: sys_readlink,
+    SYS_lstat: sys_lstat,
+    SYS_getsockopt: sys_getsockopt,
+    SYS_mprotect: sys_mprotect,
+    SYS_futex_requeue: sys_futex_requeue,
+    SYS_thread_kill: sys_thread_kill,
+    SYS_msync: sys_msync,
+    SYS_sendmsg: sys_sendmsg,
+    SYS_recvmsg: sys_recvmsg,
+    SYS_socketpair: sys_socketpair,
+    SYS_mknod: sys_mknod,
+    SYS_timer_create: sys_timer_create,
+    SYS_switch_root: sys_switch_root,
+    SYS_exec: sys_exec,
+    SYS_sysctl_set: sys_sysctl_set,
+    SYS_reboot: sys_reboot,
+    SYS_getrandom: sys_getrandom,
+    SYS_link: sys_link,
+    SYS_chmod: sys_chmod,
+    SYS_chown: sys_chown,
+    SYS_utimes: sys_utimes,
+    SYS_umask: sys_umask,
+    SYS_chroot: sys_chroot,
+];
+
+/// What a system-call filter may never deny.
+///
+/// A process must always be able to stop, whatever its filter says: a filter that killed a process for exiting would
+/// turn every clean shutdown into a signal death. `sigreturn` joins it: a filter that denied the return from a handler
+/// would turn every caught signal into a kill. `thread_exit` is allowed for the reason `exit` is: a thread that cannot
+/// exit cannot be stopped, and a filter that traps one in the kernel is a denial of service the filter unit did not
+/// intend.
+///
+/// `set_tls` joins them for the same reason one step earlier: every native program installs its thread block in
+/// `__libc_start`, before `main` and before anything a filter could be about, so a filter that omitted it would kill
+/// every child of a filtered process during startup -- a program that cannot reach its own `main` cannot be
+/// confined, only destroyed. This was not theoretical: the inherited-filter test's child died on number 87 in startup
+/// instead of on the call the test was about, and the status was the same either way, so nothing failed.
+static ALWAYS_ALLOWED: [u16; 4] = [SYS_exit, SYS_sigreturn, SYS_thread_exit, SYS_set_tls];
+
+/// `extern const struct personality personality_native;` (process.h).
+@export("personality_native")
+static NATIVE: personality = personality {
+    name: "native\0".ptr as *CChar,
+    table: borrow TABLE as *[extern "C" fn(*mut syscall_args) -> i64; CALLS] as *syscall_fn,
+    count: SYS_COUNT as u32,
+    always_allowed: borrow ALWAYS_ALLOWED as *[u16; 4] as *u16,
+    nr_always_allowed: 4,
+    signal_frame: native_signal_frame,
+    claims_elf: native_claims_elf,
+    auxv: native_auxv,
+};

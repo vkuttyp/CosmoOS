@@ -26,7 +26,7 @@ Facts on 2026-11-11:
   run on another hypervisor, a cloud or a physical machine, and the user
   guide ([`docs/guide/`](guide/README.md)) tells how to install it under
   QEMU, with a page for Parallels, and nowhere else.
-- CeeSafe released 0.8.0 to 0.31.0 in ten days. CosmoOS pinned 0.24.2 until 2026-11-11, and pins 0.33.0 since.
+- CeeSafe released 0.8.0 to 0.31.0 in ten days. CosmoOS pinned 0.24.2 until 2026-11-11, pinned 0.33.0 on 2026-11-11, and pins 0.37.0 since.
 
 So the kernel is getting safer and nobody can use it. This roadmap puts
 the release first, bounds the conversion, and asks of CeeSafe only what
@@ -204,6 +204,12 @@ call table and the personality record; they are K1's first PR.
 The two call tables are arrays of C functions, which CeeSafe cannot write
 until C2, so K1 leaves them in C and names them in the floor list; C2
 moves them later.
+
+Progress: the first PR (#512, 2026-11-11) was those seven commits. The
+second moves the native table, the always-allowed list and the native
+personality's record to `kernel/syscall/native.cee` (ceesafec 0.37.0),
+and `native.c` is gone. Left: `compat/linux/syscalls.c` (4,223 lines)
+with its table and record.
 
 - [ ] **Acceptance:** 2.0's SA8 acceptance with that one exception: no C
   left in `compat/` or `kernel/syscall/` but the two tables and the
