@@ -180,6 +180,26 @@ int64_t lx_fchown(struct syscall_args *a);
 int64_t lx_chroot(struct syscall_args *a);
 int64_t lx_utimensat(struct syscall_args *a);
 
+/* lxname.cee: names and descriptors. */
+int64_t lx_unlinkat(struct syscall_args *a);
+int64_t lx_faccessat(struct syscall_args *a);
+int64_t lx_rename(struct syscall_args *a);
+int64_t lx_renameat(struct syscall_args *a);
+int64_t lx_link(struct syscall_args *a);
+int64_t lx_linkat(struct syscall_args *a);
+int64_t lx_chdir(struct syscall_args *a);
+int64_t lx_fchdir(struct syscall_args *a);
+int64_t lx_getcwd(struct syscall_args *a);
+int64_t lx_dup(struct syscall_args *a);
+int64_t lx_dup2(struct syscall_args *a);
+int64_t lx_dup3(struct syscall_args *a);
+int64_t lx_pipe(struct syscall_args *a);
+int64_t lx_pipe2(struct syscall_args *a);
+int64_t lx_fcntl(struct syscall_args *a);
+int64_t lx_sync(struct syscall_args *a);
+int64_t lx_fsync(struct syscall_args *a);
+int64_t lx_umask(struct syscall_args *a);
+
 /* lxsock.cee: the socket calls. lx_accept is accept4 too (its fourth
  * argument, the flags, is 0 from accept). */
 int64_t lx_socket(struct syscall_args *a);

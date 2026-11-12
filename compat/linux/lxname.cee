@@ -1,0 +1,517 @@
+// lxname.cee - The Linux personality's calls on names and descriptors (docs/compat/linux/design.md), in CeeSafe
+// (roadmap 1.3 K1): unlinkat, faccessat, rename, renameat, link, linkat, chdir, fchdir, getcwd, dup, dup2, dup3, pipe,
+// pipe2, fcntl, sync, fsync and umask. syscalls.c's table names them (linux_internal.h).
+
+@header(
+    "kernel/errno.h", "kernel/handle.h", "kernel/kmalloc.h", "kernel/object.h", "kernel/pipe.h", "kernel/process.h",
+    "kernel/spinlock.h", "kernel/string.h", "kernel/syscall.h", "kernel/uaccess.h", "kernel/vfs.h",
+    "uapi/cosmo/syscall.h", "linux_abi.h", "linux_internal.h",
+)
+extern "C" {
+    struct syscall_args {
+        a: [u64; 6];
+    }
+    struct handle_table;
+    struct process {
+        lock: spinlock_t;
+        handles: handle_table;
+        umask: u32;                  // swapped atomically (umask)
+        cwd_path_locked: [u8; 1024]; // under `lock`
+    }
+    struct vnode {
+        @cname("type")
+        kind: u32;
+    }
+    struct file {
+        vn: *mut vnode;
+        dir_path: *mut CChar;
+    }
+    struct cosmo_stat;
+
+    @cvalue(
+        "VFS_PATH_MAX == 1024 && sizeof(((struct process *)0)->cwd_path_locked) == 1024 && sizeof(enum vnode_type) == sizeof(uint32_t) && sizeof(struct cosmo_stat) <= 256",
+    )
+    const SIZES: bool = true;
+    const VFS_PATH_MAX: usize = 1024;
+    const VNODE_DIR: u32 = 2;
+    const HANDLE_TABLE_SIZE: i32 = 64;
+    const HANDLE_RIGHT_READ: u32 = 1;
+    const HANDLE_RIGHT_WRITE: u32 = 2;
+    const HANDLE_RIGHT_OWNER: u32 = 28;
+    const HANDLE_FLAG_CLOEXEC: u32 = 1;
+    const LX_AT_REMOVEDIR: u64 = 0x200;
+    const LX_AT_SYMLINK_FOLLOW: u32 = 0x400;
+    const LX_AT_EMPTY_PATH: u32 = 0x1000;
+    const LX_O_RDONLY: i64 = 0;
+    const LX_O_WRONLY: i64 = 1;
+    const LX_O_RDWR: i64 = 2;
+    const LX_O_NONBLOCK: u32 = 0o4000;
+    const LX_O_CLOEXEC: u32 = 0o2000000;
+    const LX_F_DUPFD: u32 = 0;
+    const LX_F_GETFD: u32 = 1;
+    const LX_F_SETFD: u32 = 2;
+    const LX_F_GETFL: u32 = 3;
+    const LX_F_SETFL: u32 = 4;
+    const LX_F_DUPFD_CLOEXEC: u32 = 1030;
+    const LX_FD_CLOEXEC: u32 = 1;
+    const EBADF: i32 = 9;
+    const ENOMEM: i32 = 12;
+    const EACCES: i32 = 13;
+    const EFAULT: i32 = 14;
+    const EBUSY: i32 = 16;
+    const ENOTDIR: i32 = 20;
+    const EINVAL: i32 = 22;
+    const EMFILE: i32 = 24;
+    const ERANGE: i32 = 34;
+    const EOPNOTSUPP: i32 = 95;
+
+    fn process_current() -> *mut process;
+    fn process_cwd_get() -> *mut vnode;
+    fn process_chdir(path: *CChar) -> i32;
+    fn process_fchdir(dir: *mut vnode, path: *CChar) -> i32;
+    fn user_range_ok(addr: u64, len: usize) -> bool;
+    fn copy_to_user(userDst: u64, src: *void, len: usize) -> i32;
+    fn strlcpy(dst: *mut CChar, src: *CChar, size: usize) -> usize;
+    fn handle_get(t: *mut handle_table, h: i32, rightsOut: *mut u32) -> *mut kobject;
+    fn handle_get_flags(t: *mut handle_table, h: i32, rightsOut: *mut u32, flagsOut: *mut u32) -> *mut kobject;
+    fn handle_lookup(t: *mut handle_table, h: i32, rightsNeeded: u32) -> *mut kobject;
+    fn handle_install(t: *mut handle_table, obj: *mut kobject, rights: u32) -> i32;
+    fn handle_install_flags(t: *mut handle_table, obj: *mut kobject, rights: u32, flags: u32) -> i32;
+    fn handle_install_at_flags(t: *mut handle_table, h: i32, obj: *mut kobject, rights: u32, flags: u32) -> i32;
+    fn handle_set_flags(t: *mut handle_table, h: i32, flags: u32) -> i32;
+    fn handle_close(t: *mut handle_table, h: i32) -> i32;
+    fn kobject_set_nonblock(obj: *mut kobject, on: i32) -> i32;
+    fn pipe_create(readEnd: *mut *mut kobject, writeEnd: *mut *mut kobject) -> i32;
+    fn file_from_kobject(obj: *mut kobject) -> *mut file;
+    fn file_put(f: *mut file);
+    fn file_dir_base_ok(f: *file) -> bool;
+    fn file_sync(f: *mut file) -> i32;
+    fn vnode_put(vn: *mut vnode);
+    fn vfs_sync() -> i32;
+    fn vfs_unlink(start: *mut vnode, path: *CChar) -> i32;
+    fn vfs_rmdir(start: *mut vnode, path: *CChar) -> i32;
+    fn vfs_stat(start: *mut vnode, path: *CChar, st: *mut cosmo_stat) -> i32;
+    fn vfs_link(ostart: *mut vnode, oldpath: *CChar, nstart: *mut vnode, newpath: *CChar, follow: bool) -> i32;
+    fn vfs_rename(start: *mut vnode, oldpath: *CChar, newpath: *CChar) -> i32;
+    fn vfs_rename2(ostart: *mut vnode, oldpath: *CChar, nstart: *mut vnode, newpath: *CChar) -> i32;
+    fn lx_get_path(uptr: u64, buf: *mut CChar) -> i32;
+    fn lx_at_base(
+        dirfd: i64,
+        path: *CChar,
+        rights: u32,
+        out: *mut *mut vnode,
+        basepath: *mut CChar,
+        n: usize,
+        have: *mut u32,
+    ) -> i32;
+    fn lx_file_of(h: i32, rights: u32) -> *mut file;
+}
+
+const NOT: u32 = 0xFFFFFFFF;
+const CWD: i64 = -100; // LX_AT_FDCWD as a register holds it
+
+/// Safety: the dispatcher's: `a` is the call's arguments.
+unsafe fn arg(a: *mut syscall_args, i: usize) -> u64 => Ptr.toBorrow(a as *syscall_args).a[i];
+
+/// Argument `i` as Linux's `int`.
+/// Safety: the dispatcher's.
+unsafe fn arg32(a: *mut syscall_args, i: usize) -> i32 => truncate<i32>(arg(a, i));
+
+/// Safety: in a process's thread.
+unsafe fn handles() -> *mut handle_table {
+    let p = Ptr.toBorrowMut(process_current());
+    return borrow mut p.handles as *mut handle_table;
+}
+
+/// The directory `path` resolves from for a call needing `rights` on it (lx_at_base), with no name wanted.
+/// Safety: in a process's thread; `path` is terminated.
+unsafe fn baseOf(dirfd: i64, path: *CChar, rights: u32, out: *mut *mut vnode) -> i32 =>
+    lx_at_base(dirfd, path, rights, out, 0 as *mut CChar, 0, 0 as *mut u32);
+
+/// Safety: the dispatcher's.
+@export("lx_unlinkat")
+unsafe fn unlinkat(a: *mut syscall_args) -> i64 {
+    var path = [0u8; 1024];
+    let p = borrow mut path as *mut [u8; 1024] as *mut u8 as *mut CChar;
+    var rc = lx_get_path(arg(a, 1), p);
+    if (rc != 0) {
+        return rc as i64;
+    }
+    var start = 0 as *mut vnode;
+    rc = baseOf(truncate<i64>(arg(a, 0)), p as *CChar, HANDLE_RIGHT_WRITE, borrow mut start as *mut *mut vnode);
+    if (rc != 0) {
+        return rc as i64;
+    }
+    rc = if ((arg(a, 2) & LX_AT_REMOVEDIR) != 0) vfs_rmdir(start, p as *CChar) else vfs_unlink(start, p as *CChar);
+    vnode_put(start);
+    return rc as i64;
+}
+
+/// Safety: the dispatcher's.
+@export("lx_faccessat")
+unsafe fn faccessat(a: *mut syscall_args) -> i64 {
+    var path = [0u8; 1024];
+    let p = borrow mut path as *mut [u8; 1024] as *mut u8 as *mut CChar;
+    var rc = lx_get_path(arg(a, 1), p);
+    if (rc != 0) {
+        return rc as i64;
+    }
+    var start = 0 as *mut vnode;
+    rc = baseOf(truncate<i64>(arg(a, 0)), p as *CChar, HANDLE_RIGHT_READ, borrow mut start as *mut *mut vnode);
+    if (rc != 0) {
+        return rc as i64;
+    }
+    var st = [0u64; 32]; // room for a struct cosmo_stat (checked above); only whether the name resolves
+    rc = vfs_stat(start, p as *CChar, borrow mut st as *mut [u64; 32] as *mut cosmo_stat);
+    vnode_put(start);
+    return rc as i64;
+}
+
+/// Two paths from user memory in one heap block of 2 * VFS_PATH_MAX (two would not fit the kernel stack's frame
+/// limit): `rc` is 0 and `old` the block, which the caller frees, or `rc` is the error and nothing is held.
+struct Paths {
+    rc: i32;
+    old: *mut CChar;
+    new: *mut CChar;
+}
+
+/// Safety: in a process's thread.
+unsafe fn twoPaths(uold: u64, unew: u64) -> Paths {
+    let none = 0 as *mut CChar;
+    let block = kmalloc(2 * VFS_PATH_MAX, 0) as *mut u8;
+    if (block.isNull()) {
+        return Paths { rc: -ENOMEM, old: none, new: none };
+    }
+    let oldp = block as *mut CChar;
+    let newp = block.add(VFS_PATH_MAX) as *mut CChar;
+    var rc = lx_get_path(uold, oldp);
+    if (rc == 0) {
+        rc = lx_get_path(unew, newp);
+    }
+    if (rc != 0) {
+        kfree(block as *mut void);
+        return Paths { rc: rc, old: none, new: none };
+    }
+    return Paths { rc: 0, old: oldp, new: newp };
+}
+
+/// x86-64's table only: AArch64 has renameat alone.
+/// Safety: the dispatcher's.
+@export("lx_rename")
+unsafe fn rename(a: *mut syscall_args) -> i64 {
+    let p = twoPaths(arg(a, 0), arg(a, 1));
+    if (p.rc != 0) {
+        return p.rc as i64;
+    }
+    let cwd = process_cwd_get();
+    let rc = vfs_rename(cwd, p.old as *CChar, p.new as *CChar);
+    vnode_put(cwd);
+    kfree(p.old as *mut void);
+    return rc as i64;
+}
+
+/// linkat(olddirfd, oldpath, newdirfd, newpath, flags) (VFS-4): as Linux, a final symbolic link is linked itself
+/// unless AT_SYMLINK_FOLLOW. AT_EMPTY_PATH (linking a descriptor's file) needs CAP_DAC_READ_SEARCH on Linux; here an
+/// empty path is -ENOENT whatever the flags say.
+///
+/// Safety: in a process's thread.
+unsafe fn linkatCommon(odirfd: i64, uold: u64, ndirfd: i64, unew: u64, flags: u32) -> i64 {
+    if ((flags & ((LX_AT_SYMLINK_FOLLOW | LX_AT_EMPTY_PATH) ^ NOT)) != 0) {
+        return -EINVAL as i64;
+    }
+    let p = twoPaths(uold, unew);
+    if (p.rc != 0) {
+        return p.rc as i64;
+    }
+    var ostart = 0 as *mut vnode;
+    var rc = baseOf(odirfd, p.old as *CChar, HANDLE_RIGHT_READ, borrow mut ostart as *mut *mut vnode);
+    if (rc == 0) {
+        var nstart = 0 as *mut vnode;
+        rc = baseOf(ndirfd, p.new as *CChar, HANDLE_RIGHT_WRITE, borrow mut nstart as *mut *mut vnode);
+        if (rc == 0) {
+            rc = vfs_link(ostart, p.old as *CChar, nstart, p.new as *CChar, (flags & LX_AT_SYMLINK_FOLLOW) != 0);
+        }
+        vnode_put(ostart);
+        if (!nstart.isNull()) {
+            vnode_put(nstart);
+        }
+    }
+    kfree(p.old as *mut void);
+    return rc as i64;
+}
+
+/// Safety: the dispatcher's.
+@export("lx_linkat")
+unsafe fn linkat(a: *mut syscall_args) -> i64 =>
+    linkatCommon(truncate<i64>(arg(a, 0)), arg(a, 1), truncate<i64>(arg(a, 2)), arg(a, 3), truncate<u32>(arg(a, 4)));
+
+/// x86-64's table only: AArch64 has linkat alone.
+/// Safety: the dispatcher's.
+@export("lx_link")
+unsafe fn link(a: *mut syscall_args) -> i64 => linkatCommon(CWD, arg(a, 0), CWD, arg(a, 1), 0);
+
+/// Safety: the dispatcher's.
+@export("lx_renameat")
+unsafe fn renameat(a: *mut syscall_args) -> i64 {
+    let p = twoPaths(arg(a, 1), arg(a, 3));
+    if (p.rc != 0) {
+        return p.rc as i64;
+    }
+    // both directories change
+    var ostart = 0 as *mut vnode;
+    var rc = baseOf(
+        truncate<i64>(arg(a, 0)),
+        p.old as *CChar,
+        HANDLE_RIGHT_WRITE,
+        borrow mut ostart as *mut *mut vnode,
+    );
+    if (rc == 0) {
+        var nstart = 0 as *mut vnode;
+        rc = baseOf(
+            truncate<i64>(arg(a, 2)),
+            p.new as *CChar,
+            HANDLE_RIGHT_WRITE,
+            borrow mut nstart as *mut *mut vnode,
+        );
+        if (rc == 0) {
+            rc = vfs_rename2(ostart, p.old as *CChar, nstart, p.new as *CChar);
+        }
+        vnode_put(ostart);
+        if (!nstart.isNull()) {
+            vnode_put(nstart);
+        }
+    }
+    kfree(p.old as *mut void);
+    return rc as i64;
+}
+
+/// Safety: the dispatcher's.
+@export("lx_chdir")
+unsafe fn chdir(a: *mut syscall_args) -> i64 {
+    var path = [0u8; 1024];
+    let p = borrow mut path as *mut [u8; 1024] as *mut u8 as *mut CChar;
+    let rc = lx_get_path(arg(a, 0), p);
+    return if (rc != 0) rc as i64 else process_chdir(p as *CChar) as i64;
+}
+
+/// fchdir: the directory a descriptor names becomes the working directory, with the name the directory file recorded
+/// when it was opened (P31).
+///
+/// Safety: the dispatcher's.
+@export("lx_fchdir")
+unsafe fn fchdir(a: *mut syscall_args) -> i64 {
+    let obj = handle_lookup(handles(), arg32(a, 0), HANDLE_RIGHT_READ);
+    if (obj.isNull()) {
+        return -EBADF as i64;
+    }
+    let fp = file_from_kobject(obj);
+    if (fp.isNull()) {
+        kobject_put(obj);
+        return -ENOTDIR as i64;
+    }
+    let f = Ptr.toBorrow(fp as *file);
+    // P39, as lx_at_base
+    let rc = if (Ptr.toBorrow(f.vn as *vnode).kind == VNODE_DIR && !file_dir_base_ok(fp as *file)) -EACCES
+        else process_fchdir(f.vn, f.dir_path as *CChar);
+    file_put(fp);
+    return rc as i64;
+}
+
+/// Safety: the dispatcher's.
+@export("lx_getcwd")
+unsafe fn getcwd(a: *mut syscall_args) -> i64 {
+    let p = Ptr.toBorrowMut(process_current());
+    let len = arg(a, 1);
+    var buf = [0u8; 1024];
+    let out = borrow mut buf as *mut [u8; 1024] as *mut u8 as *mut CChar;
+    let lock = borrow mut p.lock as *mut spinlock_t;
+    let s = spin_lock_irqsave(lock);
+    let n = strlcpy(out, borrow p.cwd_path_locked as *[u8; 1024] as *u8 as *CChar, 1024);
+    spin_unlock_irqrestore(lock, s);
+    if (len < n as u64 + 1) {
+        return -ERANGE as i64;
+    }
+    // Linux returns the length including the NUL.
+    return if (copy_to_user(arg(a, 0), out as *void, n + 1) != 0) -EFAULT as i64 else truncate<i64>(n + 1);
+}
+
+/// Safety: the dispatcher's.
+@export("lx_dup")
+unsafe fn dup(a: *mut syscall_args) -> i64 {
+    let t = handles();
+    var rights: u32 = 0;
+    let obj = handle_get(t, arg32(a, 0), borrow mut rights as *mut u32);
+    if (obj.isNull()) {
+        return -EBADF as i64;
+    }
+    let rc = handle_install(t, obj, rights);
+    kobject_put(obj);
+    return rc as i64;
+}
+
+/// Safety: in a process's thread.
+unsafe fn dupTo(h: i32, target: i32, flags: u32) -> i64 {
+    if (target < 0 || target >= HANDLE_TABLE_SIZE) {
+        return -EBADF as i64;
+    }
+    let t = handles();
+    var rights: u32 = 0;
+    let obj = handle_get(t, h, borrow mut rights as *mut u32);
+    if (obj.isNull()) {
+        return -EBADF as i64;
+    }
+    var rc = h;
+    if (target != h) {
+        handle_close(t, target);
+        rc = handle_install_at_flags(t, target, obj, rights, flags);
+    }
+    kobject_put(obj);
+    return rc as i64;
+}
+
+/// x86-64's table only: AArch64 has dup3 alone.
+/// Safety: the dispatcher's.
+@export("lx_dup2")
+unsafe fn dup2(a: *mut syscall_args) -> i64 => dupTo(arg32(a, 0), arg32(a, 1), 0);
+
+/// Safety: the dispatcher's.
+@export("lx_dup3")
+unsafe fn dup3(a: *mut syscall_args) -> i64 {
+    let flags = truncate<u32>(arg(a, 2));
+    if (arg32(a, 0) == arg32(a, 1) || (flags & (LX_O_CLOEXEC ^ NOT)) != 0) {
+        return -EINVAL as i64;
+    }
+    return dupTo(arg32(a, 0), arg32(a, 1), if ((flags & LX_O_CLOEXEC) != 0) HANDLE_FLAG_CLOEXEC else 0);
+}
+
+/// Safety: in a process's thread.
+unsafe fn pipeCommon(uarr: u64, flags: u32) -> i64 {
+    if (!user_range_ok(uarr, 8)) {
+        return -EFAULT as i64;
+    }
+    var rd = 0 as *mut kobject;
+    var wr = 0 as *mut kobject;
+    let rc = pipe_create(borrow mut rd as *mut *mut kobject, borrow mut wr as *mut *mut kobject);
+    if (rc != 0) {
+        return rc as i64;
+    }
+    if ((flags & LX_O_NONBLOCK) != 0) {
+        kobject_set_nonblock(rd, 1);
+        kobject_set_nonblock(wr, 1);
+    }
+    let t = handles();
+    // The owner rights too, as the native pipe gives: a Linux descriptor can be dup'd and passed in a message
+    // (SCM_RIGHTS needs TRANSFER).
+    let hf = if ((flags & LX_O_CLOEXEC) != 0) HANDLE_FLAG_CLOEXEC else 0;
+    var h = [0i32; 2];
+    h[0] = handle_install_flags(t, rd, HANDLE_RIGHT_READ | HANDLE_RIGHT_OWNER, hf);
+    h[1] = if (h[0] < 0) -EMFILE else handle_install_flags(t, wr, HANDLE_RIGHT_WRITE | HANDLE_RIGHT_OWNER, hf);
+    kobject_put(rd);
+    kobject_put(wr);
+    if (h[0] < 0 || h[1] < 0) {
+        if (h[0] >= 0) {
+            handle_close(t, h[0]);
+        }
+        return -EMFILE as i64;
+    }
+    if (copy_to_user(uarr, borrow h as *[i32; 2] as *void, 8) != 0) {
+        handle_close(t, h[0]);
+        handle_close(t, h[1]);
+        return -EFAULT as i64;
+    }
+    return 0;
+}
+
+/// x86-64's table only: AArch64 has pipe2 alone.
+/// Safety: the dispatcher's.
+@export("lx_pipe")
+unsafe fn pipe(a: *mut syscall_args) -> i64 => pipeCommon(arg(a, 0), 0);
+
+/// Safety: the dispatcher's.
+@export("lx_pipe2")
+unsafe fn pipe2(a: *mut syscall_args) -> i64 => pipeCommon(arg(a, 0), truncate<u32>(arg(a, 1)));
+
+/// Safety: the dispatcher's.
+@export("lx_fcntl")
+unsafe fn fcntl(a: *mut syscall_args) -> i64 {
+    let h = arg32(a, 0);
+    let cmd = truncate<u32>(arg(a, 1));
+    let t = handles();
+    var rights: u32 = 0;
+    var hflags: u32 = 0;
+    let obj = handle_get_flags(t, h, borrow mut rights as *mut u32, borrow mut hflags as *mut u32);
+    if (obj.isNull()) {
+        return -EBADF as i64;
+    }
+    var rc = -EINVAL as i64;
+    if (cmd == LX_F_GETFD) {
+        rc = if ((hflags & HANDLE_FLAG_CLOEXEC) != 0) 1 else 0; // FD_CLOEXEC
+    } else if (cmd == LX_F_SETFD) {
+        rc = handle_set_flags(
+            t,
+            h,
+            if ((truncate<u32>(arg(a, 2)) & LX_FD_CLOEXEC) != 0) HANDLE_FLAG_CLOEXEC else 0,
+        ) as i64;
+    } else if (cmd == LX_F_SETFL) {
+        // O_NONBLOCK is the one status flag with an effect; the rest are accepted and dropped.
+        let r = kobject_set_nonblock(obj, if ((arg(a, 2) & LX_O_NONBLOCK as u64) != 0) 1 else 0);
+        rc = if (r < 0 && r != -EOPNOTSUPP) r as i64 else 0;
+    } else if (cmd == LX_F_GETFL) {
+        let canRead = (rights & HANDLE_RIGHT_READ) != 0;
+        let canWrite = (rights & HANDLE_RIGHT_WRITE) != 0;
+        rc = if (canRead && canWrite) LX_O_RDWR else if (canWrite) LX_O_WRONLY else LX_O_RDONLY;
+        if (kobject_set_nonblock(obj, -1) == 1) {
+            rc += LX_O_NONBLOCK as i64; // a bit the access mode never holds
+        }
+    } else if (cmd == LX_F_DUPFD || cmd == LX_F_DUPFD_CLOEXEC) {
+        let min = arg32(a, 2);
+        rc = -EMFILE as i64;
+        var i = if (min < 0) 0 else min;
+        while (i < HANDLE_TABLE_SIZE) {
+            let r = handle_install_at_flags(
+                t,
+                i,
+                obj,
+                rights,
+                if (cmd == LX_F_DUPFD_CLOEXEC) HANDLE_FLAG_CLOEXEC else 0,
+            );
+            if (r >= 0) {
+                rc = r as i64;
+                break;
+            }
+            if (r != -EBUSY) {
+                break;
+            }
+            i += 1;
+        }
+    }
+    kobject_put(obj);
+    return rc;
+}
+
+/// Safety: the dispatcher's.
+@export("lx_sync")
+unsafe fn sync(a: *mut syscall_args) -> i64 => vfs_sync() as i64;
+
+/// Safety: the dispatcher's.
+@export("lx_fsync")
+unsafe fn fsync(a: *mut syscall_args) -> i64 {
+    let f = lx_file_of(arg32(a, 0), 0);
+    if (f.isNull()) {
+        return -EBADF as i64;
+    }
+    let rc = file_sync(f);
+    file_put(f);
+    return rc as i64;
+}
+
+/// umask (roadmap M3): the process's own, inherited by fork and spawn (struct process.umask); it was a constant 022
+/// that nothing applied.
+///
+/// Safety: the dispatcher's.
+@export("lx_umask")
+unsafe fn umask(a: *mut syscall_args) -> i64 {
+    let p = Ptr.toBorrowMut(process_current());
+    let cell = Ptr.toBorrow(borrow mut p.umask as *mut u32 as *AtomicU32);
+    return cell.swapWith(truncate<u32>(arg(a, 0)) & 0o777, Ordering.Relaxed) as i64;
+}
