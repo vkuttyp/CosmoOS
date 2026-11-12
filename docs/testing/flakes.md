@@ -5516,3 +5516,34 @@ probes one after another. What would name the cause: record the CPU
 `thread_create` chose beside the one the probe ran on, and the
 migrator's move count across the probes. Not on the list: one sighting,
 no mechanism. Nothing was changed.
+
+
+## `process-user` over its bound in four boots of one matrix, 2026-11-12
+
+Local validation of K1's third PR (the Linux personality's identity,
+clock, process, system and poll calls in CeeSafe) on `f65409c0`,
+02:24-03:50 local, while another session on the same Mac ran fuzzers
+(four `fuzz_quic` processes at 70-98% of a CPU each, in 300 s runs). Of
+the matrix's twelve debug boots, three failed `SELFTEST: process-user
+... FAIL: check failed: clock_since_ns(t0) < 15000000000ULL at line
+263`: x86-64 `test-smp2` (21628 ms; the watchdog's 20 s report and
+`syscall-fuzz` at 12736 ms against 8000 followed), x86-64 `test-chaos`
+(17909 ms) and AArch64 `QEMU_SMP=4 test` (23230 ms). AArch64
+`test-net-login`'s install boot failed the same check (19625 ms) and
+`net-tcp-delack` (`nor as a retransmission`). The five passing boots
+whose logs were kept took 6692 to 7903 ms. The one-minute load
+average read 4.40 before `test-smp2` and 11.74 after it, with a
+five-minute figure of 31.83; it read 90.02 at 03:50, when the last test
+ended. In the install boot's time-stamped log the time is spread, not
+one gap: each of init's 4002-call children took 1.66 to 1.99 s against
+0.40 to 0.56 s in the x86-64 boot of the same test that passed. The
+scheduler's dump at the watchdog's report in the AArch64 `QEMU_SMP=4`
+boot shows three CPUs idle and one running `svc`, init blocked on its
+children.
+
+The four were run again one at a time, each started with the one-minute
+load below 6 (03:57-04:23; 5.81, 5.76, 5.65 and 4.87): all four passed,
+with `process-user` at 8547, 6960 and 6902 ms and, in `test-net-login`'s
+three boots, 7528, 6991 and 6288 ms. The host's load, as in the entries
+of 2026-10-25 and 2026-11-11: this time what loaded it is named, and
+the same tree passes when it is quiet. Nothing was changed.
