@@ -120,6 +120,16 @@ int64_t lx_umount2(struct syscall_args *a);
 int64_t lx_statfs(struct syscall_args *a);
 int64_t lx_fstatfs(struct syscall_args *a);
 
+/* lxbase.cee: a path from user memory (an empty one is -ENOENT), the
+ * directory an *at call resolves from, and the file a descriptor names. */
+struct vnode;
+struct file;
+int lx_get_path(uint64_t uptr, char *buf);
+int lx_at_base(int64_t dirfd, const char *path, unsigned rights, struct vnode **out, char *basepath, size_t n,
+               unsigned *have);
+struct file *lx_file_of(int h, unsigned rights);
+struct file *lx_file_of_manage(int h, int *err);
+
 /* lxsock.cee: the socket calls. lx_accept is accept4 too (its fourth
  * argument, the flags, is 0 from accept). */
 int64_t lx_socket(struct syscall_args *a);
