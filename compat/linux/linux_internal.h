@@ -114,6 +114,12 @@ int64_t lx_ppoll(struct syscall_args *a);
 int64_t lx_pselect6(struct syscall_args *a);
 int64_t lx_select(struct syscall_args *a);
 
+/* lxmount.cee: mount, umount2, statfs and fstatfs. */
+int64_t lx_mount(struct syscall_args *a);
+int64_t lx_umount2(struct syscall_args *a);
+int64_t lx_statfs(struct syscall_args *a);
+int64_t lx_fstatfs(struct syscall_args *a);
+
 /* lxsock.cee: the socket calls. lx_accept is accept4 too (its fourth
  * argument, the flags, is 0 from accept). */
 int64_t lx_socket(struct syscall_args *a);
