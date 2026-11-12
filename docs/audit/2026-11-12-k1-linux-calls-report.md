@@ -53,7 +53,7 @@ stack was built (below).
   asserted before each pair.
 - The fork hook panics if its pool of attach records is empty when it takes one. `m <= n` under the parent's lock
   rules that out; the check is there because `make analyze` could not relate the two counts and reported a null
-  dereference in the generated C (commit `8abc21b9`, after the first matrix run below).
+  dereference in the generated C (commit `8b87a98f`, after the first matrix run below).
 - Calls that only x86-64's table names (`lx_mkdir`, `lx_open` and the like) are exported on AArch64 too, unused.
 - `epoll_wait` zeroes the four bytes of padding in AArch64's 16-byte event record before copying it out.
 - `fcntl(F_GETFL)` adds `O_NONBLOCK` with `+=` where the C used `|=`; the access mode never holds that bit.
@@ -70,9 +70,9 @@ Recorded in `docs/testing/flakes.md`:
 
 ## Validation
 
-Local, macOS host, ceesafec 0.37.0 (the published binary). The matrix ran twice. The first run, at `fe0ab1c0`,
+Local, macOS host, ceesafec 0.37.0 (the published binary). The matrix ran twice. The first run, at `553b413f`,
 passed every step but `make analyze`, which failed on both architectures with the one unexpected diagnostic
-described above. The table is the second run, at `8abc21b9`, which has the fix; no step in it needed a rerun.
+described above. The table is the second run, at `8b87a98f`, which has the fix; no step in it needed a rerun.
 `make test-net-login` was not run again: its result is the first run's.
 
 | Step | x86-64 | AArch64 |
@@ -88,7 +88,7 @@ described above. The table is the second run, at `8abc21b9`, which has the fix; 
 | `make test-harness-retry` | PASS in 197.0 s | PASS in 210.4 s |
 | `make BUILD=release test` | PASS in 19.1 s | PASS in 21.6 s |
 | `make test-busybox` | PASS in 455.5 s | PASS in 464.9 s |
-| `make test-net-login` (at `fe0ab1c0`) | PASS in 730.7 s | PASS in 708.0 s |
+| `make test-net-login` (at `553b413f`) | PASS in 730.7 s | PASS in 708.0 s |
 
 ## What this does not do
 
