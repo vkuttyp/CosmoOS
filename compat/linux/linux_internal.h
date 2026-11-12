@@ -243,6 +243,16 @@ int64_t lx_epoll_ctl(struct syscall_args *a);
 int64_t lx_epoll_wait(struct syscall_args *a);
 int64_t lx_epoll_pwait(struct syscall_args *a);
 
+/* lxdir.cee: directories. */
+int64_t lx_getdents64(struct syscall_args *a);
+int64_t lx_mkdir(struct syscall_args *a);
+int64_t lx_mkdirat(struct syscall_args *a);
+int64_t lx_rmdir(struct syscall_args *a);
+int64_t lx_unlink(struct syscall_args *a);
+int64_t lx_access(struct syscall_args *a);
+int64_t lx_mknod(struct syscall_args *a);
+int64_t lx_mknodat(struct syscall_args *a);
+
 /* lxsock.cee: the socket calls. lx_accept is accept4 too (its fourth
  * argument, the flags, is 0 from accept). */
 int64_t lx_socket(struct syscall_args *a);

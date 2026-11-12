@@ -63,12 +63,6 @@
 
 /* --- process hooks (kernel/process/process.c) --------------------------------- */
 
-/* The calling process's file-creation mask (lx_umask). */
-static uint32_t lx_umask_get(void)
-{
-    return __atomic_load_n(&process_current()->umask, __ATOMIC_RELAXED);
-}
-
 static const syscall_fn *linux_table_get(void);
 
 static int linux_process_init(struct process *p, const struct elf_info *info)
@@ -281,134 +275,10 @@ static struct linux_state *lx(void)
  * ftruncate and the epoll calls are CeeSafe's (compat/linux/lxfd.cee,
  * roadmap 1.3 K1; linux_internal.h). */
 
-static int64_t lx_getdents64(struct syscall_args *a)
-{
-    uint64_t ubuf = a->a[1];
-    size_t len = (size_t)a->a[2];
-    if (len > 65536)
-        len = 65536;
-    if (len < 32)
-        return -EINVAL;
-    if (!user_range_ok(ubuf, len))
-        return -EFAULT;
-    struct file *f = lx_file_of((int)a->a[0], HANDLE_RIGHT_READ);
-    if (f == NULL)
-        return -EBADF;
-    /* Native records are at most as large as Linux ones plus alignment;
-     * read fewer bytes than the caller offers so the converted output fits. */
-    uint8_t *in = kmalloc(len, 0);
-    uint8_t *out = kmalloc(len, 0);
-    if (in == NULL || out == NULL) {
-        kfree(in);
-        kfree(out);
-        file_put(f);
-        return -ENOMEM;
-    }
-    int64_t n = file_readdir(f, in, len - len / 4);
-    file_put(f);
-    int64_t rc = n;
-    if (n > 0) {
-        size_t o = lx_dirents_from_native(in, (size_t)n, out, len);
-        rc = (int64_t)o;
-        if (o && copy_to_user(ubuf, out, o))
-            rc = -EFAULT;
-    }
-    kfree(in);
-    kfree(out);
-    return rc;
-}
-
-static int64_t path_call(struct syscall_args *a, unsigned which, uint64_t upath)
-{
-    char path[VFS_PATH_MAX];
-    int rc = lx_get_path(upath, path);
-    if (rc)
-        return rc;
-    /* One reference for all four arms -- and one release, which is why
-     * each arm sets `rc` instead of returning: an early return here would
-     * leak the reference the walk is holding. */
-    struct vnode *cwd = process_cwd_get();
-    switch (which) {
-    case 0: rc = vfs_mkdir(cwd, path, (uint32_t)a->a[1] & 07777u & ~lx_umask_get()); break;
-    case 1: rc = vfs_rmdir(cwd, path); break;
-    case 2: rc = vfs_unlink(cwd, path); break;
-    case 3: {
-        struct cosmo_stat st;
-        rc = vfs_stat(cwd, path, &st);   /* access: existence */
-        break;
-    }
-    default: rc = -ENOSYS; break;
-    }
-    vnode_put(cwd);
-    return rc;
-}
-
-static __maybe_unused int64_t lx_mkdir(struct syscall_args *a) { return path_call(a, 0, a->a[0]); }
-static __maybe_unused int64_t lx_rmdir(struct syscall_args *a) { return path_call(a, 1, a->a[0]); }
-static __maybe_unused int64_t lx_unlink(struct syscall_args *a) { return path_call(a, 2, a->a[0]); }
-static __maybe_unused int64_t lx_access(struct syscall_args *a) { return path_call(a, 3, a->a[0]); }
-
-static int64_t lx_mkdirat(struct syscall_args *a)
-{
-    char path[VFS_PATH_MAX];
-    int rc = lx_get_path(a->a[1], path);
-    if (rc)
-        return rc;
-    struct vnode *start;
-    rc = lx_at_base((int64_t)a->a[0], path, HANDLE_RIGHT_WRITE, &start, NULL, 0, NULL);
-    if (rc)
-        return rc;
-    rc = vfs_mkdir(start, path, (uint32_t)a->a[2] & 07777u & ~lx_umask_get());
-    vnode_put(start);
-    return rc;
-}
-
-/* mknodat: a FIFO is the one node an unprivileged Linux caller may make
- * (S_IFIFO); a socket's name is made by bind (S_IFSOCK -EINVAL, as the
- * native mknod says); every other type is -EPERM, Linux's answer to a
- * caller without CAP_MKNOD. */
-static int64_t do_mknod(int64_t dirfd, const char *path, uint32_t mode)
-{
-    int rc;
-    switch (mode & LX_S_IFMT) {
-    case LX_S_IFIFO:
-        break;
-    case LX_S_IFSOCK:
-        return -EINVAL;
-    default:
-        return -EPERM;
-    }
-    struct vnode *start;
-    rc = lx_at_base(dirfd, path, HANDLE_RIGHT_WRITE, &start, NULL, 0, NULL);
-    if (rc)
-        return rc;
-    struct vnode *vn;
-    rc = vfs_mknod(start, path, mode & 07777u & ~lx_umask_get(), VNODE_FIFO, &vn);
-    vnode_put(start);
-    if (rc == 0)
-        vnode_put(vn);
-    return rc;
-}
-
-static int64_t lx_mknodat(struct syscall_args *a)
-{
-    char path[VFS_PATH_MAX];
-    int rc = lx_get_path(a->a[1], path);
-    if (rc)
-        return rc;
-    return do_mknod((int64_t)a->a[0], path, (uint32_t)a->a[2]);
-}
-
-/* The legacy mknod (x86-64 only; AArch64 has the *at form alone), as
- * mkdir beside mkdirat. */
-static __maybe_unused int64_t lx_mknod(struct syscall_args *a)
-{
-    char path[VFS_PATH_MAX];
-    int rc = lx_get_path(a->a[0], path);
-    if (rc)
-        return rc;
-    return do_mknod(LX_AT_FDCWD, path, (uint32_t)a->a[1]);
-}
+/* --- directories (lxdir.cee) -------------------------------------------------
+ *
+ * getdents64, mkdir, mkdirat, rmdir, unlink, access, mknod and mknodat are
+ * CeeSafe's (compat/linux/lxdir.cee, roadmap 1.3 K1; linux_internal.h). */
 
 /* --- modes, owners, times and the root (lxattr.cee) -----------------------------
  *
