@@ -7,6 +7,7 @@
 #define COMPAT_LINUX_INTERNAL_H
 
 #include <kernel/process.h>
+#include <kernel/spinlock.h>
 #include <kernel/syscall.h>
 #include <arch/user.h>
 
@@ -129,6 +130,43 @@ int lx_at_base(int64_t dirfd, const char *path, unsigned rights, struct vnode **
                unsigned *have);
 struct file *lx_file_of(int h, unsigned rights);
 struct file *lx_file_of_manage(int h, int *err);
+
+/* One System V shared-memory attach of a process: the address it was
+ * mapped at, its size, and a reference-holding pointer to the segment
+ * record (not a shmid, which may be gone after IPC_RMID). */
+struct shm_segment;
+struct lx_shm_attach {
+    struct lx_shm_attach *next;
+    uint64_t addr;
+    size_t size;
+    uint64_t tag;              /* the mapping's VM identity, for shmdt */
+    struct shm_segment *seg;
+};
+
+/* A process's state at the Linux door (process->linux): syscalls.c makes
+ * it at exec and fork and releases it; lxmem.cee moves the break and
+ * keeps the attaches. */
+struct linux_state {
+    uint64_t brk_start, brk;
+    uint64_t sigtramp;   /* the trampoline page, drawn per exec (SEC-4); 0 on x86-64 */
+    unsigned unknown_syscalls;
+    uint32_t wx_logged;   /* W^X's refusal has said why, once per exec; swapped atomically (lxmem.cee), so a word */
+    struct lx_shm_attach *shm_attaches;   /* singly linked; head insert */
+    spinlock_t shm_lock;                  /* guards shm_attaches (threads share it) */
+};
+
+/* lxmem.cee: the break, mappings and System V shared memory. */
+int64_t lx_brk(struct syscall_args *a);
+int64_t lx_mmap(struct syscall_args *a);
+int64_t lx_msync(struct syscall_args *a);
+int64_t lx_munmap(struct syscall_args *a);
+int64_t lx_mremap(struct syscall_args *a);
+int64_t lx_mprotect(struct syscall_args *a);
+int64_t lx_madvise(struct syscall_args *a);
+int64_t lx_shmget(struct syscall_args *a);
+int64_t lx_shmat(struct syscall_args *a);
+int64_t lx_shmdt(struct syscall_args *a);
+int64_t lx_shmctl(struct syscall_args *a);
 
 /* lxsock.cee: the socket calls. lx_accept is accept4 too (its fourth
  * argument, the flags, is 0 from accept). */
