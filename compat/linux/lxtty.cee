@@ -1,0 +1,314 @@
+// lxtty.cee - The Linux personality's ioctl (docs/compat/linux/design.md), in CeeSafe (roadmap 1.3 K1): what a
+// terminal needs, a character device's own requests, and on a socket the interface requests (netioctl.cee, shell
+// completeness S1). syscalls.c's table names it (linux_internal.h).
+//
+// Until the terminal-modes unit every request answered -ENOTTY, and the cost was not fidelity but correctness: a libc
+// told the console is not a terminal fully buffers its output, so a hosted program's prompt does not appear until
+// something flushes it. Roadmap M4 adds what a shell's job control, a pty's opener (musl's posix_openpt, grantpt,
+// unlockpt and ptsname) and an ssh server ask of a terminal.
+//
+// The native ABI has typed calls for these (docs/kernel/tty/design.md, "Modes"); this is the translation layer, and
+// it is the only place in the tree where a call's argument type depends on another argument. That is a property of
+// Linux's ABI, which this personality exists to imitate, not one the tree adopts.
+//
+// The records are words here -- a struct cosmo_termios in one u64, a struct lx_termios in nine u32, a struct
+// cosmo_ttysize and a struct lx_winsize in four u16 each -- and the C compiler checks their layouts (the extern
+// block).
+
+@header(
+    "kernel/errno.h", "kernel/handle.h", "kernel/object.h", "kernel/process.h", "kernel/pty.h", "kernel/socket.h",
+    "kernel/syscall.h", "kernel/tty.h", "kernel/uaccess.h", "kernel/vfs.h", "uapi/cosmo/syscall.h", "convert.h",
+    "linux_abi.h", "linux_internal.h",
+)
+extern "C" {
+    struct syscall_args {
+        a: [u64; 6];
+    }
+    struct kobject;
+    struct handle_table;
+    struct process {
+        handles: handle_table;
+    }
+    struct tty;
+    struct socket;
+    struct vnode;
+    struct file {
+        vn: *mut vnode;
+    }
+    struct chrdev_ops {
+        ioctl: extern "C" fn(*mut vnode, *mut file, u32, u64) -> i64;
+    }
+    struct cosmo_termios;
+    struct cosmo_ttysize;
+    struct lx_termios;
+
+    @cvalue(
+        "sizeof(struct cosmo_termios) == 8 && _Alignof(struct cosmo_termios) <= 8 && sizeof(struct lx_termios) == 36 && _Alignof(struct lx_termios) <= 4 && sizeof(struct cosmo_ttysize) == 8 && offsetof(struct cosmo_ttysize, cols) == 0 && offsetof(struct cosmo_ttysize, rows) == 2 && sizeof(struct lx_winsize) == 8 && offsetof(struct lx_winsize, ws_row) == 0 && offsetof(struct lx_winsize, ws_col) == 2 && sizeof(pid_t) == 4",
+    )
+    const LAYOUTS: bool = true;
+    const LX_TCGETS: u32 = 0x5401;
+    const LX_TCSETS: u32 = 0x5402;
+    const LX_TCSETSW: u32 = 0x5403;
+    const LX_TCSETSF: u32 = 0x5404;
+    const LX_TCSBRK: u32 = 0x5409;
+    const LX_TCXONC: u32 = 0x540A;
+    const LX_TCFLSH: u32 = 0x540B;
+    const LX_TIOCSCTTY: u32 = 0x540E;
+    const LX_TIOCGPGRP: u32 = 0x540F;
+    const LX_TIOCSPGRP: u32 = 0x5410;
+    const LX_TIOCOUTQ: u32 = 0x5411;
+    const LX_TIOCGWINSZ: u32 = 0x5413;
+    const LX_TIOCSWINSZ: u32 = 0x5414;
+    const LX_FIONREAD: u32 = 0x541B;
+    const LX_TIOCNOTTY: u32 = 0x5422;
+    const LX_TIOCGSID: u32 = 0x5429;
+    const LX_TIOCGPTN: u32 = 0x80045430;
+    const LX_TIOCSPTLCK: u32 = 0x40045431;
+    const LX_TIOCGPTLCK: u32 = 0x80045439;
+    const LX_TCIFLUSH: u64 = 0;
+    const LX_TCOFLUSH: u64 = 1;
+    const LX_TCIOFLUSH: u64 = 2;
+    const EBADF: i32 = 9;
+    const EFAULT: i32 = 14;
+    const EINVAL: i32 = 22;
+    const ENOTTY: i32 = 25;
+
+    fn process_current() -> *mut process;
+    fn copy_to_user(userDst: u64, src: *void, len: usize) -> i32;
+    fn copy_from_user(dst: *mut void, userSrc: u64, len: usize) -> i32;
+    fn handle_lookup(t: *mut handle_table, h: i32, rightsNeeded: u32) -> *mut kobject;
+    fn kobject_put(obj: *mut kobject);
+    fn file_from_kobject(obj: *mut kobject) -> *mut file;
+    fn socket_from_kobject(obj: *mut kobject) -> *mut socket;
+    fn ramfs_chr_ops_of(vn: *vnode) -> *chrdev_ops;
+    fn lx_ioctl_net(req: u32, arg: u64) -> i64;
+    fn lx_termios_from_native(out: *mut lx_termios, k: *cosmo_termios);
+    fn lx_termios_to_native(out: *mut cosmo_termios, lt: *lx_termios);
+    fn pty_get_index(f: *mut file, out: *mut u32) -> i32;
+    fn pty_set_lock(f: *mut file, locked: bool) -> i32;
+    fn pty_get_lock(f: *mut file, out: *mut bool) -> i32;
+    fn tty_of_open(obj: *mut kobject) -> *mut tty;
+    fn tty_put(t: *mut tty);
+    fn tty_get_termios(t: *mut tty, out: *mut cosmo_termios);
+    fn tty_set_termios(t: *mut tty, tio: *cosmo_termios);
+    fn tty_get_size(t: *mut tty, out: *mut cosmo_ttysize);
+    fn tty_set_size(t: *mut tty, size: *cosmo_ttysize);
+    fn tty_flush_input(t: *mut tty);
+    fn tty_flush_output(t: *mut tty);
+    fn tty_drain_output(t: *mut tty) -> i32;
+    fn tty_queued(t: *mut tty) -> u32;
+    fn tty_out_queued(t: *mut tty) -> u32;
+    fn tty_set_controlling(t: *mut tty) -> i32;
+    fn tty_disassociate(t: *mut tty) -> i32;
+    fn tty_get_pgrp(t: *mut tty, out: *mut u32) -> i32;
+    fn tty_set_pgrp(t: *mut tty, pgid: u32) -> i32;
+    fn tty_get_sid(t: *mut tty, out: *mut u32) -> i32;
+}
+
+/// Safety: the dispatcher's: `a` is the call's arguments.
+unsafe fn arg(a: *mut syscall_args, i: usize) -> u64 => Ptr.toBorrow(a as *syscall_args).a[i];
+
+/// One 32-bit word to user memory: 0 or -EFAULT.
+/// Safety: in a process's thread.
+unsafe fn putWord(uptr: u64, v: u32) -> i64 {
+    var w = v;
+    return if (copy_to_user(uptr, borrow w as *u32 as *void, 4) != 0) -EFAULT as i64 else 0;
+}
+
+/// A 32-bit word from user memory.
+struct Word {
+    rc: i64; // 0 or -EFAULT
+    value: i32;
+}
+
+/// Safety: in a process's thread.
+unsafe fn getWord(uptr: u64) -> Word {
+    var v: i32 = 0;
+    if (copy_from_user(borrow mut v as *mut i32 as *mut void, uptr, 4) != 0) {
+        return Word { rc: -EFAULT as i64, value: 0 };
+    }
+    return Word { rc: 0, value: v };
+}
+
+/// TCGETS, and TCSETS, TCSETSW and TCSETSF. SETSW and SETSF first wait for the output written so far to go (a slave's:
+/// until the master has read it; the console's sinks hold nothing); SETSF then discards unread input.
+///
+/// Safety: `t` is a referenced terminal.
+unsafe fn termios(t: *mut tty, master: bool, req: u32, uarg: u64) -> i64 {
+    var k: u64 = 0;     // a struct cosmo_termios
+    var lt = [0u32; 9]; // a struct lx_termios
+    let native = borrow mut k as *mut u64 as *mut cosmo_termios;
+    let linux = borrow mut lt as *mut [u32; 9] as *mut lx_termios;
+    if (req == LX_TCGETS) {
+        tty_get_termios(t, native);
+        lx_termios_from_native(linux, native as *cosmo_termios);
+        return if (copy_to_user(uarg, linux as *void, 36) != 0) -EFAULT as i64 else 0;
+    }
+    if (copy_from_user(linux as *mut void, uarg, 36) != 0) {
+        return -EFAULT as i64;
+    }
+    lx_termios_to_native(native, linux as *lx_termios);
+    if (req != LX_TCSETS && !master) {
+        let rc = tty_drain_output(t);
+        if (rc != 0) {
+            return rc as i64;
+        }
+    }
+    if (req == LX_TCSETSF) {
+        tty_flush_input(t);
+    }
+    tty_set_termios(t, native as *cosmo_termios);
+    return 0;
+}
+
+/// TIOCGWINSZ and TIOCSWINSZ: Linux's record is rows then columns, the native one columns then rows.
+///
+/// Safety: `t` is a referenced terminal.
+unsafe fn winsize(t: *mut tty, req: u32, uarg: u64) -> i64 {
+    var sz = [0u16; 4]; // a struct cosmo_ttysize: cols, rows, reserved
+    var w = [0u16; 4];  // a struct lx_winsize: rows, cols, and the pixels
+    if (req == LX_TIOCGWINSZ) {
+        tty_get_size(t, borrow mut sz as *mut [u16; 4] as *mut cosmo_ttysize);
+        w[0] = sz[1];
+        w[1] = sz[0];
+        return if (copy_to_user(uarg, borrow w as *[u16; 4] as *void, 8) != 0) -EFAULT as i64 else 0;
+    }
+    if (copy_from_user(borrow mut w as *mut [u16; 4] as *mut void, uarg, 8) != 0) {
+        return -EFAULT as i64;
+    }
+    sz[0] = w[1];
+    sz[1] = w[0];
+    tty_set_size(t, borrow sz as *[u16; 4] as *cosmo_ttysize);
+    return 0;
+}
+
+/// The requests on a pty's own state: its number and its lock. `f` is null for the console object.
+///
+/// Safety: `f` is null or a referenced file.
+unsafe fn ptyRequest(f: *mut file, req: u32, uarg: u64) -> i64 {
+    if (req == LX_TIOCGPTN) {
+        var n: u32 = 0;
+        let rc = if (!f.isNull()) pty_get_index(f, borrow mut n as *mut u32) else -ENOTTY;
+        return if (rc != 0) rc as i64 else putWord(uarg, n);
+    }
+    if (req == LX_TIOCSPTLCK) {
+        let v = getWord(uarg);
+        if (v.rc != 0) {
+            return v.rc;
+        }
+        return if (!f.isNull()) pty_set_lock(f, v.value != 0) as i64 else -ENOTTY as i64;
+    }
+    var locked = false;
+    let rc = if (!f.isNull()) pty_get_lock(f, borrow mut locked as *mut bool) else -ENOTTY;
+    return if (rc != 0) rc as i64 else putWord(uarg, if (locked) 1 else 0);
+}
+
+/// Safety: `t` is a referenced terminal; `f` is null or the referenced file it was opened through.
+unsafe fn ioctlTty(t: *mut tty, f: *mut file, req: u32, uarg: u64) -> i64 {
+    // A pty's master sees the pair from the other end: its input is the slave's output and its output the slave's
+    // input.
+    var idx: u32 = 0;
+    let master = !f.isNull() && pty_get_index(f, borrow mut idx as *mut u32) == 0;
+    if (req == LX_TCGETS || req == LX_TCSETS || req == LX_TCSETSW || req == LX_TCSETSF) {
+        return termios(t, master, req, uarg);
+    }
+    if (req == LX_TIOCGWINSZ || req == LX_TIOCSWINSZ) {
+        return winsize(t, req, uarg);
+    }
+    if (req == LX_TIOCSCTTY) {
+        return tty_set_controlling(t) as i64; // arg 1 (steal, privileged) is not offered: -EPERM as any other
+    }
+    if (req == LX_TIOCNOTTY) {
+        return tty_disassociate(t) as i64;
+    }
+    if (req == LX_TIOCGPGRP) {
+        var pgid: u32 = 0;
+        let rc = tty_get_pgrp(t, borrow mut pgid as *mut u32);
+        return if (rc != 0) rc as i64 else putWord(uarg, pgid);
+    }
+    if (req == LX_TIOCSPGRP) {
+        let v = getWord(uarg);
+        if (v.rc != 0) {
+            return v.rc;
+        }
+        if (v.value <= 0) {
+            return -EINVAL as i64;
+        }
+        return tty_set_pgrp(t, truncate<u32>(v.value)) as i64;
+    }
+    if (req == LX_TIOCGSID) {
+        var sid: u32 = 0;
+        let rc = tty_get_sid(t, borrow mut sid as *mut u32);
+        return if (rc != 0) rc as i64 else putWord(uarg, sid);
+    }
+    if (req == LX_TIOCGPTN || req == LX_TIOCSPTLCK || req == LX_TIOCGPTLCK) {
+        return ptyRequest(f, req, uarg);
+    }
+    if (req == LX_FIONREAD) {
+        // What this end's read would get: a master the slave's output, a terminal its queued input.
+        return putWord(uarg, if (master) tty_out_queued(t) else tty_queued(t));
+    }
+    if (req == LX_TIOCOUTQ) {
+        // What this end wrote that the other has not taken: a slave's output not yet read by the master; a master's
+        // writes not yet read from the slave; the console holds nothing.
+        return putWord(uarg, if (master) tty_queued(t) else tty_out_queued(t));
+    }
+    if (req == LX_TCFLSH) {
+        if (uarg != LX_TCIFLUSH && uarg != LX_TCOFLUSH && uarg != LX_TCIOFLUSH) {
+            return -EINVAL as i64;
+        }
+        let input = uarg != LX_TCOFLUSH;
+        let output = uarg != LX_TCIFLUSH;
+        // "Input" and "output" are this end's: swapped on a master.
+        if (if (master) output else input) {
+            tty_flush_input(t);
+        }
+        if (if (master) input else output) {
+            tty_flush_output(t);
+        }
+        return 0;
+    }
+    if (req == LX_TCSBRK) {
+        // tcdrain (arg 1), and a break -- no line to break: wait, as TCSETSW does, until the master has read a
+        // slave's output (the console holds none)
+        return if (master) 0 else tty_drain_output(t) as i64;
+    }
+    if (req == LX_TCXONC) {
+        return 0; // no flow control on this side
+    }
+    return -ENOTTY as i64;
+}
+
+/// Safety: the dispatcher's.
+@export("lx_ioctl")
+unsafe fn ioctl(a: *mut syscall_args) -> i64 {
+    let req = truncate<u32>(arg(a, 1));
+    let p = Ptr.toBorrowMut(process_current());
+    let obj = handle_lookup(borrow mut p.handles as *mut handle_table, truncate<i32>(arg(a, 0)), 0);
+    if (obj.isNull()) {
+        return -EBADF as i64;
+    }
+    let t = tty_of_open(obj); // the console object, an open /dev/tty, a pty's master or slave
+    let f = file_from_kobject(obj);
+    var rc = -ENOTTY as i64;
+    if (!t.isNull()) {
+        rc = ioctlTty(t, f, req, arg(a, 2));
+        tty_put(t);
+    } else {
+        // A character device with requests of its own (/dev/rtc0).
+        var chr = 0 as *chrdev_ops;
+        var vn = 0 as *mut vnode;
+        if (!f.isNull()) {
+            vn = Ptr.toBorrow(f as *file).vn;
+            chr = ramfs_chr_ops_of(vn as *vnode);
+        }
+        if (!chr.isNull() && !Ptr.toBorrow(chr).ioctl.isNull()) {
+            let request = Ptr.toBorrow(chr).ioctl;
+            rc = request(vn, f, req, arg(a, 2));
+        } else if (!socket_from_kobject(obj).isNull()) {
+            rc = lx_ioctl_net(req, arg(a, 2)); // netioctl.cee
+        }
+    }
+    kobject_put(obj);
+    return rc;
+}

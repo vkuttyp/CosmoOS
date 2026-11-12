@@ -1,0 +1,235 @@
+// lxdir.cee - The Linux personality's directory calls (docs/compat/linux/design.md), in CeeSafe (roadmap 1.3 K1):
+// getdents64, mkdir, mkdirat, rmdir, unlink, access, mknod and mknodat. syscalls.c's table names them
+// (linux_internal.h). lxconv.cee converts the directory records.
+
+@header(
+    "kernel/errno.h", "kernel/handle.h", "kernel/kmalloc.h", "kernel/process.h", "kernel/syscall.h",
+    "kernel/uaccess.h", "kernel/vfs.h", "uapi/cosmo/syscall.h", "convert.h", "linux_abi.h", "linux_internal.h",
+)
+extern "C" {
+    struct syscall_args {
+        a: [u64; 6];
+    }
+    struct process {
+        umask: u32; // read atomically (umaskNow)
+    }
+    struct vnode;
+    struct file;
+    struct cosmo_stat;
+
+    @cvalue(
+        "sizeof(struct cosmo_stat) == 7 * sizeof(uint64_t) && VFS_PATH_MAX == 1024 && sizeof(enum vnode_type) == sizeof(uint32_t)",
+    )
+    const SIZES: bool = true;
+    const VNODE_FIFO: u32 = 4;
+    const HANDLE_RIGHT_READ: u32 = 1;
+    const HANDLE_RIGHT_WRITE: u32 = 2;
+    const LX_S_IFMT: u32 = 0o170000;
+    const LX_S_IFSOCK: u32 = 0o140000;
+    const LX_S_IFIFO: u32 = 0o010000;
+    const EPERM: i32 = 1;
+    const EBADF: i32 = 9;
+    const ENOMEM: i32 = 12;
+    const EFAULT: i32 = 14;
+    const EINVAL: i32 = 22;
+
+    fn process_current() -> *mut process;
+    fn process_cwd_get() -> *mut vnode;
+    fn user_range_ok(addr: u64, len: usize) -> bool;
+    fn copy_to_user(userDst: u64, src: *void, len: usize) -> i32;
+    fn file_put(f: *mut file);
+    fn file_readdir(f: *mut file, buf: *mut void, len: usize) -> i64;
+    fn vnode_put(vn: *mut vnode);
+    fn vfs_mkdir(start: *mut vnode, path: *CChar, mode: u32) -> i32;
+    fn vfs_rmdir(start: *mut vnode, path: *CChar) -> i32;
+    fn vfs_unlink(start: *mut vnode, path: *CChar) -> i32;
+    fn vfs_stat(start: *mut vnode, path: *CChar, st: *mut cosmo_stat) -> i32;
+    fn vfs_mknod(start: *mut vnode, path: *CChar, mode: u32, kind: u32, out: *mut *mut vnode) -> i32;
+    fn lx_dirents_from_native(src: *u8, inlen: usize, out: *mut u8, outcap: usize) -> usize;
+    fn lx_get_path(uptr: u64, buf: *mut CChar) -> i32;
+    fn lx_at_base(
+        dirfd: i64,
+        path: *CChar,
+        rights: u32,
+        out: *mut *mut vnode,
+        basepath: *mut CChar,
+        n: usize,
+        have: *mut u32,
+    ) -> i32;
+    fn lx_file_of(h: i32, rights: u32) -> *mut file;
+}
+
+const NOT: u32 = 0xFFFFFFFF;
+const CWD: i64 = -100; // LX_AT_FDCWD as a register holds it
+
+/// Safety: the dispatcher's: `a` is the call's arguments.
+unsafe fn arg(a: *mut syscall_args, i: usize) -> u64 => Ptr.toBorrow(a as *syscall_args).a[i];
+
+/// A new node's permission bits: the caller's, less the process's file-creation mask (umask).
+/// Safety: in a process's thread.
+unsafe fn modeOf(requested: u64) -> u32 {
+    let p = Ptr.toBorrowMut(process_current());
+    let mask = Ptr.toBorrow(borrow mut p.umask as *mut u32 as *AtomicU32).loadWith(LoadOrdering.Relaxed);
+    return truncate<u32>(requested) & 0o7777 & (mask ^ NOT);
+}
+
+/// The directory `path` resolves from for a call that changes an entry (lx_at_base), with no name wanted.
+/// Safety: in a process's thread; `path` is terminated.
+unsafe fn writeBase(dirfd: i64, path: *CChar, out: *mut *mut vnode) -> i32 =>
+    lx_at_base(dirfd, path, HANDLE_RIGHT_WRITE, out, 0 as *mut CChar, 0, 0 as *mut u32);
+
+/// Safety: the dispatcher's.
+@export("lx_getdents64")
+unsafe fn getdents64(a: *mut syscall_args) -> i64 {
+    let ubuf = arg(a, 1);
+    let len = if (arg(a, 2) > 65536) 65536 else truncate<usize>(arg(a, 2));
+    if (len < 32) {
+        return -EINVAL as i64;
+    }
+    if (!user_range_ok(ubuf, len)) {
+        return -EFAULT as i64;
+    }
+    let f = lx_file_of(truncate<i32>(arg(a, 0)), HANDLE_RIGHT_READ);
+    if (f.isNull()) {
+        return -EBADF as i64;
+    }
+    // Native records are at most as large as Linux ones plus alignment; read fewer bytes than the caller offers so
+    // the converted output fits.
+    let src = kmalloc(len, 0) as *mut u8;
+    let out = kmalloc(len, 0) as *mut u8;
+    if (src.isNull() || out.isNull()) {
+        kfree(src as *mut void);
+        kfree(out as *mut void);
+        file_put(f);
+        return -ENOMEM as i64;
+    }
+    let n = file_readdir(f, src as *mut void, len - len / 4);
+    file_put(f);
+    var rc = n;
+    if (n > 0) {
+        let o = lx_dirents_from_native(src as *u8, truncate<usize>(n), out, len);
+        rc = truncate<i64>(o);
+        if (o != 0 && copy_to_user(ubuf, out as *void, o) != 0) {
+            rc = -EFAULT as i64;
+        }
+    }
+    kfree(src as *mut void);
+    kfree(out as *mut void);
+    return rc;
+}
+
+/// What a legacy path call does to its name.
+enum PathOp {
+    Mkdir,
+    Rmdir,
+    Unlink,
+    Access,
+}
+
+/// mkdir, rmdir, unlink and access: a path from the working directory.
+///
+/// Safety: the dispatcher's.
+unsafe fn pathCall(a: *mut syscall_args, op: PathOp) -> i64 {
+    var path = [0u8; 1024];
+    let p = borrow mut path as *mut [u8; 1024] as *mut u8 as *mut CChar;
+    var rc = lx_get_path(arg(a, 0), p);
+    if (rc != 0) {
+        return rc as i64;
+    }
+    // One reference for all four arms, and one release.
+    let cwd = process_cwd_get();
+    if (op == PathOp.Mkdir) {
+        rc = vfs_mkdir(cwd, p as *CChar, modeOf(arg(a, 1)));
+    } else if (op == PathOp.Rmdir) {
+        rc = vfs_rmdir(cwd, p as *CChar);
+    } else if (op == PathOp.Unlink) {
+        rc = vfs_unlink(cwd, p as *CChar);
+    } else {
+        var st = [0u64; 7];                                                                 // a struct cosmo_stat
+        rc = vfs_stat(cwd, p as *CChar, borrow mut st as *mut [u64; 7] as *mut cosmo_stat); // access: existence
+    }
+    vnode_put(cwd);
+    return rc as i64;
+}
+
+/// x86-64's table only: AArch64 has mkdirat alone.
+/// Safety: the dispatcher's.
+@export("lx_mkdir")
+unsafe fn mkdir(a: *mut syscall_args) -> i64 => pathCall(a, PathOp.Mkdir);
+
+/// x86-64's table only: AArch64 has unlinkat alone.
+/// Safety: the dispatcher's.
+@export("lx_rmdir")
+unsafe fn rmdir(a: *mut syscall_args) -> i64 => pathCall(a, PathOp.Rmdir);
+
+/// x86-64's table only.
+/// Safety: the dispatcher's.
+@export("lx_unlink")
+unsafe fn unlink(a: *mut syscall_args) -> i64 => pathCall(a, PathOp.Unlink);
+
+/// x86-64's table only: AArch64 has faccessat alone.
+/// Safety: the dispatcher's.
+@export("lx_access")
+unsafe fn access(a: *mut syscall_args) -> i64 => pathCall(a, PathOp.Access);
+
+/// Safety: the dispatcher's.
+@export("lx_mkdirat")
+unsafe fn mkdirat(a: *mut syscall_args) -> i64 {
+    var path = [0u8; 1024];
+    let p = borrow mut path as *mut [u8; 1024] as *mut u8 as *mut CChar;
+    var rc = lx_get_path(arg(a, 1), p);
+    if (rc != 0) {
+        return rc as i64;
+    }
+    var start = 0 as *mut vnode;
+    rc = writeBase(truncate<i64>(arg(a, 0)), p as *CChar, borrow mut start as *mut *mut vnode);
+    if (rc != 0) {
+        return rc as i64;
+    }
+    rc = vfs_mkdir(start, p as *CChar, modeOf(arg(a, 2)));
+    vnode_put(start);
+    return rc as i64;
+}
+
+/// mknodat: a FIFO is the one node an unprivileged Linux caller may make (S_IFIFO); a socket's name is made by bind
+/// (S_IFSOCK -EINVAL, as the native mknod says); every other type is -EPERM, Linux's answer to a caller without
+/// CAP_MKNOD.
+///
+/// Safety: in a process's thread.
+unsafe fn mknodCommon(dirfd: i64, upath: u64, mode: u64) -> i64 {
+    var path = [0u8; 1024];
+    let p = borrow mut path as *mut [u8; 1024] as *mut u8 as *mut CChar;
+    var rc = lx_get_path(upath, p);
+    if (rc != 0) {
+        return rc as i64;
+    }
+    let kind = truncate<u32>(mode) & LX_S_IFMT;
+    if (kind == LX_S_IFSOCK) {
+        return -EINVAL as i64;
+    }
+    if (kind != LX_S_IFIFO) {
+        return -EPERM as i64;
+    }
+    var start = 0 as *mut vnode;
+    rc = writeBase(dirfd, p as *CChar, borrow mut start as *mut *mut vnode);
+    if (rc != 0) {
+        return rc as i64;
+    }
+    var vn = 0 as *mut vnode;
+    rc = vfs_mknod(start, p as *CChar, modeOf(mode), VNODE_FIFO, borrow mut vn as *mut *mut vnode);
+    vnode_put(start);
+    if (rc == 0) {
+        vnode_put(vn);
+    }
+    return rc as i64;
+}
+
+/// Safety: the dispatcher's.
+@export("lx_mknodat")
+unsafe fn mknodat(a: *mut syscall_args) -> i64 => mknodCommon(truncate<i64>(arg(a, 0)), arg(a, 1), arg(a, 2));
+
+/// The legacy mknod (x86-64 only; AArch64 has the *at form alone), as mkdir beside mkdirat.
+///
+/// Safety: the dispatcher's.
+@export("lx_mknod")
+unsafe fn mknod(a: *mut syscall_args) -> i64 => mknodCommon(CWD, arg(a, 0), arg(a, 1));

@@ -58,7 +58,7 @@ choice is made once and never changes. After `elf_load_into`, `p->
 image_end = info.hi` (the page after the highest loaded segment) and,
 for a Linux process, `linux_process_init` allocates `p->linux`.
 
-## Process hooks (`kernel/include/kernel/process.h`, `compat/linux/syscalls.c`)
+## Process hooks (`kernel/include/kernel/process.h`, `compat/linux/lxhooks.cee`)
 
 **ABI stability: internal.**
 
@@ -134,7 +134,7 @@ and wakes one futex waiter on it.
 number at or above 512 never reaches the table (the dispatcher's own
 bounds check returns `-ENOSYS` and logs `unknown number ... (linux)`).
 
-## Linux system calls (`compat/linux/syscalls.c`)
+## Linux system calls (`compat/linux/syscalls.c`'s table, the `lx*.cee` files)
 
 **ABI stability: Linux's.** Numbers are the x86-64 table
 (`compat/linux/nr_x86_64.h`) or the AArch64 generic table
@@ -295,7 +295,7 @@ as Linux does.
 
 These entries were added by units after the tables above were written;
 each is translated by the handler of the same name with an `lx_` prefix
-in `compat/linux/syscalls.c`, and its semantics are
+(`compat/linux/linux_internal.h` lists them by file), and its semantics are
 described where the native object it reaches is:
 
 | Calls | Native service, documented in |
@@ -437,7 +437,10 @@ loads the incoming one's (milestone 10). A clone's thread pointer is
 | `compat/linux/linux_abi.h` | the Linux ABI written out: flags, `AT_*`, structures (per-architecture `struct lx_stat`, `LX_STAT_SIZE`, `LX_MACHINE`), the signal frame layouts; includes the number table for the architecture; shared with `tests/linux/lxabi.h` and the host test |
 | `compat/linux/nr_x86_64.h`, `nr_aarch64.h` | the system-call numbers (milestone 10) |
 | `compat/linux/convert.h`, `lxconv.cee` | the pure conversions above, in CeeSafe |
-| `compat/linux/syscalls.c` | `struct linux_state`, the hooks, the `lx_*` handlers, the table, `personality_linux` |
+| `compat/linux/syscalls.c` | the table and `personality_linux` (C: an array of C functions, roadmap 1.3 K1's exception) |
+| `compat/linux/lxhooks.cee` | the hooks the record names, `prctl`, `lx_unknown`; `struct linux_state` is in `linux_internal.h` |
+| `compat/linux/lxbase.cee`, `lxio.cee`, `lxstat.cee`, `lxdir.cee`, `lxname.cee`, `lxattr.cee`, `lxfd.cee`, `lxtty.cee`, `lxmount.cee` | the `lx_*` handlers on paths, files and descriptors, in CeeSafe |
+| `compat/linux/lxmem.cee`, `lxident.cee`, `lxproc.cee`, `lxtime.cee`, `lxpoll.cee`, `lxsys.cee`, `lxsock.cee` | the `lx_*` handlers on memory, identity, processes, clocks, waiting, the system and sockets, in CeeSafe |
 | `compat/linux/sigcalls.cee`, `linux_internal.h` | signals, in CeeSafe: the frame builders, `rt_sigreturn`, the trampoline page, the exit hook, `kill`/`tgkill`/`tkill`, `exit`/`exit_group`, `gettid`/`set_tid_address` (milestone 10) |
 | `kernel/ipc/futex.c`, `kernel/include/kernel/futex.h` | the futex primitive |
 | `kernel/io/poll.c`, `kernel/include/kernel/poll.h` | `io_poll`, behind `poll`/`ppoll` and `select`/`pselect6` |

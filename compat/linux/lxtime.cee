@@ -1,0 +1,766 @@
+// lxtime.cee - The Linux personality's calls on the clocks, sleeping, nice values and rebooting
+// (docs/compat/linux/design.md), in CeeSafe (roadmap 1.3 K1): clock_gettime, gettimeofday, time, times, settimeofday,
+// clock_settime, nanosleep, clock_nanosleep, sched_yield, setitimer, getitimer, alarm, futex, getpriority,
+// setpriority and reboot. syscalls.c's table
+// names them (linux_internal.h).
+//
+// A struct lx_timespec and a struct lx_timeval are two words and a struct lx_tms four; the C compiler checks them
+// (the extern block).
+
+@header(
+    "kernel/cred.h", "kernel/errno.h", "kernel/futex.h", "kernel/nice.h", "kernel/process.h", "kernel/sched.h", "kernel/shutdown.h",
+    "kernel/syscall.h", "kernel/timer.h", "kernel/uaccess.h", "kernel/wait.h", "linux_abi.h", "linux_internal.h",
+)
+extern "C" {
+    struct syscall_args {
+        a: [u64; 6];
+    }
+    struct credentials {
+        ruid: u32;
+    }
+    struct vm_space;
+    struct process {
+        pid: u32;
+        domain: u32;
+        space: *mut vm_space;
+    }
+    struct thread;
+    struct nice_caller;
+
+    @cvalue(
+        "sizeof(struct lx_timespec) == 16 && offsetof(struct lx_timespec, tv_sec) == 0 && offsetof(struct lx_timespec, tv_nsec) == 8",
+    )
+    const TIMESPEC_LAYOUT: bool = true;
+    @cvalue(
+        "sizeof(struct lx_timeval) == 16 && offsetof(struct lx_timeval, tv_sec) == 0 && offsetof(struct lx_timeval, tv_usec) == 8",
+    )
+    const TIMEVAL_LAYOUT: bool = true;
+    @cvalue(
+        "sizeof(struct lx_tms) == 32 && offsetof(struct lx_tms, tms_utime) == 0 && offsetof(struct lx_tms, tms_stime) == 8 && offsetof(struct lx_tms, tms_cutime) == 16 && offsetof(struct lx_tms, tms_cstime) == 24",
+    )
+    const TMS_LAYOUT: bool = true;
+    @cvalue(
+        "sizeof(struct lx_itimerval) == 32 && offsetof(struct lx_itimerval, it_interval) == 0 && offsetof(struct lx_itimerval, it_value) == 16",
+    )
+    const ITIMERVAL_LAYOUT: bool = true;
+    @cvalue("sizeof(struct cputime_pair) == 16 && sizeof(pid_t) == 4")
+    const SIZES: bool = true;
+    @cvalue(
+        "KERNEL_REBOOT_RESTART == 0 && KERNEL_REBOOT_HALT == 1 && KERNEL_REBOOT_POWER_OFF == 2 && sizeof(enum kernel_reboot_cmd) == 4",
+    )
+    const REBOOT_COMMANDS: bool = true;
+    const LX_CLOCK_REALTIME: u32 = 0;
+    const LX_CLOCK_PROCESS_CPUTIME_ID: u32 = 2;
+    const LX_CLOCK_THREAD_CPUTIME_ID: u32 = 3;
+    const LX_CLOCK_REALTIME_COARSE: u32 = 5;
+    const LX_CLOCK_BOOTTIME: u32 = 7;
+    const LX_TIMER_ABSTIME: u32 = 1;
+    const LX_FUTEX_WAIT: u32 = 0;
+    const LX_FUTEX_WAKE: u32 = 1;
+    const LX_FUTEX_REQUEUE: u32 = 3;
+    const LX_FUTEX_CMP_REQUEUE: u32 = 4;
+    const LX_FUTEX_WAIT_BITSET: u32 = 9;
+    const LX_FUTEX_WAKE_BITSET: u32 = 10;
+    const LX_FUTEX_BITSET_MATCH_ANY: u32 = 0xffffffff;
+    const LX_FUTEX_PRIVATE_FLAG: u32 = 128;
+    const LX_FUTEX_CLOCK_REALTIME: u32 = 256;
+    @cvalue("(unsigned)LX_FUTEX_CMD_MASK == 0xFFFFFE7Fu")
+    const FUTEX_CMD_MASK_VALUE: bool = true;
+    const LX_ITIMER_REAL: i32 = 0;
+    const LX_ITIMER_VIRTUAL: i32 = 1;
+    const LX_ITIMER_PROF: i32 = 2;
+    const LX_PRIO_PROCESS: u32 = 0;
+    const LX_PRIO_PGRP: u32 = 1;
+    const LX_PRIO_USER: u32 = 2;
+    const LX_USER_HZ: u64 = 100;
+    const PRIV_SYS_ADMIN: u32 = 2;
+    const EPERM: i32 = 1;
+    const ESRCH: i32 = 3;
+    const EAGAIN: i32 = 11;
+    const EFAULT: i32 = 14;
+    const EINVAL: i32 = 22;
+    const ENOSYS: i32 = 38;
+    const ETIMEDOUT: i32 = 110;
+    fn process_current() -> *mut process;
+    fn thread_current() -> *mut thread;
+    fn cred_current() -> *credentials;
+    fn cred_has(c: *credentials, priv: u32) -> bool;
+    fn copy_to_user(userDst: u64, src: *void, len: usize) -> i32;
+    fn copy_from_user(dst: *mut void, userSrc: u64, len: usize) -> i32;
+    fn clock_now_ns() -> u64;
+    fn clock_realtime_ns() -> u64;
+    fn clock_set_realtime_ns(ns: u64);
+    fn process_cpu_run_ns(p: *mut process) -> u64;
+    fn sched_thread_run_ns(t: *mut thread, nowNs: u64) -> u64;
+    fn process_cpu_times(p: *mut process, mine: *mut cputime_pair, children: *mut cputime_pair);
+    fn thread_sleep_ns_killable(ns: u64) -> i32;
+    fn user_range_ok(addr: u64, len: usize) -> bool;
+    fn futex_wait(space: *mut vm_space, uaddr: u64, val: u32, timeoutNs: u64, isPrivate: bool) -> i32;
+    fn futex_wake(space: *mut vm_space, uaddr: u64, n: u32, isPrivate: bool) -> i32;
+    fn futex_requeue(
+        space: *mut vm_space,
+        uaddr1: u64,
+        uaddr2: u64,
+        nrWake: u32,
+        nrRequeue: u32,
+        compare: bool,
+        expected: u32,
+        isPrivate: bool,
+    ) -> i32;
+    fn process_itimer_set(p: *mut process, valueNs: u64, intervalNs: u64, oldValue: *mut u64, oldInterval: *mut u64);
+    fn process_itimer_get(p: *mut process, value: *mut u64, interval: *mut u64);
+    fn process_cputimer_set(
+        p: *mut process,
+        which: u32,
+        valueNs: u64,
+        intervalNs: u64,
+        oldValue: *mut u64,
+        oldInterval: *mut u64,
+    ) -> bool;
+    fn process_cputimer_get(p: *mut process, which: u32, value: *mut u64, interval: *mut u64) -> bool;
+    fn sched_yield();
+    fn kernel_reboot(cmd: u32);
+    fn process_getpgid(pid: u32, out: *mut u32) -> i32;
+    fn process_lookup(pid: u32) -> *mut process;
+    fn process_group_next(pgid: u32, after: u32) -> *mut process;
+    fn process_user_next(ruid: u32, after: u32) -> *mut process;
+    fn process_put(p: *mut process);
+    fn nice_clamp(value: i32) -> i32;
+    fn nice_set_result(result: i32, one: i32) -> i32;
+    fn nice_get_result(result: i32, nice: i32) -> i32;
+    fn process_nice_caller(caller: *mut nice_caller);
+    fn process_nice_set(p: *mut process, caller: *nice_caller, nice: i32) -> i32;
+    fn process_nice_get(p: *mut process) -> i32;
+    struct cputime_pair;
+}
+
+const SECOND: u64 = 1000000000;
+
+/// enum kernel_reboot_cmd (REBOOT_COMMANDS).
+const KERNEL_REBOOT_RESTART: u32 = 0;
+const KERNEL_REBOOT_HALT: u32 = 1;
+const KERNEL_REBOOT_POWER_OFF: u32 = 2;
+
+/// Safety: the dispatcher's: `a` is the call's arguments.
+unsafe fn arg(a: *mut syscall_args, i: usize) -> u64 => Ptr.toBorrow(a as *syscall_args).a[i];
+
+/// The `i`th argument as C's (int) sees it.
+/// Safety: the dispatcher's.
+unsafe fn arg32(a: *mut syscall_args, i: usize) -> i32 => truncate<i32>(arg(a, i));
+
+/// The `i`th argument as C's (unsigned) sees it.
+/// Safety: the dispatcher's.
+unsafe fn argU32(a: *mut syscall_args, i: usize) -> u32 => truncate<u32>(arg(a, i));
+
+/// A word of a C record as its int64_t member.
+fn signed(v: u64) -> i64 => truncate<i64>(v);
+
+/// `ns` to user memory as a struct lx_timespec: 0 or -EFAULT.
+///
+/// Safety: copy_to_user checks the user address.
+unsafe fn putTimespec(user: u64, ns: u64) -> i64 {
+    var ts = [ns / SECOND, ns % SECOND];
+    return if (copy_to_user(user, borrow ts as *[u64; 2] as *void, 16) != 0) -EFAULT as i64 else 0;
+}
+
+/// A value, or the errno (negative) that stands in its place.
+struct Got {
+    rc: i32;
+    value: u64;
+}
+
+/// A struct lx_timespec from user memory as nanoseconds: -EFAULT or -EINVAL in `rc` when there is none. Absolute
+/// wall-clock times are ~1.8e9 s; anything beyond 2^62 ns (146 years) is "never" and is clamped there so that later
+/// arithmetic and the timer's deadline cannot overflow.
+///
+/// Safety: copy_from_user checks the user address.
+unsafe fn nsFromTimespec(user: u64) -> Got {
+    var ts = [0u64; 2];
+    if (copy_from_user(borrow mut ts as *mut [u64; 2] as *mut void, user, 16) != 0) {
+        return Got { rc: -EFAULT, value: 0 };
+    }
+    if (signed(ts[0]) < 0 || signed(ts[1]) < 0 || signed(ts[1]) >= 1000000000) {
+        return Got { rc: -EINVAL, value: 0 };
+    }
+    if (ts[0] >= (1 << 62) / SECOND) {
+        return Got { rc: 0, value: 1 << 62 };
+    }
+    return Got { rc: 0, value: ts[0] * SECOND + ts[1] };
+}
+
+/// `int lx_ns_from_timespec(uint64_t uptr, uint64_t *ns)` (linux_internal.h): nsFromTimespec for the personality's
+/// other files; `ns` is written only on success.
+///
+/// Safety: `ns` is a place for the result; copy_from_user checks the user address.
+@export("lx_ns_from_timespec")
+unsafe fn nsFromTimespecC(user: u64, ns: *mut u64) -> i32 {
+    let got = nsFromTimespec(user);
+    if (got.rc == 0) {
+        ns.write(got.value);
+    }
+    return got.rc;
+}
+
+/// `int64_t lx_put_timespec(uint64_t uptr, uint64_t ns)` (linux_internal.h): putTimespec for the personality's other
+/// files.
+///
+/// Safety: copy_to_user checks the user address.
+@export("lx_put_timespec")
+unsafe fn putTimespecC(user: u64, ns: u64) -> i64 => putTimespec(user, ns);
+
+// --- reading the clocks ----------------------------------------------------------------------------------------------
+
+/// CLOCK_REALTIME and its coarse variant read the wall clock (the RTC at boot plus the monotonic clock, kernel/timer);
+/// every other clock is the monotonic one (docs/compat/linux/design.md, "Wall clock").
+///
+/// Safety: the clocks are up.
+unsafe fn clockRead(clk: u32) -> u64 =>
+    if (clk == LX_CLOCK_REALTIME || clk == LX_CLOCK_REALTIME_COARSE) clock_realtime_ns() else clock_now_ns();
+
+/// Safety: the dispatcher's.
+@export("lx_clock_gettime")
+unsafe fn clockGettime(a: *mut syscall_args) -> i64 {
+    let clk = argU32(a, 0);
+    if (clk > LX_CLOCK_BOOTTIME) {
+        return -EINVAL as i64;
+    }
+    // The CPU-time clocks: the caller's process and thread, to the nanosecond (kernel/process/cpu_account.c).
+    if (clk == LX_CLOCK_PROCESS_CPUTIME_ID) {
+        return putTimespec(arg(a, 1), process_cpu_run_ns(process_current()));
+    }
+    if (clk == LX_CLOCK_THREAD_CPUTIME_ID) {
+        return putTimespec(arg(a, 1), sched_thread_run_ns(thread_current(), clock_now_ns()));
+    }
+    return putTimespec(arg(a, 1), clockRead(clk));
+}
+
+/// times(2): the same four times in USER_HZ ticks, and the monotonic clock in the same ticks as the result (Linux's
+/// is jiffies since an arbitrary point; only differences between two results mean anything). A NULL buffer asks for
+/// the result alone.
+///
+/// Safety: the dispatcher's.
+@export("lx_times")
+unsafe fn times(a: *mut syscall_args) -> i64 {
+    let tick = SECOND / LX_USER_HZ;
+    if (arg(a, 0) != 0) {
+        var mine = [0u64; 2]; // a struct cputime_pair each: user_ns, system_ns
+        var children = [0u64; 2];
+        process_cpu_times(
+            process_current(),
+            borrow mut mine as *mut [u64; 2] as *mut cputime_pair,
+            borrow mut children as *mut [u64; 2] as *mut cputime_pair,
+        );
+        var tms = [mine[0] / tick, mine[1] / tick, children[0] / tick, children[1] / tick]; // a struct lx_tms
+        if (copy_to_user(arg(a, 0), borrow tms as *[u64; 4] as *void, 32) != 0) {
+            return -EFAULT as i64;
+        }
+    }
+    return signed(clock_now_ns() / tick);
+}
+
+/// Safety: the dispatcher's.
+@export("lx_gettimeofday")
+unsafe fn gettimeofday(a: *mut syscall_args) -> i64 {
+    if (arg(a, 0) != 0) {
+        let ns = clock_realtime_ns();
+        var tv = [ns / SECOND, ns % SECOND / 1000]; // a struct lx_timeval
+        if (copy_to_user(arg(a, 0), borrow tv as *[u64; 2] as *void, 16) != 0) {
+            return -EFAULT as i64;
+        }
+    }
+    return 0;
+}
+
+/// x86-64's table only: AArch64 has no time.
+/// Safety: the dispatcher's.
+@export("lx_time")
+unsafe fn time(a: *mut syscall_args) -> i64 {
+    var t: u64 = clock_realtime_ns() / SECOND;
+    if (arg(a, 0) != 0 && copy_to_user(arg(a, 0), borrow t as *u64 as *void, 8) != 0) {
+        return -EFAULT as i64;
+    }
+    return signed(t);
+}
+
+// --- setting the clock and rebooting (shell completeness S5) ---------------------------------------------------------
+
+/// Whether the caller may set the clock.
+///
+/// Safety: in a process's thread.
+unsafe fn maySetClock() -> bool => cred_has(cred_current(), PRIV_SYS_ADMIN);
+
+/// Linux's order: the value's validity (-EINVAL), then the privilege (-EPERM; PRIV_SYS_ADMIN, which sets the clock in
+/// place of Linux's CAP_SYS_TIME). A wall time before 1970 is refused, as Linux's timespec64_valid_settod does. `ts`
+/// is a struct lx_timespec's two words.
+///
+/// Safety: in a process's thread.
+unsafe fn setWallClock(ts: [u64; 2]) -> i64 {
+    if (signed(ts[0]) < 0 || signed(ts[1]) < 0 || signed(ts[1]) >= 1000000000 ||
+        ts[0] > (0xFFFFFFFFFFFFFFFF - 999999999) / SECOND) {
+        return -EINVAL as i64;
+    }
+    if (!maySetClock()) {
+        return -EPERM as i64;
+    }
+    clock_set_realtime_ns(ts[0] * SECOND + ts[1]);
+    return 0;
+}
+
+/// settimeofday(tv, tz): `tz` is checked as Linux checks it and kept nowhere -- this kernel has no time zone
+/// (gettimeofday reports none). With no `tv` the call is the privilege check alone.
+///
+/// Safety: the dispatcher's.
+@export("lx_settimeofday")
+unsafe fn settimeofday(a: *mut syscall_args) -> i64 {
+    var ts = [0u64; 2];
+    if (arg(a, 0) != 0) {
+        var tv = [0u64; 2]; // a struct lx_timeval
+        if (copy_from_user(borrow mut tv as *mut [u64; 2] as *mut void, arg(a, 0), 16) != 0) {
+            return -EFAULT as i64;
+        }
+        if (signed(tv[1]) < 0 || signed(tv[1]) >= 1000000) {
+            return -EINVAL as i64;
+        }
+        ts = [tv[0], tv[1] * 1000];
+    }
+    if (arg(a, 1) != 0) {
+        var tz = [0i32; 2]; // tz_minuteswest, tz_dsttime
+        if (copy_from_user(borrow mut tz as *mut [i32; 2] as *mut void, arg(a, 1), 8) != 0) {
+            return -EFAULT as i64;
+        }
+        if (tz[0] > 15 * 60 || tz[0] < -15 * 60) {
+            return -EINVAL as i64;
+        }
+    }
+    if (arg(a, 0) == 0) {
+        return if (maySetClock()) 0 else -EPERM as i64;
+    }
+    return setWallClock(ts);
+}
+
+/// clock_settime: CLOCK_REALTIME alone is settable, as Linux's.
+///
+/// Safety: the dispatcher's.
+@export("lx_clock_settime")
+unsafe fn clockSettime(a: *mut syscall_args) -> i64 {
+    if (argU32(a, 0) != LX_CLOCK_REALTIME) {
+        return -EINVAL as i64;
+    }
+    var ts = [0u64; 2];
+    if (copy_from_user(borrow mut ts as *mut [u64; 2] as *mut void, arg(a, 1), 16) != 0) {
+        return -EFAULT as i64;
+    }
+    return setWallClock(ts);
+}
+
+const LX_REBOOT_MAGIC1: u32 = 0xfee1dead;
+const LX_REBOOT_CMD_RESTART: u32 = 0x01234567;
+const LX_REBOOT_CMD_HALT: u32 = 0xcdef0123;
+const LX_REBOOT_CMD_POWER_OFF: u32 = 0x4321fedc;
+const LX_REBOOT_CMD_CAD_ON: u32 = 0x89abcdef;
+const LX_REBOOT_CMD_CAD_OFF: u32 = 0x00000000;
+const LX_REBOOT_CMD_RESTART2: u32 = 0xa1b2c3d4;
+
+/// reboot(magic1, magic2, cmd, arg): Linux's order -- the privilege (PRIV_SYS_ADMIN in place of CAP_SYS_BOOT, -EPERM),
+/// the magic numbers (-EINVAL), the command (-EINVAL for kexec, suspend and anything else). RESTART2's argument
+/// string is not read: the restart is the same. CAD_ON and CAD_OFF succeed and change nothing: no device here reports
+/// Ctrl-Alt-Del (inventory). Nothing is synced first, as on Linux.
+///
+/// Safety: the dispatcher's.
+@export("lx_reboot")
+unsafe fn reboot(a: *mut syscall_args) -> i64 {
+    if (!cred_has(cred_current(), PRIV_SYS_ADMIN)) {
+        return -EPERM as i64;
+    }
+    let m1 = argU32(a, 0);
+    let m2 = argU32(a, 1);
+    let cmd = argU32(a, 2);
+    if (m1 != LX_REBOOT_MAGIC1 || (m2 != 672274793 && m2 != 85072278 && m2 != 369367448 && m2 != 537993216)) {
+        return -EINVAL as i64;
+    }
+    if (cmd == LX_REBOOT_CMD_RESTART || cmd == LX_REBOOT_CMD_RESTART2) {
+        kernel_reboot(KERNEL_REBOOT_RESTART); // does not return
+    } else if (cmd == LX_REBOOT_CMD_HALT) {
+        kernel_reboot(KERNEL_REBOOT_HALT);
+    } else if (cmd == LX_REBOOT_CMD_POWER_OFF) {
+        kernel_reboot(KERNEL_REBOOT_POWER_OFF);
+    } else if (cmd != LX_REBOOT_CMD_CAD_ON && cmd != LX_REBOOT_CMD_CAD_OFF) {
+        return -EINVAL as i64;
+    }
+    return 0;
+}
+
+// --- sleeping --------------------------------------------------------------------------------------------------------
+
+/// An interrupted sleep reports what it did not sleep: a libc's sleep() and BusyBox's sleep go round again with
+/// exactly that (Linux's `rem`). It was written as 0, so a sleep a stop or a handler interrupted ended early (roadmap
+/// M3, found by BusyBox sleep under ^Z and fg).
+///
+/// Safety: in a thread that may sleep.
+unsafe fn sleepReportingRest(ns: u64, rem: u64) -> i64 {
+    let start = clock_now_ns();
+    let rc = thread_sleep_ns_killable(ns);
+    if (rc != 0 && rem != 0) {
+        let slept = clock_now_ns().wrappingSub(start);
+        putTimespec(rem, if (slept < ns) ns - slept else 0); // a fault here is not reported, as before
+    }
+    return rc as i64;
+}
+
+/// Safety: the dispatcher's.
+@export("lx_nanosleep")
+unsafe fn nanosleep(a: *mut syscall_args) -> i64 {
+    let ns = nsFromTimespec(arg(a, 0));
+    if (ns.rc != 0) {
+        return ns.rc as i64;
+    }
+    return sleepReportingRest(ns.value, arg(a, 1));
+}
+
+/// Safety: the dispatcher's.
+@export("lx_clock_nanosleep")
+unsafe fn clockNanosleep(a: *mut syscall_args) -> i64 {
+    let clk = argU32(a, 0);
+    let flags = argU32(a, 1);
+    // Sleeping on a CPU-time clock is not built (Linux refuses the thread's too).
+    if (clk > LX_CLOCK_BOOTTIME || clk == LX_CLOCK_PROCESS_CPUTIME_ID || clk == LX_CLOCK_THREAD_CPUTIME_ID) {
+        return -EINVAL as i64;
+    }
+    let until = nsFromTimespec(arg(a, 2));
+    if (until.rc != 0) {
+        return until.rc as i64;
+    }
+    var ns = until.value;
+    let absolute = (flags & LX_TIMER_ABSTIME) != 0;
+    if (absolute) {
+        let now = clockRead(clk);
+        ns = if (ns > now) ns - now else 0;
+    }
+    return sleepReportingRest(ns, if (absolute) 0 else arg(a, 3));
+}
+
+/// Safety: the dispatcher's.
+@export("lx_sched_yield")
+unsafe fn schedYield(a: *mut syscall_args) -> i64 {
+    sched_yield();
+    return 0;
+}
+
+// --- futex (kernel/scheduler/futex) -----------------------------------------------------------------------------------
+
+const LX_FUTEX_CMD_MASK: u32 = 0xFFFFFE7F; // not the private flag, not the realtime flag (FUTEX_CMD_MASK_VALUE)
+
+/// Safety: the dispatcher's.
+@export("lx_futex")
+unsafe fn futex(a: *mut syscall_args) -> i64 {
+    let uaddr = arg(a, 0);
+    let op = argU32(a, 1) & LX_FUTEX_CMD_MASK;
+    let realtime = (argU32(a, 1) & LX_FUTEX_CLOCK_REALTIME) != 0;
+    // The flag is the program's promise that nobody outside this process can see the word: the private key, no
+    // lookup. Without it the word is classified by what it maps, so a process-shared mutex in a MAP_SHARED page is
+    // shared (the shared-futex unit; the flag used to be masked out and every futex was private).
+    let isPrivate = (argU32(a, 1) & LX_FUTEX_PRIVATE_FLAG) != 0;
+    let val = argU32(a, 2);
+    let space = Ptr.toBorrow(process_current() as *process).space;
+    if (!user_range_ok(uaddr, 4)) {
+        return -EFAULT as i64;
+    }
+    // Once, for every operation: the past-deadline WAIT_BITSET path below reads the word itself and used to answer
+    // -EAGAIN/-ETIMEDOUT for a misaligned address the futex would have refused (review).
+    if ((uaddr & 3) != 0) {
+        return -EINVAL as i64;
+    }
+    if (op == LX_FUTEX_WAIT || op == LX_FUTEX_WAIT_BITSET) {
+        // WAIT's timeout is relative (monotonic); WAIT_BITSET's is absolute on CLOCK_MONOTONIC, or CLOCK_REALTIME
+        // with the flag. The bitset is a wake filter (glibc uses MATCH_ANY); only that value is supported.
+        if (op == LX_FUTEX_WAIT_BITSET && argU32(a, 5) != LX_FUTEX_BITSET_MATCH_ANY) {
+            return -ENOSYS as i64;
+        }
+        if (op == LX_FUTEX_WAIT && realtime) {
+            return -ENOSYS as i64;
+        }
+        var timeout: u64 = 0;
+        if (arg(a, 3) != 0) {
+            let given = nsFromTimespec(arg(a, 3));
+            if (given.rc != 0) {
+                return given.rc as i64;
+            }
+            timeout = given.value;
+            if (op == LX_FUTEX_WAIT_BITSET) {
+                let now = if (realtime) clock_realtime_ns() else clock_now_ns();
+                if (timeout <= now) {
+                    // Already past: the value check still decides EAGAIN vs ETIMEDOUT.
+                    var cur: u32 = 0;
+                    if (copy_from_user(borrow mut cur as *mut u32 as *mut void, uaddr, 4) != 0) {
+                        return -EFAULT as i64;
+                    }
+                    return if (cur != val) -EAGAIN as i64 else -ETIMEDOUT as i64;
+                }
+                timeout -= now;
+            }
+            if (timeout == 0) {
+                timeout = 1;
+            }
+        }
+        return futex_wait(space, uaddr, val, timeout, isPrivate) as i64;
+    }
+    if (op == LX_FUTEX_WAKE || op == LX_FUTEX_WAKE_BITSET) {
+        if (op == LX_FUTEX_WAKE_BITSET && argU32(a, 5) != LX_FUTEX_BITSET_MATCH_ANY) {
+            return -ENOSYS as i64;
+        }
+        return futex_wake(space, uaddr, val, isPrivate) as i64;
+    }
+    if (op == LX_FUTEX_REQUEUE || op == LX_FUTEX_CMP_REQUEUE) {
+        let uaddr2 = arg(a, 4);
+        if (!user_range_ok(uaddr2, 4)) {
+            return -EFAULT as i64;
+        }
+        // Both report woken + requeued, as the Linux kernel does for both operations (its man page's "woken" for
+        // REQUEUE notwithstanding).
+        return futex_requeue(
+            space,
+            uaddr,
+            uaddr2,
+            val,
+            argU32(a, 3),
+            op == LX_FUTEX_CMP_REQUEUE,
+            argU32(a, 5),
+            isPrivate,
+        ) as i64;
+    }
+    return -ENOSYS as i64;
+}
+
+// --- interval timers (kernel/process/itimer.c, cpu_account.c) --------------------------------------------------------
+
+/// A struct lx_timeval's two words as nanoseconds: -EINVAL in `rc` only for a negative field or tv_usec of 10^6 or
+/// more, as Linux checks; a time beyond 2^62 ns (about 146 years) clamps there, as nanosleep's does -- "never", not
+/// an error.
+fn itvToNs(sec: u64, usec: u64) -> Got {
+    if (signed(sec) < 0 || signed(usec) < 0 || signed(usec) >= 1000000) {
+        return Got { rc: -EINVAL, value: 0 };
+    }
+    if (sec >= (1 << 62) / SECOND) {
+        return Got { rc: 0, value: 1 << 62 };
+    }
+    return Got { rc: 0, value: sec * SECOND + usec * 1000 };
+}
+
+/// A value and an interval in nanoseconds to user memory as a struct lx_itimerval (the interval first), each rounded
+/// up to the microsecond: a timer still armed never reads 0. Not 0 when the copy faults.
+///
+/// Safety: copy_to_user checks the user address.
+unsafe fn putItimerval(user: u64, valueNs: u64, intervalNs: u64) -> i32 {
+    let value = valueNs.wrappingAdd(999) / 1000;
+    let interval = intervalNs.wrappingAdd(999) / 1000;
+    var itv = [interval / 1000000, interval % 1000000, value / 1000000, value % 1000000];
+    return copy_to_user(user, borrow itv as *[u64; 4] as *void, 32);
+}
+
+/// Safety: the dispatcher's.
+@export("lx_setitimer")
+unsafe fn setitimer(a: *mut syscall_args) -> i64 {
+    let which = arg32(a, 0);
+    if (which != LX_ITIMER_REAL && which != LX_ITIMER_VIRTUAL && which != LX_ITIMER_PROF) {
+        return -EINVAL as i64;
+    }
+    var value: u64 = 0;
+    var interval: u64 = 0;
+    if (arg(a, 1) != 0) {
+        var nv = [0u64; 4]; // a struct lx_itimerval: it_interval, it_value
+        if (copy_from_user(borrow mut nv as *mut [u64; 4] as *mut void, arg(a, 1), 32) != 0) {
+            return -EFAULT as i64;
+        }
+        let v = itvToNs(nv[2], nv[3]);
+        if (v.rc != 0) {
+            return v.rc as i64;
+        }
+        let i = itvToNs(nv[0], nv[1]);
+        if (i.rc != 0) {
+            return i.rc as i64;
+        }
+        value = v.value;
+        interval = i.value;
+    }
+    var oldValue: u64 = 0;
+    var oldInterval: u64 = 0;
+    if (which == LX_ITIMER_REAL) {
+        process_itimer_set(
+            process_current(),
+            value,
+            interval,
+            borrow mut oldValue as *mut u64,
+            borrow mut oldInterval as *mut u64,
+        );
+    } else {
+        process_cputimer_set(
+            process_current(),
+            truncate<u32>(which),
+            value,
+            interval,
+            borrow mut oldValue as *mut u64,
+            borrow mut oldInterval as *mut u64,
+        );
+    }
+    if (arg(a, 2) != 0 && putItimerval(arg(a, 2), oldValue, oldInterval) != 0) {
+        return -EFAULT as i64;
+    }
+    return 0;
+}
+
+/// Safety: the dispatcher's.
+@export("lx_getitimer")
+unsafe fn getitimer(a: *mut syscall_args) -> i64 {
+    let which = arg32(a, 0);
+    var value: u64 = 0;
+    var interval: u64 = 0;
+    if (which == LX_ITIMER_REAL) {
+        process_itimer_get(process_current(), borrow mut value as *mut u64, borrow mut interval as *mut u64);
+    } else if (!process_cputimer_get(
+        process_current(),
+        truncate<u32>(which),
+        borrow mut value as *mut u64,
+        borrow mut interval as *mut u64,
+    )) {
+        return -EINVAL as i64;
+    }
+    return if (putItimerval(arg(a, 1), value, interval) != 0) -EFAULT as i64 else 0;
+}
+
+/// alarm(2), x86-64's table only (musl's alarm is setitimer on AArch64): the seconds the previous alarm had left,
+/// rounded as Linux rounds them -- up from half a second, and never 0 for one still armed.
+///
+/// Safety: the dispatcher's.
+@export("lx_alarm")
+unsafe fn alarm(a: *mut syscall_args) -> i64 {
+    var old: u64 = 0;
+    var oldInterval: u64 = 0;
+    process_itimer_set(
+        process_current(),
+        argU32(a, 0) as u64 * SECOND,
+        0,
+        borrow mut old as *mut u64,
+        borrow mut oldInterval as *mut u64,
+    );
+    var sec = old / SECOND;
+    let rem = old % SECOND;
+    if (rem >= 500000000 || (sec == 0 && rem != 0)) {
+        sec += 1;
+    }
+    return signed(sec);
+}
+
+// --- nice values (roadmap 1.2 A5, LX-13; the rules are kernel/process/nice.cee's) ------------------------------------
+
+/// The id getpriority and setpriority walk for `which` and `who` (Linux's `who` is an int; 0 names the caller's
+/// process, group or real uid), a pid_t's bits; -EINVAL in `rc` for another `which`.
+///
+/// Safety: in a process's thread.
+unsafe fn prioId(which: u32, who: i32) -> Got {
+    let named = truncate<u32>(who) as u64;
+    if (which == LX_PRIO_PROCESS) {
+        return Got { rc: 0, value: if (who != 0) named else Ptr.toBorrow(process_current() as *process).pid as u64 };
+    }
+    if (which == LX_PRIO_PGRP) {
+        if (who != 0) {
+            return Got { rc: 0, value: named };
+        }
+        var pgid: u32 = 0;
+        let rc = process_getpgid(0, borrow mut pgid as *mut u32);
+        return Got { rc: rc, value: pgid as u64 };
+    }
+    if (which == LX_PRIO_USER) {
+        return Got { rc: 0, value: if (who != 0) named else Ptr.toBorrow(cred_current()).ruid as u64 };
+    }
+    return Got { rc: -EINVAL, value: 0 };
+}
+
+/// The next process `which` and `id` name after pid `after` (0 first), referenced, or null: one for a process, every
+/// member for a group or a user. A process outside the caller's domain is not there for it, as kill finds it
+/// (kill_one). `id` is a pid_t's bits: a negative one names no process or group.
+///
+/// Safety: in a process's thread; the caller puts the process returned.
+unsafe fn prioNext(which: u32, id: u32, after: u32) -> *mut process {
+    let mine = Ptr.toBorrow(process_current() as *process).domain;
+    let positive = truncate<i32>(id) > 0;
+    var from = after;
+    while (true) {
+        var p = 0 as *mut process;
+        if (which == LX_PRIO_PROCESS) {
+            if (from == 0 && positive) {
+                p = process_lookup(id);
+            }
+        } else if (which == LX_PRIO_PGRP) {
+            if (positive) {
+                p = process_group_next(id, from);
+            }
+        } else {
+            p = process_user_next(id, from);
+        }
+        if (p.isNull()) {
+            return p;
+        }
+        let found = Ptr.toBorrow(p as *process);
+        if (mine == 0 || found.domain == mine) {
+            return p;
+        }
+        from = found.pid;
+        process_put(p);
+    }
+    return 0 as *mut process; // not reached
+}
+
+/// setpriority(2): every process named that the caller may change gets the value, clamped to -20..19; the result is
+/// nice_set_result's.
+///
+/// Safety: the dispatcher's.
+@export("lx_setpriority")
+unsafe fn setpriority(a: *mut syscall_args) -> i64 {
+    let which = argU32(a, 0);
+    let named = prioId(which, arg32(a, 1));
+    if (named.rc != 0) {
+        return named.rc as i64;
+    }
+    let id = truncate<u32>(named.value);
+    let nice = nice_clamp(arg32(a, 2));
+    var caller: nice_caller;
+    process_nice_caller(borrow mut caller as *mut nice_caller);
+    var result: i32 = -ESRCH;
+    var after: u32 = 0;
+    while (true) {
+        let p = prioNext(which, id, after);
+        if (p.isNull()) {
+            break;
+        }
+        after = Ptr.toBorrow(p as *process).pid;
+        result = nice_set_result(result, process_nice_set(p, borrow caller as *nice_caller, nice));
+        process_put(p);
+    }
+    return result as i64;
+}
+
+/// getpriority(2): 20 - the lowest nice value among the processes named (1 to 40; libc turns it back), or -ESRCH.
+/// Anyone may read it.
+///
+/// Safety: the dispatcher's.
+@export("lx_getpriority")
+unsafe fn getpriority(a: *mut syscall_args) -> i64 {
+    let which = argU32(a, 0);
+    let named = prioId(which, arg32(a, 1));
+    if (named.rc != 0) {
+        return named.rc as i64;
+    }
+    let id = truncate<u32>(named.value);
+    var result: i32 = -ESRCH;
+    var after: u32 = 0;
+    while (true) {
+        let p = prioNext(which, id, after);
+        if (p.isNull()) {
+            break;
+        }
+        after = Ptr.toBorrow(p as *process).pid;
+        result = nice_get_result(result, process_nice_get(p));
+        process_put(p);
+    }
+    return result as i64;
+}

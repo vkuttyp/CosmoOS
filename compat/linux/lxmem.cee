@@ -1,0 +1,728 @@
+// lxmem.cee - The Linux personality's memory calls (docs/compat/linux/design.md), in CeeSafe (roadmap 1.3 K1): brk,
+// mmap, msync, munmap, mremap, mprotect, madvise and System V shared memory (shmget, shmat, shmdt, shmctl).
+// syscalls.c's table names them (linux_internal.h).
+//
+// A struct lx_shmid_ds is fourteen words; the C compiler checks the layout (the extern block). A struct shm_stat is a C
+// local. The process's Linux state (struct linux_state, linux_internal.h) is syscalls.c's to make and release.
+
+@header(
+    "kernel/cred.h", "kernel/errno.h", "kernel/handle.h", "kernel/kmalloc.h", "kernel/log.h", "kernel/object.h",
+    "kernel/process.h", "kernel/shm.h", "kernel/spinlock.h", "kernel/syscall.h", "kernel/types.h", "kernel/uaccess.h",
+    "kernel/vfs.h", "kernel/vmm.h", "uapi/cosmo/syscall.h", "convert.h", "linux_abi.h", "linux_internal.h",
+)
+extern "C" {
+    struct syscall_args {
+        a: [u64; 6];
+    }
+    struct credentials;
+    struct handle_table;
+    struct vm_space;
+    struct shm_segment;
+    struct lx_shm_attach {
+        next: *mut lx_shm_attach;
+        addr: u64;
+        size: usize;
+        tag: u64;
+        seg: *mut shm_segment;
+    }
+    struct linux_state {
+        brk_start: u64;
+        brk: u64;
+        wx_logged: u32; // swapped atomically (wxRefused)
+        shm_attaches: *mut lx_shm_attach;
+        shm_lock: spinlock_t;
+    }
+    struct process {
+        pid: u32;
+        cred: credentials;
+        handles: handle_table;
+        space: *mut vm_space;
+        linux: *mut linux_state;
+    }
+    struct vnode {
+        @cname("type")
+        kind: u32;
+    }
+    struct file {
+        vn: *mut vnode;
+    }
+    struct shm_stat {
+        key: i32;
+        size: usize;
+        mode: u32;
+        cuid: u32;
+        cgid: u32;
+        nattch: u32;
+    }
+
+    @cvalue(
+        "sizeof(struct lx_shmid_ds) == 112 && offsetof(struct lx_shmid_ds, shm_perm.key) == 0 && offsetof(struct lx_shmid_ds, shm_perm.uid) == 4 && offsetof(struct lx_shmid_ds, shm_perm.gid) == 8 && offsetof(struct lx_shmid_ds, shm_perm.cuid) == 12 && offsetof(struct lx_shmid_ds, shm_perm.cgid) == 16 && offsetof(struct lx_shmid_ds, shm_perm.mode) == 20 && offsetof(struct lx_shmid_ds, shm_segsz) == 48 && offsetof(struct lx_shmid_ds, shm_nattch) == 88",
+    )
+    const SHMID_DS_LAYOUT: bool = true;
+    @cvalue(
+        "sizeof(struct lx_shm_attach) == 40 && sizeof(vm_prot_t) == sizeof(uint32_t) && sizeof(enum vnode_type) == sizeof(uint32_t) && sizeof(unsigned long) == 8 && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__",
+    )
+    const WORDS: bool = true;
+    const USER_LO: u64 = 0x0000000000400000;
+    const USER_HI: u64 = 0x00007FFFFFFFF000;
+    const VNODE_REG: u32 = 1;
+    const COSMO_O_ACCMODE: u32 = 0x0003;
+    const COSMO_O_RDONLY: u32 = 0x0000;
+    const HANDLE_RIGHT_READ: u32 = 1;
+    const HANDLE_RIGHT_WRITE: u32 = 2;
+    const VM_PROT_READ: u32 = 1;
+    const VM_PROT_WRITE: u32 = 2;
+    const VM_PROT_EXEC: u32 = 4;
+    const VM_PROT_RW: u32 = 3;
+    const VM_MAP_SHARED: u32 = 1;
+    const VM_MAP_REPLACE: u32 = 2;
+    const COSMO_PROT_READ: u32 = 1;
+    const COSMO_PROT_WRITE: u32 = 2;
+    const COSMO_PROT_EXEC: u32 = 4;
+    const LX_MAP_PRIVATE: u32 = 0x02;
+    const LX_MAP_FIXED: u32 = 0x10;
+    const LX_MAP_ANONYMOUS: u32 = 0x20;
+    const LX_MREMAP_MAYMOVE: u32 = 1;
+    const LX_MREMAP_FIXED: u32 = 2;
+    const LX_MREMAP_DONTUNMAP: u32 = 4;
+    const LX_MS_ASYNC: u32 = 1;
+    const LX_MS_INVALIDATE: u32 = 2;
+    const LX_MS_SYNC: u32 = 4;
+    const LX_IPC_CREAT: u32 = 0o1000;
+    const LX_IPC_EXCL: u32 = 0o2000;
+    const LX_IPC_RMID: i32 = 0;
+    const LX_IPC_STAT: i32 = 2;
+    const LX_SHM_RDONLY: u32 = 0o10000;
+    const LX_SHM_REMAP: u32 = 0o40000;
+    const KLOG_INFO: u32 = 1;
+    const ENOMEM: i32 = 12;
+    const EBADF: i32 = 9;
+    const EACCES: i32 = 13;
+    const EFAULT: i32 = 14;
+    const EEXIST: i32 = 17;
+    const ENODEV: i32 = 19;
+    const EINVAL: i32 = 22;
+
+    fn process_current() -> *mut process;
+    fn user_range_ok(addr: u64, len: usize) -> bool;
+    fn copy_to_user(userDst: u64, src: *void, len: usize) -> i32;
+    fn is_page_aligned(x: u64) -> bool;
+    fn page_align_up(x: u64) -> u64;
+    fn user_mmap_base(space: *vm_space) -> u64;
+    fn lx_prot(lx: u32, native: *mut i32) -> i32;
+    fn kzalloc(size: usize) -> *mut void;
+    fn handle_get(t: *mut handle_table, h: i32, rightsOut: *mut u32) -> *mut kobject;
+    fn file_from_kobject(obj: *mut kobject) -> *mut file;
+    fn file_put(f: *mut file);
+    fn file_flags(f: *file) -> u32;
+    fn vnode_put(vn: *mut vnode);
+    fn ramfs_anon_reg(mode: u32, out: *mut *mut vnode) -> i32;
+    fn vfs_ftruncate(vn: *mut vnode, size: u64) -> i32;
+    fn vm_user_map_anon(space: *mut vm_space, base: u64, size: usize, prot: u32, flags: u32, name: *CChar) -> i32;
+    fn vm_user_map_anon_replace(
+        space: *mut vm_space,
+        base: u64,
+        size: usize,
+        prot: u32,
+        flags: u32,
+        name: *CChar,
+    ) -> i32;
+    fn vm_user_map_anon_free(
+        space: *mut vm_space,
+        from: u64,
+        size: usize,
+        prot: u32,
+        flags: u32,
+        name: *CChar,
+        base: *mut u64,
+    ) -> i32;
+    fn vm_user_map_file(
+        space: *mut vm_space,
+        base: u64,
+        size: usize,
+        prot: u32,
+        maxprot: u32,
+        flags: u32,
+        vn: *mut vnode,
+        off: u64,
+        name: *CChar,
+    ) -> i32;
+    fn vm_user_map_file_free(
+        space: *mut vm_space,
+        from: u64,
+        size: usize,
+        prot: u32,
+        maxprot: u32,
+        flags: u32,
+        vn: *mut vnode,
+        off: u64,
+        name: *CChar,
+        base: *mut u64,
+    ) -> i32;
+    fn vm_user_unmap(space: *mut vm_space, base: u64, size: usize, flags: u32) -> i32;
+    fn vm_user_msync(space: *mut vm_space, base: u64, size: usize) -> i32;
+    fn vm_user_range_mapped(space: *mut vm_space, addr: u64, len: usize, prot: u32) -> bool;
+    fn vm_user_remap(space: *mut vm_space, base: u64, oldSize: usize, newSize: usize) -> i32;
+    fn vm_user_protect(space: *mut vm_space, base: u64, size: usize, prot: u32) -> i32;
+    fn vm_user_sync_icache(space: *mut vm_space, base: u64, size: usize);
+    fn vm_user_map_shm(
+        space: *mut vm_space,
+        at: u64,
+        base: *mut u64,
+        size: usize,
+        prot: u32,
+        maxprot: u32,
+        vn: *mut vnode,
+        name: *CChar,
+        tag: *mut u64,
+    ) -> i32;
+    fn vm_user_unmap_tag(space: *mut vm_space, tag: u64);
+    fn shm_get(key: i32, size: usize, shmflg: u32, cred: *credentials) -> i32;
+    fn shm_lookup_ref(shmid: i32, out: *mut *mut shm_segment) -> i32;
+    fn shm_size(seg: *mut shm_segment) -> usize;
+    fn shm_vnode(seg: *mut shm_segment) -> *mut vnode;
+    fn shm_access(seg: *mut shm_segment, cred: *credentials, want: u32) -> i32;
+    fn shm_attached(seg: *mut shm_segment);
+    fn shm_detach(seg: *mut shm_segment);
+    fn shm_unref(seg: *mut shm_segment);
+    fn shm_stat_id(shmid: i32, cred: *credentials, out: *mut shm_stat) -> i32;
+    fn shm_rmid(shmid: i32, cred: *credentials) -> i32;
+}
+
+// The most a break may grow above its start.
+const LX_BRK_MAX: u64 = 1 << 30;
+const ATTACH_SIZE: usize = 40; // sizeof(struct lx_shm_attach), checked above
+const NOT: u32 = 0xFFFFFFFF;
+
+/// Safety: the dispatcher's: `a` is the call's arguments.
+unsafe fn arg(a: *mut syscall_args, i: usize) -> u64 => Ptr.toBorrow(a as *syscall_args).a[i];
+
+/// Safety: in a process's thread.
+unsafe fn space() -> *mut vm_space => Ptr.toBorrow(process_current() as *process).space;
+
+/// The calling process's Linux state.
+/// Safety: in a thread of a process of the Linux personality.
+unsafe fn state() -> *mut linux_state => Ptr.toBorrow(process_current() as *process).linux;
+
+/// Safety: in a process's thread.
+unsafe fn cred() -> *credentials {
+    let p = Ptr.toBorrow(process_current() as *process);
+    return borrow p.cred as *credentials;
+}
+
+/// Safety: the dispatcher's.
+@export("lx_brk")
+unsafe fn brk(a: *mut syscall_args) -> i64 {
+    let ls = Ptr.toBorrowMut(state());
+    let want = arg(a, 0);
+    if (want == 0) {
+        return truncate<i64>(ls.brk);
+    }
+    if (want < ls.brk_start || want > ls.brk_start.wrappingAdd(LX_BRK_MAX)) {
+        return truncate<i64>(ls.brk); // Linux returns the unchanged break on failure
+    }
+    let curEnd = page_align_up(ls.brk);
+    let newEnd = page_align_up(want);
+    if (newEnd > curEnd) {
+        // Growth merges into the existing heap region (same prot and name).
+        if (vm_user_map_anon(
+            space(),
+            curEnd,
+            truncate<usize>(newEnd - curEnd),
+            VM_PROT_RW,
+            0,
+            "brk\0".ptr as *CChar,
+        ) != 0) {
+            return truncate<i64>(ls.brk);
+        }
+    } else if (newEnd < curEnd) {
+        // A shrink cannot fail on a well-formed heap; if it does the break stays where it was and no mapping changes.
+        if (vm_user_unmap(space(), newEnd, truncate<usize>(curEnd - newEnd), 0) != 0) {
+            return truncate<i64>(ls.brk);
+        }
+    }
+    ls.brk = want;
+    return truncate<i64>(want);
+}
+
+/// W^X (decision 4): no page is writable and executable at once, so a mapping or a protection asking for both is
+/// -EINVAL. The one program that asks in earnest is a dynamic linker relocating a library with text relocations
+/// (musl's mprotect(PROT_READ|PROT_WRITE|PROT_EXEC) for DT_TEXTREL): its dlopen fails with EINVAL, and this line says
+/// why -- once per exec, so a program probing for RWX in a loop (a JIT) cannot flood the console and the dmesg ring
+/// (#414's review).
+///
+/// Safety: in a process's thread; `call` is terminated.
+unsafe fn wxRefused(call: *CChar) -> i64 {
+    let ls = state();
+    if (!ls.isNull()) {
+        let logged = Ptr.toBorrow(borrow mut Ptr.toBorrowMut(ls).wx_logged as *mut u32 as *AtomicU32);
+        if (logged.swapWith(1, Ordering.Relaxed) == 0) {
+            klog(
+                KLOG_INFO,
+                "linux: pid %u: %s with PROT_WRITE|PROT_EXEC refused (W^X): a library with text relocations cannot be loaded here; build it -fPIC\0".ptr as *CChar,
+                Ptr.toBorrow(process_current() as *process).pid,
+                call,
+            );
+        }
+    }
+    return -EINVAL as i64;
+}
+
+/// Linux's protection bits as the VM's, or a refusal.
+struct Prot {
+    rc: i64; // 0, or what the call answers
+    vprot: u32;
+    write: bool;
+}
+
+/// Safety: in a process's thread; `call` is terminated.
+unsafe fn protOf(lxProt: u32, call: *CChar) -> Prot {
+    var native: i32 = 0;
+    if (lx_prot(lxProt, borrow mut native as *mut i32) < 0) {
+        return Prot { rc: -EINVAL as i64, vprot: 0, write: false };
+    }
+    let nprot = truncate<u32>(native);
+    let write = (nprot & COSMO_PROT_WRITE) != 0;
+    if (write && (nprot & COSMO_PROT_EXEC) != 0) {
+        return Prot { rc: wxRefused(call), vprot: 0, write: write };
+    }
+    var vprot: u32 = 0;
+    if ((nprot & COSMO_PROT_READ) != 0) {
+        vprot |= VM_PROT_READ;
+    }
+    if (write) {
+        vprot |= VM_PROT_WRITE;
+    }
+    if ((nprot & COSMO_PROT_EXEC) != 0) {
+        vprot |= VM_PROT_EXEC;
+    }
+    return Prot { rc: 0, vprot: vprot, write: write };
+}
+
+/// Where a mapping went, or why not.
+struct Placed {
+    rc: i32;
+    base: u64;
+}
+
+/// Map `len` bytes of `vn` (null: anonymous memory) at `hint` if MAP_FIXED, else in the first free range from it.
+///
+/// Safety: in a process's thread; `vn` is null or referenced.
+unsafe fn place(
+    fixed: bool,
+    hint: u64,
+    len: usize,
+    vprot: u32,
+    maxprot: u32,
+    fflags: u32,
+    vn: *mut vnode,
+    off: u64,
+) -> Placed {
+    let s = space();
+    let fileName = "mmap-file\0".ptr as *CChar;
+    let anonName = "mmap\0".ptr as *CChar;
+    if (fixed) {
+        if (!is_page_aligned(hint) || !user_range_ok(hint, len)) {
+            return Placed { rc: -EINVAL, base: 0 };
+        }
+        // Linux replaces what was there, and this used to do it as an unmap followed by a map -- two holds of
+        // space->lock with the range belonging to nobody in between. Another thread's mmap(NULL, ...) could be handed
+        // that gap, after which the map failed with -EEXIST: a failure Linux never produces. One operation now, which
+        // owns the range throughout (docs/audit/next-subsystem-map-fixed.md), for a file too.
+        let rc = if (!vn.isNull()) vm_user_map_file(
+            s,
+            hint,
+            len,
+            vprot,
+            maxprot,
+            fflags | VM_MAP_REPLACE,
+            vn,
+            off,
+            fileName,
+        )
+            else vm_user_map_anon_replace(s, hint, len, vprot, 0, anonName);
+        return Placed { rc: rc, base: hint };
+    }
+    // As the native door: each attempt chooses and inserts under one hold (M46), because Linux never answers
+    // mmap(NULL, ...) with EEXIST and two holds did about half the time two threads placed at once.
+    let mbase = user_mmap_base(s as *vm_space);
+    var from = if (hint >= USER_LO && is_page_aligned(hint)) hint else mbase;
+    var base: u64 = 0;
+    var rc = 0;
+    while (true) {
+        rc = if (!vn.isNull()) vm_user_map_file_free(
+            s,
+            from,
+            len,
+            vprot,
+            maxprot,
+            fflags,
+            vn,
+            off,
+            fileName,
+            borrow mut base as *mut u64,
+        )
+            else vm_user_map_anon_free(s, from, len, vprot, 0, anonName, borrow mut base as *mut u64);
+        if (rc != -ENOMEM || from == mbase) {
+            break;
+        }
+        from = mbase;
+    }
+    return Placed { rc: rc, base: base };
+}
+
+/// Safety: the dispatcher's.
+@export("lx_mmap")
+unsafe fn mmap(a: *mut syscall_args) -> i64 {
+    let hint = arg(a, 0);
+    let rawLen = arg(a, 1);
+    let flags = truncate<u32>(arg(a, 3));
+    var off = arg(a, 5);
+    if (rawLen == 0 || rawLen > USER_HI - USER_LO) {
+        return -EINVAL as i64;
+    }
+    let len = page_align_up(rawLen);
+    let pr = protOf(truncate<u32>(arg(a, 2)), "mmap\0".ptr as *CChar);
+    if (pr.rc != 0) {
+        return pr.rc;
+    }
+    // A file: a FILE region over its page cache (docs/audit/next-subsystem-file-regions.md). MAP_SHARED maps the
+    // file's own pages -- a write through the mapping is a write to the file, seen by read() and every other mapping;
+    // MAP_PRIVATE is copy-on-write. The same checks the native door makes (kernel/syscall/mmap.cee, mmapFileCheck),
+    // with Linux's errnos: a regular file (-ENODEV), the READ right (-EBADF), and for a shared writable mapping a file
+    // opened for writing through a handle with the WRITE right (-EACCES). The eager copy this used to make is gone.
+    var f = 0 as *mut file;
+    // Linux's mapping type is the low four bits: MAP_SHARED 1, MAP_PRIVATE 2, MAP_SHARED_VALIDATE 3 (shared, every
+    // flag checked); no type, or any other value, is -EINVAL -- anonymous mappings included, which need one too.
+    // Review found this door deciding on the SHARED bit alone.
+    let kind = flags & 0x0F;
+    if (kind == 0 || kind > 3) {
+        return -EINVAL as i64;
+    }
+    let shared = kind != LX_MAP_PRIVATE;
+    let anonymous = (flags & LX_MAP_ANONYMOUS) != 0;
+    var maxprot = VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXEC;
+    if (!anonymous) {
+        if (!is_page_aligned(off) || off.wrappingAdd(len) < off) {
+            return -EINVAL as i64;
+        }
+        // One lookup carrying the rights, as the native door: a second lookup of the number could resolve to another
+        // file if a thread closed and reopened it in between (review).
+        var rights: u32 = 0;
+        let p = Ptr.toBorrowMut(process_current());
+        let obj = handle_get(
+            borrow mut p.handles as *mut handle_table,
+            truncate<i32>(arg(a, 4)),
+            borrow mut rights as *mut u32,
+        );
+        if (obj.isNull()) {
+            return -EBADF as i64;
+        }
+        f = file_from_kobject(obj);
+        if (f.isNull() || (rights & HANDLE_RIGHT_READ) == 0) {
+            kobject_put(obj);
+            return -EBADF as i64;
+        }
+        if (Ptr.toBorrow(Ptr.toBorrow(f as *file).vn as *vnode).kind != VNODE_REG) {
+            file_put(f);
+            return -ENODEV as i64;
+        }
+        let writable = (file_flags(f as *file) & COSMO_O_ACCMODE) != COSMO_O_RDONLY &&
+            (rights & HANDLE_RIGHT_WRITE) != 0;
+        if (shared && pr.write && !writable) {
+            file_put(f);
+            return -EACCES as i64;
+        }
+        if (shared && !writable) {
+            maxprot &= VM_PROT_WRITE ^ NOT;
+        }
+    }
+    // MAP_SHARED|MAP_ANONYMOUS: Linux's shmem, an unnamed file, so the pages stay shared with a fork child -- a
+    // private anonymous region would be copied on write (docs/compat/linux/design.md, "fork").
+    var anonVn = 0 as *mut vnode;
+    if (shared && anonymous) {
+        var arc = ramfs_anon_reg(0o600, borrow mut anonVn as *mut *mut vnode);
+        if (arc == 0) {
+            arc = vfs_ftruncate(anonVn, len);
+            if (arc != 0) {
+                vnode_put(anonVn);
+                anonVn = 0 as *mut vnode;
+            }
+        }
+        if (arc != 0) {
+            return arc as i64;
+        }
+        off = 0;
+    }
+    let vn = if (!f.isNull()) Ptr.toBorrow(f as *file).vn else anonVn;
+    let at = place(
+        (flags & LX_MAP_FIXED) != 0,
+        hint,
+        truncate<usize>(len),
+        pr.vprot,
+        maxprot,
+        if (shared) VM_MAP_SHARED else 0,
+        vn,
+        off,
+    );
+    if (!f.isNull()) {
+        file_put(f);
+    }
+    if (!anonVn.isNull()) {
+        vnode_put(anonVn); // the mapping holds its own reference
+    }
+    return if (at.rc != 0) at.rc as i64 else truncate<i64>(at.base);
+}
+
+/// Safety: the dispatcher's.
+@export("lx_msync")
+unsafe fn msync(a: *mut syscall_args) -> i64 {
+    let addr = arg(a, 0);
+    let len = truncate<usize>(page_align_up(arg(a, 1)));
+    let flags = truncate<u32>(arg(a, 2));
+    if ((flags & ((LX_MS_ASYNC | LX_MS_INVALIDATE | LX_MS_SYNC) ^ NOT)) != 0) {
+        return -EINVAL as i64;
+    }
+    if ((flags & LX_MS_ASYNC) != 0 && (flags & LX_MS_SYNC) != 0) {
+        return -EINVAL as i64;
+    }
+    if (!is_page_aligned(addr) || len == 0 || !user_range_ok(addr, len)) {
+        return -EINVAL as i64;
+    }
+    if ((flags & LX_MS_SYNC) == 0) {
+        // ASYNC and INVALIDATE: see sys_msync
+        return if (vm_user_range_mapped(space(), addr, len, 0)) 0 else -ENOMEM as i64;
+    }
+    return vm_user_msync(space(), addr, len) as i64;
+}
+
+/// Safety: the dispatcher's.
+@export("lx_munmap")
+unsafe fn munmap(a: *mut syscall_args) -> i64 {
+    let addr = arg(a, 0);
+    let len = truncate<usize>(page_align_up(arg(a, 1)));
+    if (!is_page_aligned(addr) || arg(a, 1) == 0 || !user_range_ok(addr, len)) {
+        return -EINVAL as i64;
+    }
+    return vm_user_unmap(space(), addr, len, 0) as i64;
+}
+
+/// mremap: resize a whole anonymous mapping in place (grow or shrink). See docs/audit/next-subsystem-mremap.md.
+///
+/// Safety: the dispatcher's.
+@export("lx_mremap")
+unsafe fn mremap(a: *mut syscall_args) -> i64 {
+    let oldAddr = arg(a, 0);
+    let rawOld = arg(a, 1);
+    let rawNew = arg(a, 2);
+    let flags = truncate<u32>(arg(a, 3));
+    if ((flags & ((LX_MREMAP_MAYMOVE | LX_MREMAP_FIXED | LX_MREMAP_DONTUNMAP) ^ NOT)) != 0) {
+        return -EINVAL as i64;
+    }
+    if ((flags & (LX_MREMAP_FIXED | LX_MREMAP_DONTUNMAP)) != 0) {
+        return -EINVAL as i64; // v1 places nothing at a chosen address and always unmaps a shrink
+    }
+    if (!is_page_aligned(oldAddr)) {
+        return -EINVAL as i64;
+    }
+    // Bound the lengths against the user window BEFORE rounding: a size near UINT64_MAX would make page_align_up wrap
+    // to 0, and a 0 old_size is the shareable-dup form v1 does not support. (As mmap does.)
+    if (rawOld == 0 || rawOld > USER_HI - USER_LO) {
+        return -EINVAL as i64;
+    }
+    if (rawNew == 0 || rawNew > USER_HI - USER_LO) {
+        return -EINVAL as i64;
+    }
+    let oldSize = truncate<usize>(page_align_up(rawOld));
+    let newSize = truncate<usize>(page_align_up(rawNew));
+    // vm_user_remap finds and validates the mapping (whole anonymous region) and resizes it -- all guarding the space
+    // lock -- so even an equal-size request reports -EFAULT for an unmapped address rather than a bogus success. A
+    // concurrent munmap/MAP_FIXED cannot slip a different mapping into the range mid-resize. MAYMOVE is accepted but
+    // never relocates: a grow the space after cannot absorb is -ENOMEM (realloc falls back to allocate-copy-free).
+    let rc = vm_user_remap(space(), oldAddr, oldSize, newSize);
+    return if (rc != 0) rc as i64 else truncate<i64>(oldAddr);
+}
+
+/// System V shared memory (shmget/shmat/shmdt/shmctl). A segment is an anonymous ramfs file (kernel/ipc/shm.c) that
+/// shmat maps MAP_SHARED. See docs/audit/next-subsystem-shm.md.
+///
+/// Safety: the dispatcher's.
+@export("lx_shmget")
+unsafe fn shmget(a: *mut syscall_args) -> i64 {
+    let shmflg = truncate<u32>(arg(a, 2));
+    // v1 honours only IPC_CREAT/IPC_EXCL and the mode; SHM_HUGETLB and any other flag must fail, not silently create
+    // ordinary memory.
+    if ((shmflg & ((LX_IPC_CREAT | LX_IPC_EXCL | 0o777) ^ NOT)) != 0) {
+        return -EINVAL as i64;
+    }
+    return shm_get(truncate<i32>(arg(a, 0)), truncate<usize>(arg(a, 1)), shmflg, cred()) as i64;
+}
+
+/// Safety: the dispatcher's.
+@export("lx_shmat")
+unsafe fn shmat(a: *mut syscall_args) -> i64 {
+    let shmflg = truncate<u32>(arg(a, 2));
+    if ((shmflg & LX_SHM_REMAP) != 0) {
+        return -EINVAL as i64; // v1 does not remap over an existing mapping
+    }
+    var seg = 0 as *mut shm_segment;
+    var rc = shm_lookup_ref(truncate<i32>(arg(a, 0)), borrow mut seg as *mut *mut shm_segment);
+    if (rc != 0) {
+        return rc as i64; // -EINVAL: no such live segment
+    }
+    let rdonly = (shmflg & LX_SHM_RDONLY) != 0;
+    // ipc_perm: read is always needed, write unless SHM_RDONLY.
+    rc = shm_access(seg, cred(), if (rdonly) 0o4 else 0o6);
+    if (rc != 0) {
+        shm_unref(seg);
+        return rc as i64; // -EACCES
+    }
+    let size = shm_size(seg);
+    let vn = shm_vnode(seg);
+    // A read-only attach keeps a read-only ceiling, so a later mprotect cannot add write access to the shared
+    // segment.
+    let prot = if (rdonly) VM_PROT_READ else VM_PROT_READ | VM_PROT_WRITE;
+    let s = space();
+    let shmaddr = arg(a, 1);
+    var base: u64 = 0;
+    var tag: u64 = 0;
+    let name = "shm\0".ptr as *CChar;
+    if (shmaddr == 0) {
+        base = user_mmap_base(s as *vm_space);
+        rc = vm_user_map_shm(s, 0, borrow mut base as *mut u64, size, prot, prot, vn, name, borrow mut tag as *mut u64);
+    } else {
+        if (!is_page_aligned(shmaddr)) {
+            // SHM_RND rounding is deferred
+            shm_unref(seg);
+            return -EINVAL as i64;
+        }
+        base = shmaddr;
+        rc = vm_user_map_shm(s, base, 0 as *mut u64, size, prot, prot, vn, name, borrow mut tag as *mut u64);
+        if (rc == -EEXIST) {
+            rc = -ENOMEM; // the requested address is occupied; no silent relocation
+        }
+    }
+    if (rc != 0) {
+        shm_unref(seg);
+        return rc as i64;
+    }
+    let rec = kzalloc(ATTACH_SIZE) as *mut lx_shm_attach;
+    if (rec.isNull()) {
+        vm_user_unmap_tag(s, tag);
+        shm_unref(seg);
+        return -ENOMEM as i64;
+    }
+    let at = Ptr.toBorrowMut(rec);
+    at.addr = base;
+    at.size = size;
+    at.tag = tag;
+    at.seg = seg; // the lookup's reference becomes the attach's
+    // Count the attach BEFORE publishing the record: once it is on the list a sibling thread can detach it, and that
+    // detach drops the attach's reference -- so `seg` must not be touched afterwards.
+    shm_attached(seg); // nattch++
+    let ls = Ptr.toBorrowMut(state());
+    let lock = borrow mut ls.shm_lock as *mut spinlock_t;
+    let st = spin_lock_irqsave(lock);
+    at.next = ls.shm_attaches;
+    ls.shm_attaches = rec;
+    spin_unlock_irqrestore(lock, st);
+    return truncate<i64>(base);
+}
+
+/// Safety: the dispatcher's.
+@export("lx_shmdt")
+unsafe fn shmdt(a: *mut syscall_args) -> i64 {
+    let shmaddr = arg(a, 0);
+    let ls = Ptr.toBorrowMut(state());
+    var found = 0 as *mut lx_shm_attach;
+    let lock = borrow mut ls.shm_lock as *mut spinlock_t;
+    let st = spin_lock_irqsave(lock);
+    var prev = 0 as *mut lx_shm_attach;
+    var cur = ls.shm_attaches;
+    while (!cur.isNull()) {
+        let rec = Ptr.toBorrow(cur as *lx_shm_attach);
+        if (rec.addr == shmaddr) {
+            // Unlink it: from the head, or from the record before it.
+            if (prev.isNull()) {
+                ls.shm_attaches = rec.next;
+            } else {
+                let before = Ptr.toBorrowMut(prev);
+                before.next = rec.next;
+            }
+            found = cur;
+            break;
+        }
+        prev = cur;
+        cur = rec.next;
+    }
+    spin_unlock_irqrestore(lock, st);
+    if (found.isNull()) {
+        return -EINVAL as i64; // no attach at that address
+    }
+    // Unmap exactly this attach's mapping(s), by the tag the map handed back: all its remaining pieces (after any
+    // partial self-unmap) go, while a re-attach of the same segment or a replacement mapping -- which carry a different
+    // tag or none -- is left alone. Atomic against a concurrent map/unmap of the ranges.
+    let at = Ptr.toBorrow(found as *lx_shm_attach);
+    vm_user_unmap_tag(space(), at.tag);
+    shm_detach(at.seg); // nattch-- and drop the attach's reference
+    kfree(found as *mut void);
+    return 0;
+}
+
+/// Safety: the dispatcher's.
+@export("lx_shmctl")
+unsafe fn shmctl(a: *mut syscall_args) -> i64 {
+    let shmid = truncate<i32>(arg(a, 0));
+    let cmd = truncate<i32>(arg(a, 1));
+    if (cmd == LX_IPC_RMID) {
+        return shm_rmid(shmid, cred()) as i64;
+    }
+    if (cmd != LX_IPC_STAT) {
+        return -EINVAL as i64; // IPC_SET / SHM_LOCK / SHM_INFO deferred
+    }
+    var st: shm_stat;
+    let rc = shm_stat_id(shmid, cred(), borrow mut st as *mut shm_stat);
+    if (rc != 0) {
+        return rc as i64;
+    }
+    // A struct lx_shmid_ds's words: the permissions' key and uid, gid and cuid, cgid and mode in the first three
+    // (halves, low first); the size in word 6 and the attach count in word 11. The owner is the creator.
+    var ds = [0u64; 14];
+    ds[0] = truncate<u32>(st.key) as u64 | (st.cuid as u64) << 32;
+    ds[1] = st.cgid as u64 | (st.cuid as u64) << 32;
+    ds[2] = st.cgid as u64 | (st.mode as u64) << 32;
+    ds[6] = st.size as u64;
+    ds[11] = st.nattch as u64;
+    return if (copy_to_user(arg(a, 2), borrow ds as *[u64; 14] as *void, 112) != 0) -EFAULT as i64 else 0;
+}
+
+/// Safety: the dispatcher's.
+@export("lx_mprotect")
+unsafe fn mprotect(a: *mut syscall_args) -> i64 {
+    let addr = arg(a, 0);
+    let len = truncate<usize>(page_align_up(arg(a, 1)));
+    if (!is_page_aligned(addr) || len == 0) {
+        return -EINVAL as i64;
+    }
+    let pr = protOf(truncate<u32>(arg(a, 2)), "mprotect\0".ptr as *CChar);
+    if (pr.rc != 0) {
+        return pr.rc;
+    }
+    if (!user_range_ok(addr, len)) {
+        return -ENOMEM as i64;
+    }
+    let rc = vm_user_protect(space(), addr, len, pr.vprot);
+    if (rc != 0) {
+        return rc as i64;
+    }
+    // The same rule as the native door: a range made executable gets its instruction stream synchronised by the
+    // kernel, because a Linux JIT cannot do it from EL0 here either.
+    if ((pr.vprot & VM_PROT_EXEC) != 0) {
+        vm_user_sync_icache(space(), addr, len);
+    }
+    return 0;
+}
+
+/// Safety: the dispatcher's.
+@export("lx_madvise")
+unsafe fn madvise(a: *mut syscall_args) -> i64 => 0;

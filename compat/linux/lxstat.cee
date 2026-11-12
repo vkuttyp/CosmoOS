@@ -1,0 +1,295 @@
+// lxstat.cee - The Linux personality's stat calls and symbolic links (docs/compat/linux/design.md), in CeeSafe
+// (roadmap 1.3 K1): stat, lstat, fstat, newfstatat, statx, readlink, readlinkat, symlink and symlinkat. syscalls.c's
+// table names them (linux_internal.h).
+//
+// A struct cosmo_stat is seven words, a struct lx_stat at most eighteen (144 bytes on x86-64, 128 on AArch64) and a
+// struct lx_statx thirty-two; the C compiler checks them (the extern block). lxconv.cee fills the Linux records.
+
+@header(
+    "kernel/errno.h", "kernel/handle.h", "kernel/kmalloc.h", "kernel/mutex.h", "kernel/process.h", "kernel/syscall.h",
+    "kernel/uaccess.h", "kernel/vfs.h", "uapi/cosmo/syscall.h", "convert.h", "linux_abi.h", "linux_internal.h",
+)
+extern "C" {
+    struct syscall_args {
+        a: [u64; 6];
+    }
+    struct vnode {
+        lock: mutex;
+    }
+    struct cosmo_stat;
+    struct lx_stat;
+    struct lx_statx;
+
+    @cvalue(
+        "sizeof(struct cosmo_stat) == 7 * sizeof(uint64_t) && sizeof(struct lx_stat) <= 144 && _Alignof(struct lx_stat) <= 8 && sizeof(struct lx_statx) == 256 && _Alignof(struct lx_statx) <= 8 && VFS_PATH_MAX == 1024",
+    )
+    const SIZES: bool = true;
+    /// sizeof(struct lx_stat): 144 bytes on x86-64, 128 on AArch64.
+    @constant
+    fn LX_STAT_BYTES() -> usize;
+    const VFS_PATH_MAX: usize = 1024;
+    const HANDLE_RIGHT_READ: u32 = 1;
+    const HANDLE_RIGHT_WRITE: u32 = 2;
+    const LX_AT_FDCWD: i32 = -100;
+    const LX_AT_EMPTY_PATH: u32 = 0x1000;
+    const LX_AT_SYMLINK_NOFOLLOW: u32 = 0x100;
+    const LX_AT_STATX_SYNC_TYPE: u32 = 0x6000;
+    const LX_STATX__RESERVED: u32 = 0x80000000;
+    const ENOENT: i32 = 2;
+    const ENOMEM: i32 = 12;
+    const EFAULT: i32 = 14;
+    const EINVAL: i32 = 22;
+
+    fn copy_to_user(userDst: u64, src: *void, len: usize) -> i32;
+    fn strncpy_from_user(dst: *mut CChar, userSrc: u64, max: usize) -> i32;
+    fn process_cwd_get() -> *mut vnode;
+    fn syscall_handle_stat(h: i32, st: *mut cosmo_stat) -> i32;
+    fn vnode_put(vn: *mut vnode);
+    fn vnode_stat(vn: *mut vnode, st: *mut cosmo_stat);
+    fn vfs_stat(start: *mut vnode, path: *CChar, st: *mut cosmo_stat) -> i32;
+    fn vfs_lstat(start: *mut vnode, path: *CChar, st: *mut cosmo_stat) -> i32;
+    fn vfs_readlink(start: *mut vnode, path: *CChar, buf: *mut CChar, len: usize) -> i32;
+    fn vfs_symlink(start: *mut vnode, path: *CChar, target: *CChar) -> i32;
+    fn lx_stat_from_native(st: *cosmo_stat, out: *mut lx_stat);
+    fn lx_statx_from_native(st: *cosmo_stat, mask: u32, out: *mut lx_statx);
+    fn lx_get_path(uptr: u64, buf: *mut CChar) -> i32;
+    fn lx_at_base(
+        dirfd: i64,
+        path: *CChar,
+        rights: u32,
+        out: *mut *mut vnode,
+        basepath: *mut CChar,
+        n: usize,
+        have: *mut u32,
+    ) -> i32;
+}
+
+const CWD: i64 = -100; // LX_AT_FDCWD as a register holds it
+
+/// The build's sizeof(struct lx_stat).
+static STAT_BYTES: usize = LX_STAT_BYTES();
+
+/// Safety: the dispatcher's: `a` is the call's arguments.
+unsafe fn arg(a: *mut syscall_args, i: usize) -> u64 => Ptr.toBorrow(a as *syscall_args).a[i];
+
+/// Argument `i` as Linux's `int`.
+/// Safety: the dispatcher's.
+unsafe fn arg32(a: *mut syscall_args, i: usize) -> i32 => truncate<i32>(arg(a, i));
+
+/// The directory `path` resolves from for a call needing `rights` on it (lx_at_base), with no name wanted.
+/// Safety: in a process's thread; `path` is terminated.
+unsafe fn baseOf(dirfd: i64, path: *CChar, rights: u32, out: *mut *mut vnode) -> i32 =>
+    lx_at_base(dirfd, path, rights, out, 0 as *mut CChar, 0, 0 as *mut u32);
+
+/// `st` to user memory as Linux's struct stat: 0 or -EFAULT.
+/// Safety: `st` is a filled struct cosmo_stat.
+unsafe fn statOut(st: *cosmo_stat, uptr: u64) -> i64 {
+    var ls = [0u64; 18]; // a struct lx_stat
+    lx_stat_from_native(st, borrow mut ls as *mut [u64; 18] as *mut lx_stat);
+    return if (copy_to_user(uptr, borrow ls as *[u64; 18] as *void, STAT_BYTES) != 0) -EFAULT as i64 else 0;
+}
+
+/// stat and lstat: a path from the working directory.
+/// Safety: the dispatcher's.
+unsafe fn statPath(a: *mut syscall_args, follow: bool) -> i64 {
+    var path = [0u8; 1024];
+    let p = borrow mut path as *mut [u8; 1024] as *mut u8 as *mut CChar;
+    var rc = lx_get_path(arg(a, 0), p);
+    if (rc != 0) {
+        return rc as i64;
+    }
+    var st = [0u64; 7];
+    let sp = borrow mut st as *mut [u64; 7] as *mut cosmo_stat;
+    let cwd = process_cwd_get();
+    rc = if (follow) vfs_stat(cwd, p as *CChar, sp) else vfs_lstat(cwd, p as *CChar, sp);
+    vnode_put(cwd);
+    return if (rc != 0) rc as i64 else statOut(sp as *cosmo_stat, arg(a, 1));
+}
+
+/// x86-64's table only: AArch64 has newfstatat alone.
+/// Safety: the dispatcher's.
+@export("lx_stat")
+unsafe fn stat(a: *mut syscall_args) -> i64 => statPath(a, true);
+
+/// lstat: the link itself, which is the whole point of the call. Until symbolic links existed this was an alias for
+/// stat, which answered the opposite of what a caller asks for (docs/audit/next-subsystem-symlink.md). x86-64's table
+/// only.
+///
+/// Safety: the dispatcher's.
+@export("lx_lstat")
+unsafe fn lstat(a: *mut syscall_args) -> i64 => statPath(a, false);
+
+/// readlink(2) and readlinkat(2): the bytes, never terminated, truncated to the caller's buffer.
+///
+/// Safety: in a process's thread.
+unsafe fn readlinkCommon(dirfd: i64, upath: u64, ubuf: u64, wanted: u64) -> i64 {
+    var path = [0u8; 1024];
+    let p = borrow mut path as *mut [u8; 1024] as *mut u8 as *mut CChar;
+    var rc = lx_get_path(upath, p);
+    if (rc != 0) {
+        return rc as i64;
+    }
+    if (wanted == 0) {
+        return -EINVAL as i64;
+    }
+    let len = if (wanted > VFS_PATH_MAX as u64) VFS_PATH_MAX else truncate<usize>(wanted);
+    var start = 0 as *mut vnode;
+    rc = baseOf(dirfd, p as *CChar, HANDLE_RIGHT_READ, borrow mut start as *mut *mut vnode);
+    if (rc != 0) {
+        return rc as i64;
+    }
+    let buf = kmalloc(len, 0) as *mut CChar;
+    if (buf.isNull()) {
+        vnode_put(start);
+        return -ENOMEM as i64;
+    }
+    rc = vfs_readlink(start, p as *CChar, buf, len);
+    vnode_put(start);
+    if (rc > 0 && copy_to_user(ubuf, buf as *void, truncate<usize>(rc)) != 0) {
+        rc = -EFAULT;
+    }
+    kfree(buf as *mut void);
+    return rc as i64;
+}
+
+/// x86-64's table only: AArch64 has readlinkat alone.
+/// Safety: the dispatcher's.
+@export("lx_readlink")
+unsafe fn readlink(a: *mut syscall_args) -> i64 => readlinkCommon(CWD, arg(a, 0), arg(a, 1), arg(a, 2));
+
+/// Safety: the dispatcher's.
+@export("lx_readlinkat")
+unsafe fn readlinkat(a: *mut syscall_args) -> i64 =>
+    readlinkCommon(truncate<i64>(arg(a, 0)), arg(a, 1), arg(a, 2), arg(a, 3));
+
+/// The link is made relative to `dirfd`; its target is stored verbatim and resolved when the link is followed, as
+/// Linux does.
+///
+/// Safety: in a process's thread.
+unsafe fn symlinkCommon(utarget: u64, dirfd: i64, upath: u64) -> i64 {
+    let block = kmalloc(2 * VFS_PATH_MAX, 0) as *mut u8; // heap: see lxio.cee's openCommon
+    if (block.isNull()) {
+        return -ENOMEM as i64;
+    }
+    let target = block as *mut CChar;
+    let path = block.add(VFS_PATH_MAX) as *mut CChar;
+    var rc = strncpy_from_user(target, utarget, VFS_PATH_MAX);
+    if (rc >= 0) {
+        rc = lx_get_path(upath, path);
+    }
+    var start = 0 as *mut vnode;
+    if (rc >= 0) {
+        rc = baseOf(dirfd, path as *CChar, HANDLE_RIGHT_WRITE, borrow mut start as *mut *mut vnode);
+    }
+    if (rc >= 0) {
+        rc = vfs_symlink(start, path as *CChar, target as *CChar);
+        vnode_put(start);
+    }
+    kfree(block as *mut void);
+    return rc as i64;
+}
+
+/// x86-64's table only: AArch64 has symlinkat alone.
+/// Safety: the dispatcher's.
+@export("lx_symlink")
+unsafe fn symlink(a: *mut syscall_args) -> i64 => symlinkCommon(arg(a, 0), CWD, arg(a, 1));
+
+/// Safety: the dispatcher's.
+@export("lx_symlinkat")
+unsafe fn symlinkat(a: *mut syscall_args) -> i64 =>
+    symlinkCommon(arg(a, 0), truncate<i64>(arg(a, 1)), arg(a, 2));
+
+/// Safety: the dispatcher's.
+@export("lx_fstat")
+unsafe fn fstat(a: *mut syscall_args) -> i64 {
+    var st = [0u64; 7];
+    let sp = borrow mut st as *mut [u64; 7] as *mut cosmo_stat;
+    let rc = syscall_handle_stat(arg32(a, 0), sp);
+    return if (rc != 0) rc as i64 else statOut(sp as *cosmo_stat, arg(a, 1));
+}
+
+/// Safety: the dispatcher's.
+@export("lx_newfstatat")
+unsafe fn newfstatat(a: *mut syscall_args) -> i64 {
+    let flags = truncate<u32>(arg(a, 3));
+    var path = [0u8; 1024];
+    let p = borrow mut path as *mut [u8; 1024] as *mut u8 as *mut CChar;
+    var rc = strncpy_from_user(p, arg(a, 1), VFS_PATH_MAX);
+    if (rc < 0) {
+        return rc as i64;
+    }
+    var st = [0u64; 7];
+    let sp = borrow mut st as *mut [u64; 7] as *mut cosmo_stat;
+    if (path[0] == 0) {
+        if ((flags & LX_AT_EMPTY_PATH) == 0) {
+            return -ENOENT as i64;
+        }
+        rc = syscall_handle_stat(arg32(a, 0), sp);
+        return if (rc != 0) rc as i64 else statOut(sp as *cosmo_stat, arg(a, 2));
+    }
+    var start = 0 as *mut vnode;
+    rc = baseOf(truncate<i64>(arg(a, 0)), p as *CChar, HANDLE_RIGHT_READ, borrow mut start as *mut *mut vnode);
+    if (rc != 0) {
+        return rc as i64;
+    }
+    // AT_SYMLINK_NOFOLLOW was read and dropped until links existed.
+    rc = if ((flags & LX_AT_SYMLINK_NOFOLLOW) != 0) vfs_lstat(start, p as *CChar, sp)
+        else vfs_stat(start, p as *CChar, sp);
+    vnode_put(start);
+    return if (rc != 0) rc as i64 else statOut(sp as *cosmo_stat, arg(a, 2));
+}
+
+/// Safety: the dispatcher's.
+@export("lx_statx")
+unsafe fn statx(a: *mut syscall_args) -> i64 {
+    let flags = truncate<u32>(arg(a, 2));
+    let mask = truncate<u32>(arg(a, 3));
+    let ubuf = arg(a, 4);
+    // Linux rejects an impossible sync request (both FORCE and DONT) and any reserved mask bit before touching the
+    // file.
+    if ((flags & LX_AT_STATX_SYNC_TYPE) == LX_AT_STATX_SYNC_TYPE || (mask & LX_STATX__RESERVED) != 0) {
+        return -EINVAL as i64;
+    }
+    var path = [0u8; 1024];
+    let p = borrow mut path as *mut [u8; 1024] as *mut u8 as *mut CChar;
+    var rc = strncpy_from_user(p, arg(a, 1), VFS_PATH_MAX);
+    if (rc < 0) {
+        return rc as i64;
+    }
+    var st = [0u64; 7];
+    let sp = borrow mut st as *mut [u64; 7] as *mut cosmo_stat;
+    if (path[0] == 0) {
+        if ((flags & LX_AT_EMPTY_PATH) == 0) {
+            return -ENOENT as i64;
+        }
+        if (arg32(a, 0) == LX_AT_FDCWD) {
+            // Empty path + AT_FDCWD: the current directory itself. Stat the vnode directly -- a "." lookup would
+            // demand search permission on the cwd, which an empty-path stat must not require.
+            let cwd = process_cwd_get();
+            // vnode_stat reads several fields; the lock the other stat paths hold keeps them one moment's values
+            let lock = borrow mut Ptr.toBorrowMut(cwd).lock as *mut mutex;
+            mutex_lock(lock);
+            vnode_stat(cwd, sp);
+            mutex_unlock(lock);
+            vnode_put(cwd);
+            rc = 0;
+        } else {
+            rc = syscall_handle_stat(arg32(a, 0), sp); // the fd itself
+        }
+    } else {
+        var start = 0 as *mut vnode;
+        rc = baseOf(truncate<i64>(arg(a, 0)), p as *CChar, HANDLE_RIGHT_READ, borrow mut start as *mut *mut vnode);
+        if (rc != 0) {
+            return rc as i64;
+        }
+        rc = if ((flags & LX_AT_SYMLINK_NOFOLLOW) != 0) vfs_lstat(start, p as *CChar, sp)
+            else vfs_stat(start, p as *CChar, sp);
+        vnode_put(start);
+    }
+    if (rc != 0) {
+        return rc as i64;
+    }
+    var sx = [0u64; 32]; // a struct lx_statx
+    lx_statx_from_native(sp as *cosmo_stat, mask, borrow mut sx as *mut [u64; 32] as *mut lx_statx);
+    return if (copy_to_user(ubuf, borrow sx as *[u64; 32] as *void, 256) != 0) -EFAULT as i64 else 0;
+}

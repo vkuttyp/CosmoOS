@@ -1,0 +1,262 @@
+// lxproc.cee - The Linux personality's calls that make processes and threads (docs/compat/linux/design.md), in
+// CeeSafe (roadmap 1.3 K1): fork, vfork, clone, execve, sched_setaffinity and sched_getaffinity. syscalls.c's table
+// names them (linux_internal.h).
+//
+// A struct arch_user_regs is a local of the larger architecture's size in words, sized by the C compiler; a struct
+// process_fork_args is a C local.
+
+@header(
+    "arch/user.h", "kernel/errno.h", "kernel/percpu.h", "kernel/process.h", "kernel/syscall.h", "kernel/uaccess.h",
+    "linux_abi.h", "linux_internal.h",
+)
+extern "C" {
+    struct syscall_args {
+        a: [u64; 6];
+        frame: *mut void;
+    }
+    struct process {
+        pid: u32;
+    }
+    struct thread {
+        user_tid: u32;
+        clear_child_tid: u64;
+    }
+    struct arch_user_regs;
+    struct exec_args;
+    struct process_fork_args {
+        regs: *arch_user_regs;
+        tls: usize;
+        set_child_tid: u64;   // nonzero: the child writes its tid here before its first instruction
+        clear_child_tid: u64; // nonzero: zeroed and futex-woken when the child's thread exits
+        flags: u32;
+    }
+
+    @cvalue(
+        "sizeof(struct arch_user_regs) <= 34 * sizeof(uint64_t) && _Alignof(struct arch_user_regs) <= sizeof(uint64_t)",
+    )
+    const REGS_FIT: bool = true;
+    @cvalue("sizeof(cpumask_t) == 8 && sizeof(pid_t) == 4")
+    const SIZES: bool = true;
+    const LX_CLONE_VM: u64 = 0x00000100;
+    const LX_CLONE_VFORK: u64 = 0x00004000;
+    const LX_CLONE_THREAD: u64 = 0x00010000;
+    const LX_CLONE_SETTLS: u64 = 0x00080000;
+    const LX_CLONE_PARENT_SETTID: u64 = 0x00100000;
+    const LX_CLONE_CHILD_CLEARTID: u64 = 0x00200000;
+    const LX_CLONE_CHILD_SETTID: u64 = 0x01000000;
+    const LX_CLONE_THREAD_REQUIRED: u64 = 0x00010900;
+    const LX_CLONE_THREAD_ALLOWED: u64 = 0x01FD0F00;
+    const LX_CLONE_FORK_ALLOWED: u64 = 0x01384100;
+    const LX_CLONE_EXIT_SIGCHLD: u32 = 17;
+    const PROCESS_FORK_SHARE_SPACE: u32 = 1;
+    const ESRCH: i32 = 3;
+    const ENOMEM: i32 = 12;
+    const EFAULT: i32 = 14;
+    const EINVAL: i32 = 22;
+    fn process_current() -> *mut process;
+    fn user_range_ok(addr: u64, len: usize) -> bool;
+    fn copy_to_user(userDst: u64, src: *void, len: usize) -> i32;
+    fn arch_get_tls_base() -> usize;
+    fn arch_user_regs_from_syscall(frame: *void, r: *mut arch_user_regs);
+    fn arch_user_regs_set_sp(r: *mut arch_user_regs, sp: usize);
+    fn arch_user_regs_set_result(r: *mut arch_user_regs, v: i64);
+    fn process_fork(a: *process_fork_args, out: *mut *mut process) -> i32;
+    fn process_vfork_wait(child: *mut process) -> i32;
+    fn process_put(p: *mut process);
+    fn process_lookup(pid: u32) -> *mut process;
+    fn process_find_thread(p: *mut process, userTid: u32) -> *mut thread;
+    fn process_add_thread(p: *mut process, regs: *arch_user_regs, tls: usize, out: *mut *mut thread) -> i32;
+    fn process_thread_start(t: *mut thread);
+    fn process_thread_abandon(t: *mut thread);
+    fn process_execve(ea: *mut exec_args, syscallFrame: *mut void) -> i32;
+    fn exec_args_alloc() -> *mut exec_args;
+    fn exec_args_copy(ea: *mut exec_args, upath: u64, uargv: u64, uenvp: u64) -> i32;
+    fn exec_args_free(ea: *mut exec_args);
+    fn cpu_online_mask() -> u64;
+}
+
+/// Safety: the dispatcher's: `a` is the call's arguments.
+unsafe fn arg(a: *mut syscall_args, i: usize) -> u64 => Ptr.toBorrow(a as *syscall_args).a[i];
+
+/// The caller at this instant as a child starts: the same registers, the result 0, and its own stack when `newsp`
+/// names one.
+///
+/// Safety: `a` is the call's arguments and `regs` a place for a struct arch_user_regs.
+unsafe fn childRegs(a: *mut syscall_args, regs: *mut arch_user_regs, newsp: u64) {
+    arch_user_regs_from_syscall(Ptr.toBorrow(a as *syscall_args).frame as *void, regs);
+    arch_user_regs_set_result(regs, 0);
+    if (newsp != 0) {
+        arch_user_regs_set_sp(regs, truncate<usize>(newsp));
+    }
+}
+
+/// fork, vfork, and clone without CLONE_THREAD (docs/compat/linux/design.md, "fork"): a new process through
+/// process_fork. CLONE_VM is accepted only with CLONE_VFORK -- the child borrows the space and the caller waits until
+/// it execs or exits; CLONE_VFORK alone is a fork whose caller waits the same way. The exit signal must be SIGCHLD.
+///
+/// Safety: the dispatcher's.
+unsafe fn forkCommon(
+    a: *mut syscall_args,
+    flags: u64,
+    exitSig: u32,
+    newsp: u64,
+    ptid: u64,
+    ctid: u64,
+    tls: u64,
+) -> i64 {
+    if ((flags & (LX_CLONE_FORK_ALLOWED ^ 0xFFFFFFFFFFFFFFFF)) != 0) {
+        return -EINVAL as i64;
+    }
+    if ((flags & LX_CLONE_VM) != 0 && (flags & LX_CLONE_VFORK) == 0) {
+        return -EINVAL as i64; // a second process on one space, running alongside: not built
+    }
+    if (exitSig != LX_CLONE_EXIT_SIGCHLD) {
+        return -EINVAL as i64;
+    }
+    if ((flags & LX_CLONE_PARENT_SETTID) != 0 && !user_range_ok(ptid, 4)) {
+        return -EFAULT as i64;
+    }
+    if ((flags & (LX_CLONE_CHILD_SETTID | LX_CLONE_CHILD_CLEARTID)) != 0 && !user_range_ok(ctid, 4)) {
+        return -EFAULT as i64;
+    }
+    var regs = [0u64; 34];
+    let rp = borrow mut regs as *mut [u64; 34] as *mut arch_user_regs;
+    childRegs(a, rp, newsp);
+    var fa: process_fork_args;
+    fa.regs = rp as *arch_user_regs;
+    fa.tls = if ((flags & LX_CLONE_SETTLS) != 0) truncate<usize>(tls) else arch_get_tls_base();
+    fa.set_child_tid = if ((flags & LX_CLONE_CHILD_SETTID) != 0) ctid else 0;
+    fa.clear_child_tid = if ((flags & LX_CLONE_CHILD_CLEARTID) != 0) ctid else 0;
+    fa.flags = if ((flags & LX_CLONE_VM) != 0) PROCESS_FORK_SHARE_SPACE else 0;
+    var child = 0 as *mut process;
+    let rc = process_fork(borrow fa as *process_fork_args, borrow mut child as *mut *mut process);
+    if (rc != 0) {
+        return rc as i64;
+    }
+    var pid: u32 = Ptr.toBorrow(child as *process).pid;
+    if ((flags & LX_CLONE_PARENT_SETTID) != 0) {
+        copy_to_user(ptid, borrow pid as *u32 as *void, 4); // Linux ignores a fault here too
+    }
+    if ((flags & LX_CLONE_VFORK) != 0) {
+        process_vfork_wait(child); // -EINTR: this caller is being killed and leaves at its return
+    }
+    process_put(child);
+    return pid as i64;
+}
+
+/// execve (docs/compat/linux/design.md, "execve"): the image replaced in place, through the same operation as the
+/// native SYS_exec.
+///
+/// Safety: the dispatcher's.
+@export("lx_execve")
+unsafe fn execve(a: *mut syscall_args) -> i64 {
+    let ea = exec_args_alloc();
+    if (ea.isNull()) {
+        return -ENOMEM as i64;
+    }
+    var rc = exec_args_copy(ea, arg(a, 0), arg(a, 1), arg(a, 2));
+    if (rc == 0) {
+        rc = process_execve(ea, Ptr.toBorrow(a as *syscall_args).frame);
+    }
+    exec_args_free(ea);
+    return rc as i64;
+}
+
+/// x86-64's table only: AArch64 has no fork.
+/// Safety: the dispatcher's.
+@export("lx_fork")
+unsafe fn fork(a: *mut syscall_args) -> i64 => forkCommon(a, 0, LX_CLONE_EXIT_SIGCHLD, 0, 0, 0, 0);
+
+/// x86-64's table only: AArch64 has no vfork.
+/// Safety: the dispatcher's.
+@export("lx_vfork")
+unsafe fn vfork(a: *mut syscall_args) -> i64 =>
+    forkCommon(a, LX_CLONE_VM | LX_CLONE_VFORK, LX_CLONE_EXIT_SIGCHLD, 0, 0, 0, 0);
+
+/// Safety: the dispatcher's.
+@export("lx_clone")
+unsafe fn clone(a: *mut syscall_args) -> i64 {
+    // The low byte is the exit signal; CLONE_THREAD ignores it.
+    let flags = arg(a, 0) & (0xFF ^ 0xFFFFFFFFFFFFFFFF);
+    let newsp = arg(a, 1);
+    let ptid = arg(a, 2);
+    // AArch64 swaps the last two.
+    var ctid = arg(a, 4);
+    var tls = arg(a, 3);
+    if (cfg("LX_ABI_IS_X86_64")) {
+        ctid = arg(a, 3);
+        tls = arg(a, 4);
+    }
+    if ((flags & LX_CLONE_THREAD) == 0) {
+        return forkCommon(a, flags, truncate<u32>(arg(a, 0) & 0xFF), newsp, ptid, ctid, tls);
+    }
+    // Linux: CLONE_THREAD needs CLONE_SIGHAND, which needs CLONE_VM.
+    if ((flags & LX_CLONE_THREAD_REQUIRED) != LX_CLONE_THREAD_REQUIRED ||
+        (flags & (LX_CLONE_THREAD_ALLOWED ^ 0xFFFFFFFFFFFFFFFF)) != 0) {
+        return -EINVAL as i64;
+    }
+    if ((flags & LX_CLONE_PARENT_SETTID) != 0 && !user_range_ok(ptid, 4)) {
+        return -EFAULT as i64;
+    }
+    if ((flags & (LX_CLONE_CHILD_SETTID | LX_CLONE_CHILD_CLEARTID)) != 0 && !user_range_ok(ctid, 4)) {
+        return -EFAULT as i64;
+    }
+    // The child is the caller at this instant: the same registers, the result 0, its own stack and thread pointer.
+    var regs = [0u64; 34];
+    let rp = borrow mut regs as *mut [u64; 34] as *mut arch_user_regs;
+    childRegs(a, rp, newsp);
+    let tlsBase = if ((flags & LX_CLONE_SETTLS) != 0) truncate<usize>(tls) else arch_get_tls_base();
+    var t = 0 as *mut thread;
+    let rc = process_add_thread(process_current(), rp as *arch_user_regs, tlsBase, borrow mut t as *mut *mut thread);
+    if (rc != 0) {
+        return rc as i64;
+    }
+    var tid: u32 = Ptr.toBorrow(t as *thread).user_tid;
+    if ((flags & LX_CLONE_CHILD_CLEARTID) != 0) {
+        let tm = Ptr.toBorrowMut(t);
+        tm.clear_child_tid = ctid;
+    }
+    // The tid words are written before the child can run: a joiner that reads the word right after clone returns
+    // sees the tid or 0, never the stale value racing the child's exit.
+    if (((flags & LX_CLONE_PARENT_SETTID) != 0 && copy_to_user(ptid, borrow tid as *u32 as *void, 4) != 0) ||
+        ((flags & LX_CLONE_CHILD_SETTID) != 0 && copy_to_user(ctid, borrow tid as *u32 as *void, 4) != 0)) {
+        process_thread_abandon(t);
+        return -EFAULT as i64;
+    }
+    process_thread_start(t);
+    return tid as i64;
+}
+
+/// Accepted and ignored: threads run on any CPU (docs/compat/linux/design.md).
+///
+/// Safety: the dispatcher's.
+@export("lx_sched_setaffinity")
+unsafe fn schedSetaffinity(a: *mut syscall_args) -> i64 {
+    if (arg(a, 1) < 8 || !user_range_ok(arg(a, 2), 8)) {
+        return -EINVAL as i64;
+    }
+    return 0;
+}
+
+/// Safety: the dispatcher's.
+@export("lx_sched_getaffinity")
+unsafe fn schedGetaffinity(a: *mut syscall_args) -> i64 {
+    let pid = truncate<u32>(arg(a, 0));
+    let len = arg(a, 1);
+    let cur = process_current();
+    if (pid != 0 && pid != Ptr.toBorrow(cur as *process).pid && process_find_thread(cur, pid).isNull()) {
+        let other = process_lookup(pid);
+        if (other.isNull()) {
+            return -ESRCH as i64;
+        }
+        process_put(other); // every process may run on every CPU: one answer
+    }
+    if (len < 8) {
+        return -EINVAL as i64;
+    }
+    var mask: u64 = cpu_online_mask();
+    if (copy_to_user(arg(a, 2), borrow mask as *u64 as *void, 8) != 0) {
+        return -EFAULT as i64;
+    }
+    return 8;
+}

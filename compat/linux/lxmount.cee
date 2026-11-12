@@ -1,0 +1,260 @@
+// lxmount.cee - The Linux personality's mount, umount2, statfs and fstatfs (docs/compat/linux/design.md, "Mounting"),
+// in CeeSafe (roadmap 1.3 K1). syscalls.c's table names them (linux_internal.h).
+//
+// A struct lx_statfs is fifteen words; the C compiler checks the layout (the extern block). A struct vfs_statfs is a C
+// local.
+
+@header(
+    "kernel/blk.h", "kernel/cred.h", "kernel/errno.h", "kernel/handle.h", "kernel/object.h", "kernel/process.h",
+    "kernel/string.h", "kernel/syscall.h", "kernel/uaccess.h", "kernel/vfs.h", "linux_abi.h", "linux_internal.h",
+)
+extern "C" {
+    struct syscall_args {
+        a: [u64; 6];
+    }
+    struct credentials;
+    struct blkdev;
+    struct kobject;
+    struct handle_table;
+    struct process {
+        handles: handle_table;
+    }
+    struct mount {
+        id: u64;
+    }
+    struct vnode {
+        mnt: *mut mount;
+    }
+    struct file {
+        vn: *mut vnode;
+    }
+    struct vfs_statfs {
+        magic: u32;
+        bsize: u32;
+        blocks: u64;
+        bfree: u64;
+        bavail: u64;
+        files: u64;
+        ffree: u64;
+        namelen: u32;
+        flags: u32;
+    }
+
+    @cvalue(
+        "sizeof(struct lx_statfs) == 120 && offsetof(struct lx_statfs, f_type) == 0 && offsetof(struct lx_statfs, f_bsize) == 8 && offsetof(struct lx_statfs, f_blocks) == 16 && offsetof(struct lx_statfs, f_bfree) == 24 && offsetof(struct lx_statfs, f_bavail) == 32 && offsetof(struct lx_statfs, f_files) == 40 && offsetof(struct lx_statfs, f_ffree) == 48 && offsetof(struct lx_statfs, f_fsid) == 56 && sizeof(((struct lx_statfs *)0)->f_fsid) == 8 && offsetof(struct lx_statfs, f_namelen) == 64 && offsetof(struct lx_statfs, f_frsize) == 72 && offsetof(struct lx_statfs, f_flags) == 80",
+    )
+    const STATFS_LAYOUT: bool = true;
+    @cvalue("sizeof(unsigned long) == 8 && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__ && VFS_PATH_MAX == 1024")
+    const WORDS: bool = true;
+    const VFS_PATH_MAX: usize = 1024;
+    const LX_ST_RDONLY: u32 = 1;
+    const MOUNT_RDONLY: u32 = 1;
+    const VFS_UMOUNT_FORCE: u32 = 1;
+    const PRIV_MOUNT: u32 = 1;
+    const EPERM: i32 = 1;
+    const ENOENT: i32 = 2;
+    const EBADF: i32 = 9;
+    const EFAULT: i32 = 14;
+    const EINVAL: i32 = 22;
+
+    fn cred_current() -> *credentials;
+    fn cred_has(c: *credentials, privilege: u32) -> bool;
+    fn process_current() -> *mut process;
+    fn process_cwd_get() -> *mut vnode;
+    fn strcmp(a: *CChar, b: *CChar) -> i32;
+    fn strncmp(a: *CChar, b: *CChar, n: usize) -> i32;
+    fn strchr(s: *CChar, c: i32) -> *mut CChar;
+    fn strncpy_from_user(dst: *mut CChar, userSrc: u64, max: usize) -> i32;
+    fn copy_from_user(dst: *mut void, userSrc: u64, len: usize) -> i32;
+    fn copy_to_user(userDst: u64, src: *void, len: usize) -> i32;
+    fn blk_find(name: *CChar) -> *mut blkdev;
+    fn blkdev_put(bd: *mut blkdev);
+    fn syscall_mount(device: *CChar, target: *CChar, fstype: *CChar, flags: u32) -> i32;
+    fn syscall_umount(target: *CChar, flags: u32) -> i32;
+    fn handle_lookup(t: *mut handle_table, h: i32, rightsNeeded: u32) -> *mut kobject;
+    fn kobject_put(obj: *mut kobject);
+    fn file_from_kobject(obj: *mut kobject) -> *mut file;
+    fn vfs_lookup(start: *mut vnode, path: *CChar, out: *mut *mut vnode) -> i32;
+    fn vnode_put(vn: *mut vnode);
+    fn vnode_statfs(vn: *mut vnode, out: *mut vfs_statfs) -> i32;
+}
+
+// Linux's mount flags: MS_RDONLY is the one a mount takes; MS_SILENT (BusyBox sets it always) and the old MS_MGC_VAL
+// marker in the top half change nothing. MNT_FORCE is umount2's.
+const LX_MS_RDONLY: u64 = 1;
+const LX_MS_SILENT: u64 = 32768;
+const LX_MS_MGC_VAL: u64 = 0xC0ED0000;
+const LX_MS_MGC_MSK: u64 = 0xFFFF0000;
+const LX_MNT_FORCE: u32 = 1;
+const SLASH: i32 = 47;
+
+/// Safety: the dispatcher's: `a` is the call's arguments.
+unsafe fn arg(a: *mut syscall_args, i: usize) -> u64 => Ptr.toBorrow(a as *syscall_args).a[i];
+
+/// A path from user memory into `buf`; an empty one is -ENOENT.
+/// Safety: `buf` holds VFS_PATH_MAX bytes.
+unsafe fn getPath(uptr: u64, buf: *mut u8) -> i32 {
+    let rc = strncpy_from_user(buf as *mut CChar, uptr, VFS_PATH_MAX);
+    if (rc < 0) {
+        return rc;
+    }
+    return if (buf.read() == 0) -ENOENT else 0;
+}
+
+/// mount(2) (shell completeness S6): the native mount's operation, with its flags and under PRIV_MOUNT as the native
+/// calls are (syscall_mount).
+///
+/// The source is a path: "/dev/NAME" names the block device NAME, as /proc/mounts prints it; anything without a slash
+/// is the label a filesystem with no device ignores ("none", "proc", or none at all); any other path is -ENOENT, since
+/// /dev holds no block device nodes. "proc" is Linux's name for procfs. Every flag but MS_RDONLY, MS_SILENT and the
+/// old marker -- a remount, a bind, nosuid -- is -EINVAL, as an unknown native bit is. No filesystem here takes
+/// options, so a non-empty data string is -EINVAL too.
+///
+/// Safety: the dispatcher's.
+@export("lx_mount")
+unsafe fn mountCall(a: *mut syscall_args) -> i64 {
+    if (!cred_has(cred_current(), PRIV_MOUNT)) {
+        return -EPERM as i64;
+    }
+    var flags = arg(a, 3);
+    if ((flags & LX_MS_MGC_MSK) == LX_MS_MGC_VAL) {
+        flags &= LX_MS_MGC_MSK ^ 0xFFFFFFFFFFFFFFFF;
+    }
+    if ((flags & ((LX_MS_RDONLY | LX_MS_SILENT) ^ 0xFFFFFFFFFFFFFFFF)) != 0) {
+        return -EINVAL as i64;
+    }
+    // A source longer than any device path or label here is refused rather than given a second VFS_PATH_MAX on this
+    // stack.
+    var source = [0u8; 64];
+    var target = [0u8; 1024];
+    var fstype = [0u8; 16];
+    let src = borrow mut source as *mut [u8; 64] as *mut u8;
+    let tgt = borrow mut target as *mut [u8; 1024] as *mut u8;
+    let fst = borrow mut fstype as *mut [u8; 16] as *mut u8;
+    var rc = if (arg(a, 0) != 0) strncpy_from_user(src as *mut CChar, arg(a, 0), 64) else 0;
+    if (rc < 0) {
+        return rc as i64;
+    }
+    rc = getPath(arg(a, 1), tgt);
+    if (rc != 0) {
+        return rc as i64;
+    }
+    rc = strncpy_from_user(fst as *mut CChar, arg(a, 2), 16);
+    if (rc < 0) {
+        return rc as i64;
+    }
+    if (arg(a, 4) != 0) {
+        var first = [0u8; 1]; // only whether the string is empty
+        if (copy_from_user(borrow mut first as *mut [u8; 1] as *mut void, arg(a, 4), 1) != 0) {
+            return -EFAULT as i64;
+        }
+        if (first[0] != 0) {
+            return -EINVAL as i64;
+        }
+    }
+    var device = 0 as *CChar;
+    let name = src.add(5) as *CChar;
+    if (strncmp(src as *CChar, "/dev/\0".ptr as *CChar, 5) == 0 && source[5] != 0 && strchr(name, SLASH).isNull()) {
+        device = name;
+        let bd = blk_find(device);
+        if (bd.isNull()) {
+            return -ENOENT as i64; // no such path, as Linux says; -ENODEV is for an unknown type
+        }
+        blkdev_put(bd);
+    } else if (!strchr(src as *CChar, SLASH).isNull()) {
+        return -ENOENT as i64;
+    }
+    let kind = if (strcmp(fst as *CChar, "proc\0".ptr as *CChar) == 0) "procfs\0".ptr as *CChar else fst as *CChar;
+    return syscall_mount(device, tgt as *CChar, kind, if ((flags & LX_MS_RDONLY) != 0) MOUNT_RDONLY else 0) as i64;
+}
+
+/// umount2(2): MNT_FORCE is the native force; MNT_DETACH, MNT_EXPIRE and UMOUNT_NOFOLLOW are -EINVAL.
+///
+/// Safety: the dispatcher's.
+@export("lx_umount2")
+unsafe fn umount2(a: *mut syscall_args) -> i64 {
+    if (!cred_has(cred_current(), PRIV_MOUNT)) {
+        return -EPERM as i64;
+    }
+    let flags = truncate<u32>(arg(a, 1));
+    if ((flags & (LX_MNT_FORCE ^ 0xFFFFFFFF)) != 0) {
+        return -EINVAL as i64;
+    }
+    var target = [0u8; 1024];
+    let tgt = borrow mut target as *mut [u8; 1024] as *mut u8;
+    let rc = getPath(arg(a, 0), tgt);
+    if (rc != 0) {
+        return rc as i64;
+    }
+    return syscall_umount(tgt as *CChar, if ((flags & LX_MNT_FORCE) != 0) VFS_UMOUNT_FORCE else 0) as i64;
+}
+
+/// statfs(2) and fstatfs(2) over vnode_statfs (df). The fsid is the mount's id, which names one mount for as long as
+/// it is mounted: its low half is f_fsid[0] and its high half f_fsid[1], which is the id as one word.
+///
+/// Safety: `vn` is a referenced vnode.
+unsafe fn putStatfs(ubuf: u64, vn: *mut vnode) -> i32 {
+    var sf: vfs_statfs;
+    let rc = vnode_statfs(vn, borrow mut sf as *mut vfs_statfs);
+    if (rc != 0) {
+        return rc;
+    }
+    // A struct lx_statfs's words: f_type, f_bsize, f_blocks, f_bfree, f_bavail, f_files, f_ffree, f_fsid, f_namelen,
+    // f_frsize, f_flags and four spare.
+    var st = [0u64; 15];
+    st[0] = sf.magic as u64;
+    st[1] = sf.bsize as u64;
+    st[2] = sf.blocks;
+    st[3] = sf.bfree;
+    st[4] = sf.bavail;
+    st[5] = sf.files;
+    st[6] = sf.ffree;
+    st[7] = Ptr.toBorrow(Ptr.toBorrow(vn as *vnode).mnt as *mount).id;
+    st[8] = sf.namelen as u64;
+    st[9] = sf.bsize as u64;
+    st[10] = if ((sf.flags & MOUNT_RDONLY) != 0) LX_ST_RDONLY as u64 else 0;
+    return if (copy_to_user(ubuf, borrow st as *[u64; 15] as *void, 120) != 0) -EFAULT else 0;
+}
+
+/// Safety: the dispatcher's.
+@export("lx_statfs")
+unsafe fn statfs(a: *mut syscall_args) -> i64 {
+    var path = [0u8; 1024];
+    let p = borrow mut path as *mut [u8; 1024] as *mut u8;
+    var rc = getPath(arg(a, 0), p);
+    if (rc != 0) {
+        return rc as i64;
+    }
+    // From the working directory, as an *at call given AT_FDCWD resolves (syscalls.c's at_base).
+    let start = process_cwd_get();
+    var vn = 0 as *mut vnode;
+    rc = vfs_lookup(start, p as *CChar, borrow mut vn as *mut *mut vnode);
+    vnode_put(start);
+    if (rc != 0) {
+        return rc as i64;
+    }
+    rc = putStatfs(arg(a, 1), vn);
+    vnode_put(vn);
+    return rc as i64;
+}
+
+/// Safety: the dispatcher's.
+@export("lx_fstatfs")
+unsafe fn fstatfs(a: *mut syscall_args) -> i64 {
+    let proc = Ptr.toBorrowMut(process_current());
+    let obj = handle_lookup(borrow mut proc.handles as *mut handle_table, truncate<i32>(arg(a, 0)), 0);
+    if (obj.isNull()) {
+        return -EBADF as i64;
+    }
+    let f = file_from_kobject(obj);
+    // A pipe, socket or other object is on no filesystem here (Linux answers with pipefs's or sockfs's figures).
+    var rc = -EINVAL;
+    if (!f.isNull()) {
+        let vn = Ptr.toBorrow(f as *file).vn;
+        if (!vn.isNull()) {
+            rc = putStatfs(arg(a, 1), vn);
+        }
+    }
+    kobject_put(obj);
+    return rc as i64;
+}

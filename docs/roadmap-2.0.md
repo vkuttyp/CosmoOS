@@ -1741,9 +1741,11 @@ Size: about 4.5x.
 tables, argument decoding (SA5 did the parsers), the Linux signal frames
 and the personality's state.
 
-- [ ] **Acceptance:** `test-busybox`, the dynamic and PIE tests, and the
+- [x] **Acceptance:** `test-busybox`, the dynamic and PIE tests, and the
   Linux self-tests pass on both architectures with no C left in
-  `compat/` or `kernel/syscall/`.
+  `compat/` or `kernel/syscall/`. Ticked 2026-11-12 by roadmap 1.3's K1
+  with one exception: `compat/linux/syscalls.c` (311 lines), the Linux
+  call table and the record that holds it.
 
 Progress (2026-11-10, the smallest files first). `kernel/syscall/`:
 `personality.cee`, `uaccess.cee` (`might_sleep` with the caller's
@@ -1764,8 +1766,8 @@ ioctls `test-net-login`, the self-tests `test-guard`. `signal.c` then
 followed into `sigcalls.cee`: the signal calls, then both
 architectures' handler frames, `rt_sigreturn` and the trampoline page,
 each architecture's code in `cfg` blocks behind one export (both boot
-tests and `test-busybox` on both). Left: `native.c` and `syscalls.c` in
-sections.
+tests and `test-busybox` on both). `native.c` and `syscalls.c` followed
+under roadmap 1.3's K1 (2026-11-11 and 2026-11-12).
 
 Size: about 1.5x.
 

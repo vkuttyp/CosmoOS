@@ -1,0 +1,181 @@
+// lxsys.cee - The Linux personality's calls about the system (docs/compat/linux/design.md), in CeeSafe (roadmap 1.3
+// K1): sysinfo, uname, sethostname and getrandom. syscalls.c's table names them (linux_internal.h).
+//
+// A struct lx_sysinfo is fourteen words and a struct lx_utsname six names of 65 bytes; the C compiler checks both
+// (the extern block). A struct pmm_stats is a C local.
+
+@header(
+    "kernel/cred.h", "kernel/errno.h", "kernel/pmm.h", "kernel/printf.h", "kernel/process.h", "kernel/random.h",
+    "kernel/sched.h", "kernel/string.h", "kernel/syscall.h", "kernel/timer.h", "kernel/uaccess.h", "kernel/utsns.h",
+    "kernel/version.h", "linux_abi.h", "linux_internal.h", "uapi/cosmo/syscall.h",
+)
+extern "C" {
+    struct syscall_args {
+        a: [u64; 6];
+    }
+    struct credentials;
+    struct uts_ns;
+    struct pmm_stats {
+        total_pages: u64;
+        free_pages: u64;
+    }
+
+    @cvalue(
+        "sizeof(struct lx_sysinfo) == 112 && offsetof(struct lx_sysinfo, uptime) == 0 && offsetof(struct lx_sysinfo, loads) == 8 && offsetof(struct lx_sysinfo, totalram) == 32 && offsetof(struct lx_sysinfo, freeram) == 40 && offsetof(struct lx_sysinfo, procs) == 80 && offsetof(struct lx_sysinfo, mem_unit) == 104",
+    )
+    const SYSINFO_LAYOUT: bool = true;
+    @cvalue(
+        "sizeof(struct lx_utsname) == 390 && offsetof(struct lx_utsname, nodename) == 65 && offsetof(struct lx_utsname, release) == 130 && offsetof(struct lx_utsname, version) == 195 && offsetof(struct lx_utsname, machine) == 260 && offsetof(struct lx_utsname, domainname) == 325",
+    )
+    const UTSNAME_LAYOUT: bool = true;
+    @cvalue("sizeof(unsigned long) == 8 && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__")
+    const WORDS: bool = true;
+    const LX_GRND_NONBLOCK: u32 = 1;
+    const LX_GRND_RANDOM: u32 = 2;
+    const LX_GRND_INSECURE: u32 = 4;
+    const RANDOM_WAIT_FOREVER: u64 = 0xFFFFFFFFFFFFFFFF;
+    const COSMO_HOST_NAME_MAX: usize = 64;
+    const PAGE_SIZE: u64 = 4096;
+    const PRIV_SYS_ADMIN: u32 = 2;
+    const EPERM: i32 = 1;
+    const EAGAIN: i32 = 11;
+    const EFAULT: i32 = 14;
+    const EINVAL: i32 = 22;
+    const KERNEL_LINUX_RELEASE: *CChar;
+    const KERNEL_NAME: *CChar;
+    const KERNEL_VERSION: *CChar;
+    const COSMO_BUILD_ID: *CChar;
+    const LX_MACHINE: *CChar;
+    fn cred_current() -> *credentials;
+    fn cred_has(c: *credentials, priv: u32) -> bool;
+    fn user_range_ok(addr: u64, len: usize) -> bool;
+    fn copy_to_user(userDst: u64, src: *void, len: usize) -> i32;
+    fn copy_from_user(dst: *mut void, userSrc: u64, len: usize) -> i32;
+    fn clock_now_ns() -> u64;
+    fn pmm_get_stats(out: *mut pmm_stats);
+    fn sched_loadavg(out: *mut u64, shift: u32);
+    fn process_count() -> u32;
+    fn random_ready() -> bool;
+    fn random_wait_ready(timeoutNs: u64) -> i32;
+    fn random_get_bytes(buf: *mut void, len: usize);
+    fn utsns_current() -> *mut uts_ns;
+    fn utsns_gethostname(ns: *mut uts_ns, out: *mut CChar, n: usize) -> usize;
+    fn utsns_sethostname(ns: *mut uts_ns, name: *CChar, len: usize) -> i32;
+    fn strlcpy(dst: *mut CChar, src: *CChar, size: usize) -> usize;
+    fn ksnprintf(buf: *mut CChar, size: usize, fmt: *CChar, ...) -> i32;
+}
+
+/// Safety: the dispatcher's: `a` is the call's arguments.
+unsafe fn arg(a: *mut syscall_args, i: usize) -> u64 => Ptr.toBorrow(a as *syscall_args).a[i];
+
+/// sysinfo(2): uptime and a coarse memory/process snapshot, marshalled from the stats the kernel already keeps. See
+/// docs/audit/next-subsystem-sysinfo.md.
+///
+/// Safety: the dispatcher's.
+@export("lx_sysinfo")
+unsafe fn sysinfo(a: *mut syscall_args) -> i64 {
+    var st: pmm_stats;
+    pmm_get_stats(borrow mut st as *mut pmm_stats);
+    var loads = [0u64; 3];
+    sched_loadavg(borrow mut loads as *mut [u64; 3] as *mut u64, 16); // Linux's SI_LOAD_SHIFT
+    // A struct lx_sysinfo's words: uptime, loads[3], totalram, freeram, then sharedram, bufferram, totalswap and
+    // freeswap (none here), procs with its pad in the low half of word 10, totalhigh and freehigh (none), and
+    // mem_unit in the low half of the last.
+    var si = [0u64; 14];
+    si[0] = clock_now_ns() / 1000000000;
+    si[1] = loads[0];
+    si[2] = loads[1];
+    si[3] = loads[2];
+    si[4] = st.total_pages * PAGE_SIZE;
+    si[5] = st.free_pages * PAGE_SIZE;
+    si[10] = (process_count() & 0xFFFF) as u64;
+    si[13] = 1; // report bytes
+    return if (copy_to_user(arg(a, 0), borrow si as *[u64; 14] as *void, 112) != 0) -EFAULT as i64 else 0;
+}
+
+/// Linux's semantics (docs/kernel/security/design.md §6): block until the pool is seeded, unless GRND_NONBLOCK
+/// (-EAGAIN) or GRND_INSECURE (never waits). GRND_RANDOM is the default. The wait comes before the length is looked
+/// at, as in Linux.
+///
+/// Safety: the dispatcher's.
+@export("lx_getrandom")
+unsafe fn getrandom(a: *mut syscall_args) -> i64 {
+    let flags = truncate<u32>(arg(a, 2));
+    let known = LX_GRND_NONBLOCK | LX_GRND_RANDOM | LX_GRND_INSECURE;
+    let both = LX_GRND_INSECURE | LX_GRND_RANDOM;
+    if ((flags & (known ^ 0xFFFFFFFF)) != 0 || (flags & both) == both) {
+        return -EINVAL as i64;
+    }
+    if ((flags & LX_GRND_INSECURE) == 0 && !random_ready()) {
+        if ((flags & LX_GRND_NONBLOCK) != 0) {
+            return -EAGAIN as i64;
+        }
+        let rc = random_wait_ready(RANDOM_WAIT_FOREVER);
+        if (rc != 0) {
+            return rc as i64;
+        }
+    }
+    var len = arg(a, 1);
+    if (len > 256 * 1024) {
+        len = 256 * 1024;
+    }
+    if (!user_range_ok(arg(a, 0), truncate<usize>(len))) {
+        return -EFAULT as i64;
+    }
+    var tmp = [0u8; 256];
+    var done: u64 = 0;
+    while (done < len) {
+        let n = if (len - done < 256) len - done else 256;
+        random_get_bytes(borrow mut tmp as *mut [u8; 256] as *mut void, truncate<usize>(n));
+        if (copy_to_user(arg(a, 0).wrappingAdd(done), borrow tmp as *[u8; 256] as *void, truncate<usize>(n)) != 0) {
+            return -EFAULT as i64;
+        }
+        done += n;
+    }
+    return truncate<i64>(len);
+}
+
+/// Safety: the dispatcher's.
+@export("lx_uname")
+unsafe fn uname(a: *mut syscall_args) -> i64 {
+    var u = [0u8; 390]; // a struct lx_utsname: six names of 65 bytes
+    let names = borrow mut u as *mut [u8; 390] as *mut u8;
+    strlcpy(names as *mut CChar, "Linux\0".ptr as *CChar, 65);
+    // From the caller's uts namespace: a contained process asking the machine its name must be told its container's
+    // (docs/kernel/security/design.md §1e).
+    utsns_gethostname(utsns_current(), names.add(65) as *mut CChar, 65);
+    strlcpy(names.add(130) as *mut CChar, KERNEL_LINUX_RELEASE, 65);
+    ksnprintf(
+        names.add(195) as *mut CChar,
+        65,
+        "%s %s %s\0".ptr as *CChar,
+        KERNEL_NAME,
+        KERNEL_VERSION,
+        COSMO_BUILD_ID,
+    );
+    strlcpy(names.add(260) as *mut CChar, LX_MACHINE, 65);
+    strlcpy(names.add(325) as *mut CChar, "(none)\0".ptr as *CChar, 65);
+    return if (copy_to_user(arg(a, 0), borrow u as *[u8; 390] as *void, 390) != 0) -EFAULT as i64 else 0;
+}
+
+/// sethostname (shell completeness S1): the caller's uts namespace's name, as the native call sets it and under its
+/// rule (PRIV_SYS_ADMIN: a name is not a secret, but who can rename the machine can make another's logs say what it
+/// likes). Linux has no gethostname call on these architectures: musl reads the name from uname's nodename. Linux
+/// takes a name of up to 64 bytes (__NEW_UTS_LEN); this kernel keeps 63 and a NUL.
+///
+/// Safety: the dispatcher's.
+@export("lx_sethostname")
+unsafe fn sethostname(a: *mut syscall_args) -> i64 {
+    if (!cred_has(cred_current(), PRIV_SYS_ADMIN)) {
+        return -EPERM as i64;
+    }
+    let len = arg(a, 1);
+    if (len >= COSMO_HOST_NAME_MAX as u64) {
+        return -EINVAL as i64;
+    }
+    var buf = [0u8; 64];
+    if (copy_from_user(borrow mut buf as *mut [u8; 64] as *mut void, arg(a, 0), truncate<usize>(len)) != 0) {
+        return -EFAULT as i64;
+    }
+    return utsns_sethostname(utsns_current(), borrow buf as *[u8; 64] as *u8 as *CChar, truncate<usize>(len)) as i64;
+}

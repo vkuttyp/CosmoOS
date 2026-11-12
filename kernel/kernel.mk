@@ -102,6 +102,22 @@ KERNEL_GENERIC_SRCS := \
 	compat/linux/netioctl.c \
 	compat/linux/sigcalls.c \
 	compat/linux/lxsock.c \
+	compat/linux/lxident.c \
+	compat/linux/lxtime.c \
+	compat/linux/lxproc.c \
+	compat/linux/lxsys.c \
+	compat/linux/lxpoll.c \
+	compat/linux/lxmount.c \
+	compat/linux/lxbase.c \
+	compat/linux/lxmem.c \
+	compat/linux/lxattr.c \
+	compat/linux/lxname.c \
+	compat/linux/lxtty.c \
+	compat/linux/lxio.c \
+	compat/linux/lxstat.c \
+	compat/linux/lxfd.c \
+	compat/linux/lxdir.c \
+	compat/linux/lxhooks.c \
 	kernel-services/virtualization/vmm.c \
 	kernel-services/virtualization/vm.c \
 	kernel-services/virtualization/guestmem.c \
@@ -359,13 +375,29 @@ $(OUT)/kernel/kernel.ship.elf: $(KERNEL_ELF)
 
 -include $(KERNEL_OBJS:.o=.d)
 
-# compat/linux/lxconv.c, netioctl.c, sigcalls.c and lxsock.c are generated from their .cee into out/cee (scripts/cee-gen.py), away from the
+# compat/linux/lxconv.c, netioctl.c, sigcalls.c, lxsock.c, lxident.c, lxtime.c, lxproc.c, lxsys.c, lxpoll.c, lxmount.c, lxbase.c, lxmem.c, lxattr.c, lxname.c, lxtty.c, lxio.c, lxstat.c, lxfd.c, lxdir.c and lxhooks.c are generated from their .cee into out/cee (scripts/cee-gen.py), away from the
 # headers they include by name (convert.h, linux_abi.h, linux_internal.h): their objects and analyses look in
 # compat/linux too.
 $(OUT)/compat/linux/lxconv.o $(OUT)/compat/linux/lxconv.analyzed: EXTRA_CFLAGS += -I$(ROOT)/compat/linux
 $(OUT)/compat/linux/netioctl.o $(OUT)/compat/linux/netioctl.analyzed: EXTRA_CFLAGS += -I$(ROOT)/compat/linux
 $(OUT)/compat/linux/sigcalls.o $(OUT)/compat/linux/sigcalls.analyzed: EXTRA_CFLAGS += -I$(ROOT)/compat/linux
 $(OUT)/compat/linux/lxsock.o $(OUT)/compat/linux/lxsock.analyzed: EXTRA_CFLAGS += -I$(ROOT)/compat/linux
+$(OUT)/compat/linux/lxident.o $(OUT)/compat/linux/lxident.analyzed: EXTRA_CFLAGS += -I$(ROOT)/compat/linux
+$(OUT)/compat/linux/lxtime.o $(OUT)/compat/linux/lxtime.analyzed: EXTRA_CFLAGS += -I$(ROOT)/compat/linux
+$(OUT)/compat/linux/lxproc.o $(OUT)/compat/linux/lxproc.analyzed: EXTRA_CFLAGS += -I$(ROOT)/compat/linux
+$(OUT)/compat/linux/lxsys.o $(OUT)/compat/linux/lxsys.analyzed: EXTRA_CFLAGS += -I$(ROOT)/compat/linux
+$(OUT)/compat/linux/lxpoll.o $(OUT)/compat/linux/lxpoll.analyzed: EXTRA_CFLAGS += -I$(ROOT)/compat/linux
+$(OUT)/compat/linux/lxmount.o $(OUT)/compat/linux/lxmount.analyzed: EXTRA_CFLAGS += -I$(ROOT)/compat/linux
+$(OUT)/compat/linux/lxbase.o $(OUT)/compat/linux/lxbase.analyzed: EXTRA_CFLAGS += -I$(ROOT)/compat/linux
+$(OUT)/compat/linux/lxmem.o $(OUT)/compat/linux/lxmem.analyzed: EXTRA_CFLAGS += -I$(ROOT)/compat/linux
+$(OUT)/compat/linux/lxattr.o $(OUT)/compat/linux/lxattr.analyzed: EXTRA_CFLAGS += -I$(ROOT)/compat/linux
+$(OUT)/compat/linux/lxname.o $(OUT)/compat/linux/lxname.analyzed: EXTRA_CFLAGS += -I$(ROOT)/compat/linux
+$(OUT)/compat/linux/lxtty.o $(OUT)/compat/linux/lxtty.analyzed: EXTRA_CFLAGS += -I$(ROOT)/compat/linux
+$(OUT)/compat/linux/lxio.o $(OUT)/compat/linux/lxio.analyzed: EXTRA_CFLAGS += -I$(ROOT)/compat/linux
+$(OUT)/compat/linux/lxstat.o $(OUT)/compat/linux/lxstat.analyzed: EXTRA_CFLAGS += -I$(ROOT)/compat/linux
+$(OUT)/compat/linux/lxfd.o $(OUT)/compat/linux/lxfd.analyzed: EXTRA_CFLAGS += -I$(ROOT)/compat/linux
+$(OUT)/compat/linux/lxdir.o $(OUT)/compat/linux/lxdir.analyzed: EXTRA_CFLAGS += -I$(ROOT)/compat/linux
+$(OUT)/compat/linux/lxhooks.o $(OUT)/compat/linux/lxhooks.analyzed: EXTRA_CFLAGS += -I$(ROOT)/compat/linux
 
 # drivers/acpi/acpi_parse.c likewise, from acpi_parse.cee, away from the acpi_internal.h it includes.
 $(OUT)/drivers/acpi/acpi_parse.o $(OUT)/drivers/acpi/acpi_parse.analyzed: EXTRA_CFLAGS += -I$(ROOT)/drivers/acpi

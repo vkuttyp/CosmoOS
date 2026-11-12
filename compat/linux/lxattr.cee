@@ -1,0 +1,320 @@
+// lxattr.cee - The Linux personality's calls on a file's mode, owner and times, and chroot (docs/compat/linux/
+// design.md; roadmap M3 and shell completeness S4), in CeeSafe (roadmap 1.3 K1): chmod, fchmodat, fchmodat2, fchmod,
+// chown, lchown, fchownat, fchown, chroot and utimensat. syscalls.c's table names them (linux_internal.h).
+//
+// A struct lx_timespec is two words; the C compiler checks it (the extern block).
+
+@header(
+    "kernel/errno.h", "kernel/handle.h", "kernel/process.h", "kernel/string.h", "kernel/syscall.h", "kernel/uaccess.h",
+    "kernel/vfs.h", "linux_abi.h", "linux_internal.h",
+)
+extern "C" {
+    struct syscall_args {
+        a: [u64; 6];
+    }
+    struct vnode {
+        @cname("type")
+        kind: u32;
+    }
+    struct file {
+        vn: *mut vnode;
+    }
+
+    @cvalue(
+        "sizeof(struct lx_timespec) == 16 && offsetof(struct lx_timespec, tv_sec) == 0 && offsetof(struct lx_timespec, tv_nsec) == 8 && VFS_PATH_MAX == 1024 && sizeof(enum vnode_type) == sizeof(uint32_t)",
+    )
+    const SIZES: bool = true;
+    const VNODE_LNK: u32 = 6;
+    const VFS_SET_MODE: u32 = 1;
+    const VFS_SET_MTIME: u32 = 2;
+    const VFS_SET_MTIME_NOW: u32 = 4;
+    const VFS_ID_KEEP: u32 = 0xFFFFFFFF;
+    const HANDLE_RIGHT_WRITE: u32 = 2;
+    const LX_AT_FDCWD: i32 = -100;
+    const LX_AT_EMPTY_PATH: u32 = 0x1000;
+    const LX_AT_SYMLINK_NOFOLLOW: u32 = 0x100;
+    const LX_UTIME_NOW: i64 = 1073741823;
+    const LX_UTIME_OMIT: i64 = 1073741822;
+    const ENOENT: i32 = 2;
+    const EBADF: i32 = 9;
+    const EFAULT: i32 = 14;
+    const EINVAL: i32 = 22;
+    const EOPNOTSUPP: i32 = 95;
+
+    fn copy_from_user(dst: *mut void, userSrc: u64, len: usize) -> i32;
+    fn strlen(s: *CChar) -> usize;
+    fn process_cwd_get() -> *mut vnode;
+    fn process_chroot(dir: *mut vnode) -> i32;
+    fn vfs_lookup(start: *mut vnode, path: *CChar, out: *mut *mut vnode) -> i32;
+    fn vfs_lookup_nofollow(start: *mut vnode, path: *CChar, out: *mut *mut vnode) -> i32;
+    fn vfs_setattr(vn: *mut vnode, what: u32, mode: u32, mtimeNs: u64) -> i32;
+    fn vfs_chown(vn: *mut vnode, uid: u32, gid: u32) -> i32;
+    fn vnode_get(vn: *mut vnode);
+    fn vnode_put(vn: *mut vnode);
+    fn file_put(f: *mut file);
+    fn lx_get_path(uptr: u64, buf: *mut CChar) -> i32;
+    fn lx_at_base(
+        dirfd: i64,
+        path: *CChar,
+        rights: u32,
+        out: *mut *mut vnode,
+        basepath: *mut CChar,
+        n: usize,
+        have: *mut u32,
+    ) -> i32;
+    fn lx_file_of(h: i32, rights: u32) -> *mut file;
+    fn lx_file_of_manage(h: i32, err: *mut i32) -> *mut file;
+}
+
+const NOT: u32 = 0xFFFFFFFF;
+const CWD: i64 = -100; // LX_AT_FDCWD as a register holds it
+
+/// Safety: the dispatcher's: `a` is the call's arguments.
+unsafe fn arg(a: *mut syscall_args, i: usize) -> u64 => Ptr.toBorrow(a as *syscall_args).a[i];
+
+/// Safety: `f` is a live file.
+unsafe fn vnodeOf(f: *mut file) -> *mut vnode => Ptr.toBorrow(f as *file).vn;
+
+/// A node, or why there is none.
+struct Found {
+    rc: i32;
+    vn: *mut vnode;
+}
+
+/// The node a path names from a directory descriptor, following a final symbolic link unless `nofollow`; referenced.
+///
+/// Safety: in a process's thread.
+unsafe fn lookupAt(dirfd: i64, upath: u64, nofollow: bool) -> Found {
+    let none = 0 as *mut vnode;
+    var path = [0u8; 1024];
+    let p = borrow mut path as *mut [u8; 1024] as *mut u8;
+    var rc = lx_get_path(upath, p as *mut CChar);
+    if (rc != 0) {
+        return Found { rc: rc, vn: none };
+    }
+    var start = none;
+    rc = lx_at_base(
+        dirfd,
+        p as *CChar,
+        HANDLE_RIGHT_WRITE,
+        borrow mut start as *mut *mut vnode,
+        0 as *mut CChar,
+        0,
+        0 as *mut u32,
+    );
+    if (rc != 0) {
+        return Found { rc: rc, vn: none };
+    }
+    // A trailing slash makes the last component a directory to enter, so a link there is followed even under
+    // AT_SYMLINK_NOFOLLOW, as Linux.
+    let plen = strlen(p as *CChar);
+    let follow = !nofollow || (plen > 0 && p.add(plen - 1).read() == 47);
+    var vn = none;
+    rc = if (follow) vfs_lookup(start, p as *CChar, borrow mut vn as *mut *mut vnode)
+        else vfs_lookup_nofollow(start, p as *CChar, borrow mut vn as *mut *mut vnode);
+    vnode_put(start);
+    return Found { rc: rc, vn: vn };
+}
+
+/// Safety: in a process's thread.
+unsafe fn fchmodatCommon(dirfd: i64, upath: u64, mode: u32, flags: u32) -> i64 {
+    if ((flags & (LX_AT_SYMLINK_NOFOLLOW ^ NOT)) != 0) {
+        return -EINVAL as i64;
+    }
+    let at = lookupAt(dirfd, upath, (flags & LX_AT_SYMLINK_NOFOLLOW) != 0);
+    if (at.rc != 0) {
+        return at.rc as i64;
+    }
+    // A link's own mode means nothing: Linux refuses the change.
+    let rc = if (Ptr.toBorrow(at.vn as *vnode).kind == VNODE_LNK) -EOPNOTSUPP
+        else vfs_setattr(at.vn, VFS_SET_MODE, mode, 0);
+    vnode_put(at.vn);
+    return rc as i64;
+}
+
+/// x86-64's table only: AArch64 has fchmodat alone.
+/// Safety: the dispatcher's.
+@export("lx_chmod")
+unsafe fn chmod(a: *mut syscall_args) -> i64 => fchmodatCommon(CWD, arg(a, 0), truncate<u32>(arg(a, 1)), 0);
+
+/// Safety: the dispatcher's.
+@export("lx_fchmodat")
+unsafe fn fchmodat(a: *mut syscall_args) -> i64 =>
+    fchmodatCommon(truncate<i64>(arg(a, 0)), arg(a, 1), truncate<u32>(arg(a, 2)), 0);
+
+/// Safety: the dispatcher's.
+@export("lx_fchmodat2")
+unsafe fn fchmodat2(a: *mut syscall_args) -> i64 =>
+    fchmodatCommon(truncate<i64>(arg(a, 0)), arg(a, 1), truncate<u32>(arg(a, 2)), truncate<u32>(arg(a, 3)));
+
+/// Safety: the dispatcher's.
+@export("lx_fchmod")
+unsafe fn fchmod(a: *mut syscall_args) -> i64 {
+    var err = 0;
+    let f = lx_file_of_manage(truncate<i32>(arg(a, 0)), borrow mut err as *mut i32);
+    if (f.isNull()) {
+        return err as i64;
+    }
+    let rc = vfs_setattr(vnodeOf(f), VFS_SET_MODE, truncate<u32>(arg(a, 1)), 0);
+    file_put(f);
+    return rc as i64;
+}
+
+/// Linux's uid_t and gid_t -1, "leave it": the VFS's VFS_ID_KEEP.
+fn ownerId(v: u64) -> u32 => if (truncate<u32>(v) == 0xFFFFFFFF) VFS_ID_KEEP else truncate<u32>(v);
+
+/// fchownat(dirfd, path, uid, gid, flags), and chown, lchown and fchown through it: vfs_chown's rule (PRIV_SYS_ADMIN
+/// for a new owner; the owner may choose among its own groups). AT_SYMLINK_NOFOLLOW changes a link itself, which is
+/// lchown; AT_EMPTY_PATH with an empty path changes the open file `dirfd`.
+///
+/// Safety: in a process's thread.
+unsafe fn fchownatCommon(dirfd: i64, upath: u64, uid: u64, gid: u64, flags: u32) -> i64 {
+    // `flags` is Linux's `int`: the register's upper half is not part of it, as Linux's entry truncates it (review: a
+    // first fix checked all 64 bits, which Linux does not).
+    if ((flags & ((LX_AT_SYMLINK_NOFOLLOW | LX_AT_EMPTY_PATH) ^ NOT)) != 0) {
+        return -EINVAL as i64;
+    }
+    // Only whether the path is empty: lookupAt copies it in again, and two path buffers would not fit the kernel
+    // stack's frame limit.
+    var first = [0u8; 1];
+    if (copy_from_user(borrow mut first as *mut [u8; 1] as *mut void, upath, 1) != 0) {
+        return -EFAULT as i64;
+    }
+    if (first[0] == 0) {
+        if ((flags & LX_AT_EMPTY_PATH) == 0) {
+            return -ENOENT as i64;
+        }
+        if (truncate<i32>(dirfd) == LX_AT_FDCWD) {
+            // the working directory itself, as Linux
+            let cwd = process_cwd_get();
+            let rc = vfs_chown(cwd, ownerId(uid), ownerId(gid));
+            vnode_put(cwd);
+            return rc as i64;
+        }
+        var err = 0;
+        let f = lx_file_of_manage(truncate<i32>(dirfd), borrow mut err as *mut i32);
+        if (f.isNull()) {
+            return err as i64;
+        }
+        let rc = vfs_chown(vnodeOf(f), ownerId(uid), ownerId(gid));
+        file_put(f);
+        return rc as i64;
+    }
+    let at = lookupAt(dirfd, upath, (flags & LX_AT_SYMLINK_NOFOLLOW) != 0);
+    if (at.rc != 0) {
+        return at.rc as i64;
+    }
+    let rc = vfs_chown(at.vn, ownerId(uid), ownerId(gid));
+    vnode_put(at.vn);
+    return rc as i64;
+}
+
+/// Safety: the dispatcher's.
+@export("lx_fchownat")
+unsafe fn fchownat(a: *mut syscall_args) -> i64 =>
+    fchownatCommon(truncate<i64>(arg(a, 0)), arg(a, 1), arg(a, 2), arg(a, 3), truncate<u32>(arg(a, 4)));
+
+/// x86-64's table only: AArch64 has fchownat alone.
+/// Safety: the dispatcher's.
+@export("lx_chown")
+unsafe fn chown(a: *mut syscall_args) -> i64 => fchownatCommon(CWD, arg(a, 0), arg(a, 1), arg(a, 2), 0);
+
+/// x86-64's table only.
+/// Safety: the dispatcher's.
+@export("lx_lchown")
+unsafe fn lchown(a: *mut syscall_args) -> i64 =>
+    fchownatCommon(CWD, arg(a, 0), arg(a, 1), arg(a, 2), LX_AT_SYMLINK_NOFOLLOW);
+
+/// Safety: the dispatcher's.
+@export("lx_fchown")
+unsafe fn fchown(a: *mut syscall_args) -> i64 {
+    var err = 0;
+    let f = lx_file_of_manage(truncate<i32>(arg(a, 0)), borrow mut err as *mut i32);
+    if (f.isNull()) {
+        return err as i64;
+    }
+    let rc = vfs_chown(vnodeOf(f), ownerId(arg(a, 1)), ownerId(arg(a, 2)));
+    file_put(f);
+    return rc as i64;
+}
+
+/// chroot(path): process_chroot's rule (PRIV_MOUNT; the working directory moves to the new root).
+///
+/// Safety: the dispatcher's.
+@export("lx_chroot")
+unsafe fn chroot(a: *mut syscall_args) -> i64 {
+    var path = [0u8; 1024];
+    let p = borrow mut path as *mut [u8; 1024] as *mut u8;
+    var rc = lx_get_path(arg(a, 0), p as *mut CChar);
+    if (rc != 0) {
+        return rc as i64;
+    }
+    let start = process_cwd_get();
+    var dir = 0 as *mut vnode;
+    rc = vfs_lookup(start, p as *CChar, borrow mut dir as *mut *mut vnode);
+    if (!start.isNull()) {
+        vnode_put(start);
+    }
+    if (rc != 0) {
+        return rc as i64;
+    }
+    rc = process_chroot(dir);
+    vnode_put(dir);
+    return rc as i64;
+}
+
+/// utimensat(dirfd, path, times[2], flags): the modification time, times[1] (the access time is not kept: times[0] is
+/// checked and ignored). No times, or UTIME_NOW, is "now"; UTIME_OMIT leaves it. A NULL path is the descriptor's own
+/// file (futimens).
+///
+/// Safety: the dispatcher's.
+@export("lx_utimensat")
+unsafe fn utimensat(a: *mut syscall_args) -> i64 {
+    let flags = truncate<u32>(arg(a, 3));
+    if ((flags & (LX_AT_SYMLINK_NOFOLLOW ^ NOT)) != 0) {
+        return -EINVAL as i64;
+    }
+    var what = VFS_SET_MTIME_NOW;
+    var mtime: u64 = 0;
+    if (arg(a, 2) != 0) {
+        var ts = [0i64; 4]; // two struct lx_timespec: seconds and nanoseconds, twice
+        if (copy_from_user(borrow mut ts as *mut [i64; 4] as *mut void, arg(a, 2), 32) != 0) {
+            return -EFAULT as i64;
+        }
+        for (i in 0..2) {
+            let sec = ts[i * 2];
+            let nsec = ts[i * 2 + 1];
+            if (nsec != LX_UTIME_NOW && nsec != LX_UTIME_OMIT && (nsec < 0 || nsec >= 1000000000 || sec < 0)) {
+                return -EINVAL as i64;
+            }
+        }
+        if (ts[1] == LX_UTIME_OMIT && ts[3] == LX_UTIME_OMIT) {
+            return 0;
+        }
+        if (ts[3] == LX_UTIME_OMIT) {
+            what = 0; // the change time only
+        } else if (ts[3] != LX_UTIME_NOW) {
+            what = VFS_SET_MTIME;
+            mtime = truncate<u64>(ts[2]).wrappingMul(1000000000).wrappingAdd(truncate<u64>(ts[3]));
+        }
+    }
+    var vn = 0 as *mut vnode;
+    if (arg(a, 1) == 0) {
+        let f = lx_file_of(truncate<i32>(arg(a, 0)), 0);
+        if (f.isNull()) {
+            return -EBADF as i64;
+        }
+        vn = vnodeOf(f);
+        vnode_get(vn);
+        file_put(f);
+    } else {
+        let at = lookupAt(truncate<i64>(arg(a, 0)), arg(a, 1), (flags & LX_AT_SYMLINK_NOFOLLOW) != 0);
+        if (at.rc != 0) {
+            return at.rc as i64;
+        }
+        vn = at.vn;
+    }
+    let rc = vfs_setattr(vn, what, 0, mtime);
+    vnode_put(vn);
+    return rc as i64;
+}

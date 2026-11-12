@@ -1,0 +1,634 @@
+// lxfd.cee - The Linux personality's descriptor objects (docs/compat/linux/design.md), in CeeSafe (roadmap 1.3 K1):
+// eventfd and eventfd2, signalfd and signalfd4, the timerfd calls, memfd_create, ftruncate, and epoll (epoll_create,
+// epoll_create1, epoll_ctl, epoll_wait, epoll_pwait). syscalls.c's table names them (linux_internal.h).
+//
+// A struct lx_epoll_event is packed on x86-64 (twelve bytes, the data at 4) and not on AArch64 (sixteen, the data at
+// 8); a struct epoll_ready is forty bytes. The C compiler checks both (the extern block).
+
+@header(
+    "kernel/epoll.h", "kernel/errno.h", "kernel/eventfd.h", "kernel/handle.h", "kernel/kmalloc.h", "kernel/object.h",
+    "kernel/process.h", "kernel/signal.h", "kernel/signalfd.h", "kernel/syscall.h", "kernel/timer.h",
+    "kernel/timerobj.h", "kernel/uaccess.h", "kernel/vfs.h", "uapi/cosmo/syscall.h", "linux_abi.h", "linux_internal.h",
+)
+extern "C" {
+    struct syscall_args {
+        a: [u64; 6];
+    }
+    struct handle_table;
+    struct process {
+        handles: handle_table;
+    }
+    struct vnode;
+    struct file {
+        obj: kobject;
+        vn: *mut vnode;
+    }
+    struct epoll_ready {
+        fd: i32;
+        id: u64;
+        io: u32;
+        events: u32;
+        data: u64;
+        oneshot: bool;
+        edge: bool;
+    }
+
+    @cvalue(
+        "sizeof(struct epoll_ready) == 40 && sizeof(struct lx_epoll_event) == (LX_ABI_IS_X86_64 ? 12 : 16) && offsetof(struct lx_epoll_event, events) == 0 && offsetof(struct lx_epoll_event, data) == (LX_ABI_IS_X86_64 ? 4 : 8) && offsetof(struct lx_itimerspec, it_interval) == 0 && offsetof(struct lx_itimerspec, it_value) == 16 && SIGMASK(SIGKILL) == 0x100 && SIGMASK(SIGSTOP) == 0x40000 && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__",
+    )
+    const LAYOUTS: bool = true;
+    const EPOLL_WAIT_FOREVER: u64 = 0xFFFFFFFFFFFFFFFF;
+    const HANDLE_RIGHT_READ: u32 = 1;
+    const HANDLE_RIGHT_WRITE: u32 = 2;
+    const HANDLE_RIGHT_OWNER: u32 = 28;
+    const HANDLE_FLAG_CLOEXEC: u32 = 1;
+    const COSMO_O_RDWR: u32 = 0x0002;
+    const COSMO_IO_READABLE: u32 = 1;
+    const COSMO_IO_WRITABLE: u32 = 2;
+    const COSMO_IO_HANGUP: u32 = 4;
+    const COSMO_IO_ERROR: u32 = 8;
+    const LX_EFD_SEMAPHORE: u32 = 1;
+    const LX_EFD_CLOEXEC: u32 = 0o2000000;
+    const LX_EFD_NONBLOCK: u32 = 0o4000;
+    const LX_SFD_CLOEXEC: u32 = 0o2000000;
+    const LX_SFD_NONBLOCK: u32 = 0o4000;
+    const LX_TFD_CLOEXEC: u32 = 0o2000000;
+    const LX_TFD_NONBLOCK: u32 = 0o4000;
+    const LX_TFD_TIMER_ABSTIME: u32 = 1;
+    const LX_MFD_CLOEXEC: u32 = 1;
+    const LX_CLOCK_REALTIME: u32 = 0;
+    const LX_CLOCK_MONOTONIC: u32 = 1;
+    const LX_CLOCK_BOOTTIME: u32 = 7;
+    const LX_EPOLLIN: u32 = 0x001;
+    const LX_EPOLLOUT: u32 = 0x004;
+    const LX_EPOLLERR: u32 = 0x008;
+    const LX_EPOLLHUP: u32 = 0x010;
+    const LX_EPOLLRDHUP: u32 = 0x2000;
+    const LX_EPOLLONESHOT: u32 = 0x40000000;
+    const LX_EPOLLET: u32 = 0x80000000;
+    const LX_EPOLL_CTL_ADD: i32 = 1;
+    const LX_EPOLL_CTL_DEL: i32 = 2;
+    const LX_EPOLL_CTL_MOD: i32 = 3;
+    const LX_EPOLL_CLOEXEC: u32 = 0o2000000;
+    const EBADF: i32 = 9;
+    const ENOMEM: i32 = 12;
+    const EFAULT: i32 = 14;
+    const EINVAL: i32 = 22;
+
+    fn process_current() -> *mut process;
+    fn user_range_ok(addr: u64, len: usize) -> bool;
+    fn copy_to_user(userDst: u64, src: *void, len: usize) -> i32;
+    fn copy_from_user(dst: *mut void, userSrc: u64, len: usize) -> i32;
+    fn strncpy_from_user(dst: *mut CChar, userSrc: u64, max: usize) -> i32;
+    fn clock_now_ns() -> u64;
+    fn clock_realtime_ns() -> u64;
+    fn signal_blocked() -> u64;
+    fn signal_set_blocked(mask: u64);
+    fn signal_set_blocked_saved(saved: u64);
+    fn handle_lookup(t: *mut handle_table, h: i32, rightsNeeded: u32) -> *mut kobject;
+    fn handle_install_flags(t: *mut handle_table, obj: *mut kobject, rights: u32, flags: u32) -> i32;
+    fn kobject_set_nonblock(obj: *mut kobject, on: i32) -> i32;
+    fn eventfd_obj_create(initval: u64, semaphore: bool, out: *mut *mut kobject) -> i32;
+    fn signalfd_obj_create(mask: u64, nonblock: bool, out: *mut *mut kobject) -> i32;
+    fn signalfd_obj_set_mask(obj: *mut kobject, mask: u64) -> i32;
+    fn timer_obj_create_disarmed(nonblock: bool, realtime: bool, out: *mut *mut kobject) -> i32;
+    fn timer_obj_from_kobject(obj: *mut kobject) -> *mut kobject;
+    fn timer_obj_is_realtime(obj: *mut kobject) -> bool;
+    fn timer_obj_settime(
+        obj: *mut kobject,
+        initialNs: u64,
+        intervalNs: u64,
+        oldRemaining: *mut u64,
+        oldInterval: *mut u64,
+    );
+    fn timer_obj_gettime(obj: *mut kobject, remainingNs: *mut u64, intervalNs: *mut u64);
+    fn epoll_obj_create(out: *mut *mut kobject) -> i32;
+    fn epoll_obj_from_kobject(obj: *mut kobject) -> *mut kobject;
+    fn epoll_obj_add(
+        ep: *mut kobject,
+        fd: i32,
+        target: *mut kobject,
+        want: u32,
+        events: u32,
+        data: u64,
+        oneshot: bool,
+        edge: bool,
+    ) -> i32;
+    fn epoll_obj_mod(ep: *mut kobject, fd: i32, want: u32, events: u32, data: u64, oneshot: bool, edge: bool) -> i32;
+    fn epoll_obj_del(ep: *mut kobject, fd: i32) -> i32;
+    fn epoll_obj_rearm(ep: *mut kobject, fd: i32, id: u64);
+    fn epoll_obj_wait(ep: *mut kobject, out: *mut epoll_ready, max: u32, timeoutNs: u64) -> i64;
+    fn ramfs_anon_reg(mode: u32, out: *mut *mut vnode) -> i32;
+    fn vfs_open_vnode(vn: *mut vnode, flags: u32, out: *mut *mut file) -> i32;
+    fn vfs_ftruncate(vn: *mut vnode, size: u64) -> i32;
+    fn file_put(f: *mut file);
+    fn lx_file_of(h: i32, rights: u32) -> *mut file;
+    fn lx_ns_from_timespec(uptr: u64, ns: *mut u64) -> i32;
+    fn lx_put_timespec(uptr: u64, ns: u64) -> i64;
+}
+
+const NOT: u32 = 0xFFFFFFFF;
+const EPOLL_WAIT_MAX: u32 = 1024;  // per-call cap on reported events (level-triggered re-reports)
+const READY_SIZE: usize = 40;      // sizeof(struct epoll_ready), checked above
+const UNREPORTABLE: u64 = 0x40100; // SIGKILL and SIGSTOP (checked above): never reportable via a signalfd
+const IT_VALUE: u64 = 16;          // offsetof(struct lx_itimerspec, it_value), checked above; it_interval is at 0
+
+/// Safety: the dispatcher's: `a` is the call's arguments.
+unsafe fn arg(a: *mut syscall_args, i: usize) -> u64 => Ptr.toBorrow(a as *syscall_args).a[i];
+
+/// Argument `i` as Linux's `int` or `unsigned`.
+/// Safety: the dispatcher's.
+unsafe fn arg32(a: *mut syscall_args, i: usize) -> i32 => truncate<i32>(arg(a, i));
+/// Safety: the dispatcher's.
+unsafe fn argU32(a: *mut syscall_args, i: usize) -> u32 => truncate<u32>(arg(a, i));
+
+/// Safety: in a process's thread.
+unsafe fn handles() -> *mut handle_table {
+    let p = Ptr.toBorrowMut(process_current());
+    return borrow mut p.handles as *mut handle_table;
+}
+
+/// A handle to the new object `obj`, whose reference this drops: the handle holds its own.
+/// Safety: in a process's thread; `obj` is referenced.
+unsafe fn install(obj: *mut kobject, rights: u32, cloexec: bool) -> i64 {
+    let h = handle_install_flags(handles(), obj, rights, if (cloexec) HANDLE_FLAG_CLOEXEC else 0);
+    kobject_put(obj);
+    return h as i64;
+}
+
+/// Safety: in a process's thread.
+unsafe fn eventfdCommon(initval: u32, flags: u32) -> i64 {
+    if ((flags & ((LX_EFD_SEMAPHORE | LX_EFD_NONBLOCK | LX_EFD_CLOEXEC) ^ NOT)) != 0) {
+        return -EINVAL as i64;
+    }
+    var obj = 0 as *mut kobject;
+    // Linux's initval is an unsigned int: only the low 32 bits count, so a caller leaving junk in the high half of
+    // the register starts at the value it asked for, not that junk.
+    let rc = eventfd_obj_create(initval as u64, (flags & LX_EFD_SEMAPHORE) != 0, borrow mut obj as *mut *mut kobject);
+    if (rc != 0) {
+        return rc as i64;
+    }
+    if ((flags & LX_EFD_NONBLOCK) != 0) {
+        kobject_set_nonblock(obj, 1);
+    }
+    return install(obj, HANDLE_RIGHT_READ | HANDLE_RIGHT_WRITE | HANDLE_RIGHT_OWNER, (flags & LX_EFD_CLOEXEC) != 0);
+}
+
+/// Safety: the dispatcher's.
+@export("lx_eventfd2")
+unsafe fn eventfd2(a: *mut syscall_args) -> i64 => eventfdCommon(argU32(a, 0), argU32(a, 1));
+
+/// The older call: no flags. x86-64's table only.
+/// Safety: the dispatcher's.
+@export("lx_eventfd")
+unsafe fn eventfd(a: *mut syscall_args) -> i64 => eventfdCommon(argU32(a, 0), 0);
+
+/// signalfd: a signal-reading fd on the signalfd kobject (kernel/io/signalfd.c). See
+/// docs/audit/next-subsystem-signalfd.md.
+///
+/// Safety: in a process's thread.
+unsafe fn signalfdCommon(fd: i32, umask: u64, sizemask: u64, flags: u32) -> i64 {
+    if ((flags & ((LX_SFD_CLOEXEC | LX_SFD_NONBLOCK) ^ NOT)) != 0) {
+        return -EINVAL as i64;
+    }
+    if (sizemask != 8) {
+        return -EINVAL as i64;
+    }
+    var mask: u64 = 0;
+    if (copy_from_user(borrow mut mask as *mut u64 as *mut void, umask, 8) != 0) {
+        return -EFAULT as i64;
+    }
+    mask &= UNREPORTABLE ^ 0xFFFFFFFFFFFFFFFF;
+    if (fd != -1) {
+        // Update an existing signalfd's mask; only -1 creates, as Linux documents (a negative fd other than -1 is
+        // -EBADF). The holder must have the read right, so a handle whose rights were narrowed cannot change what
+        // another holder reads.
+        if (fd < 0) {
+            return -EBADF as i64;
+        }
+        let existing = handle_lookup(handles(), fd, HANDLE_RIGHT_READ);
+        if (existing.isNull()) {
+            return -EBADF as i64;
+        }
+        let rc = signalfd_obj_set_mask(existing, mask);
+        kobject_put(existing);
+        return if (rc != 0) rc as i64 else fd as i64;
+    }
+    var obj = 0 as *mut kobject;
+    let rc = signalfd_obj_create(mask, (flags & LX_SFD_NONBLOCK) != 0, borrow mut obj as *mut *mut kobject);
+    if (rc != 0) {
+        return rc as i64;
+    }
+    return install(obj, HANDLE_RIGHT_READ | HANDLE_RIGHT_OWNER, (flags & LX_SFD_CLOEXEC) != 0);
+}
+
+/// Safety: the dispatcher's.
+@export("lx_signalfd4")
+unsafe fn signalfd4(a: *mut syscall_args) -> i64 => signalfdCommon(arg32(a, 0), arg(a, 1), arg(a, 2), argU32(a, 3));
+
+/// The older call: no flags. x86-64's table only.
+/// Safety: the dispatcher's.
+@export("lx_signalfd")
+unsafe fn signalfd(a: *mut syscall_args) -> i64 => signalfdCommon(arg32(a, 0), arg(a, 1), arg(a, 2), 0);
+
+/// timerfd: a waitable timer fd on the timer kobject (kernel/io/timerobj.c). See
+/// docs/audit/next-subsystem-timerfd.md.
+///
+/// Safety: the dispatcher's.
+@export("lx_timerfd_create")
+unsafe fn timerfdCreate(a: *mut syscall_args) -> i64 {
+    let clockid = argU32(a, 0);
+    let flags = argU32(a, 1);
+    if (clockid != LX_CLOCK_MONOTONIC && clockid != LX_CLOCK_REALTIME && clockid != LX_CLOCK_BOOTTIME) {
+        return -EINVAL as i64; // BOOTTIME is accepted and aliased to monotonic (no suspend)
+    }
+    if ((flags & ((LX_TFD_NONBLOCK | LX_TFD_CLOEXEC) ^ NOT)) != 0) {
+        return -EINVAL as i64;
+    }
+    var obj = 0 as *mut kobject;
+    let rc = timer_obj_create_disarmed(
+        (flags & LX_TFD_NONBLOCK) != 0,
+        clockid == LX_CLOCK_REALTIME,
+        borrow mut obj as *mut *mut kobject,
+    );
+    if (rc != 0) {
+        return rc as i64;
+    }
+    // A timerfd is read-only.
+    return install(obj, HANDLE_RIGHT_READ | HANDLE_RIGHT_OWNER, (flags & LX_TFD_CLOEXEC) != 0);
+}
+
+/// The timer object descriptor `fd` names, referenced, or the error in `rc`.
+struct Named {
+    rc: i32;
+    obj: *mut kobject;
+}
+
+/// Safety: in a process's thread.
+unsafe fn timerOf(fd: i32) -> Named {
+    let obj = handle_lookup(handles(), fd, HANDLE_RIGHT_READ);
+    if (obj.isNull()) {
+        return Named { rc: -EBADF, obj: obj };
+    }
+    if (timer_obj_from_kobject(obj).isNull()) {
+        kobject_put(obj);
+        return Named { rc: -EINVAL, obj: 0 as *mut kobject }; // not a timerfd
+    }
+    return Named { rc: 0, obj: obj };
+}
+
+/// Safety: the dispatcher's.
+@export("lx_timerfd_settime")
+unsafe fn timerfdSettime(a: *mut syscall_args) -> i64 {
+    let flags = argU32(a, 1);
+    let unew = arg(a, 2);
+    let uold = arg(a, 3);
+    if ((flags & (LX_TFD_TIMER_ABSTIME ^ NOT)) != 0) {
+        return -EINVAL as i64;
+    }
+    let t = timerOf(arg32(a, 0));
+    if (t.rc != 0) {
+        return t.rc as i64;
+    }
+    var valueNs: u64 = 0;
+    var intervalNs: u64 = 0;
+    var rc = lx_ns_from_timespec(unew.wrappingAdd(IT_VALUE), borrow mut valueNs as *mut u64);
+    if (rc == 0) {
+        rc = lx_ns_from_timespec(unew, borrow mut intervalNs as *mut u64);
+    }
+    if (rc != 0) {
+        kobject_put(t.obj);
+        return rc as i64;
+    }
+    // The disarm decision is the raw it_value, never a computed delay: a zero it_value disarms, a non-zero one always
+    // arms.
+    var initialNs = valueNs;
+    if (valueNs != 0 && (flags & LX_TFD_TIMER_ABSTIME) != 0) {
+        let now = if (timer_obj_is_realtime(t.obj)) clock_realtime_ns() else clock_now_ns();
+        // A deadline already in the past fires at once (minimum 1 ns, never 0 -- 0 would be read as a disarm),
+        // matching Linux.
+        initialNs = if (valueNs > now) valueNs - now else 1;
+    }
+    var oldRem: u64 = 0;
+    var oldInt: u64 = 0;
+    // Pass the interval even when disarming: Linux keeps it, and timerfd_gettime reports it after a disarm.
+    timer_obj_settime(t.obj, initialNs, intervalNs, borrow mut oldRem as *mut u64, borrow mut oldInt as *mut u64);
+    kobject_put(t.obj);
+    if (uold != 0) {
+        if (lx_put_timespec(uold.wrappingAdd(IT_VALUE), oldRem) != 0 || lx_put_timespec(uold, oldInt) != 0) {
+            return -EFAULT as i64;
+        }
+    }
+    return 0;
+}
+
+/// Safety: the dispatcher's.
+@export("lx_timerfd_gettime")
+unsafe fn timerfdGettime(a: *mut syscall_args) -> i64 {
+    let ucurr = arg(a, 1);
+    let t = timerOf(arg32(a, 0));
+    if (t.rc != 0) {
+        return t.rc as i64;
+    }
+    var rem: u64 = 0;
+    var intv: u64 = 0;
+    timer_obj_gettime(t.obj, borrow mut rem as *mut u64, borrow mut intv as *mut u64);
+    kobject_put(t.obj);
+    if (lx_put_timespec(ucurr.wrappingAdd(IT_VALUE), rem) != 0 || lx_put_timespec(ucurr, intv) != 0) {
+        return -EFAULT as i64;
+    }
+    return 0;
+}
+
+/// memfd_create: an anonymous memory-backed file (a ramfs regular file with no name). See
+/// docs/audit/next-subsystem-memfd.md.
+///
+/// Safety: the dispatcher's.
+@export("lx_memfd_create")
+unsafe fn memfdCreate(a: *mut syscall_args) -> i64 {
+    let flags = argU32(a, 1);
+    if ((flags & (LX_MFD_CLOEXEC ^ NOT)) != 0) {
+        return -EINVAL as i64; // MFD_ALLOW_SEALING / MFD_HUGETLB unsupported
+    }
+    // The name is advisory (Linux uses it only for /proc/self/fd and accounting): validate that it is a readable,
+    // bounded string, then ignore it. Linux caps it at 249 bytes and returns -EINVAL for a longer one, so a 250-byte
+    // buffer turns strncpy_from_user's -ENAMETOOLONG into -EINVAL; a faulting pointer stays -EFAULT.
+    var name = [0u8; 250];
+    var rc = strncpy_from_user(borrow mut name as *mut [u8; 250] as *mut u8 as *mut CChar, arg(a, 0), 250);
+    if (rc == -EFAULT) {
+        return -EFAULT as i64;
+    }
+    if (rc < 0) {
+        return -EINVAL as i64; // too long (> 249), as Linux reports it
+    }
+    var vn = 0 as *mut vnode;
+    rc = ramfs_anon_reg(0o600, borrow mut vn as *mut *mut vnode);
+    if (rc != 0) {
+        return rc as i64;
+    }
+    var f = 0 as *mut file;
+    rc = vfs_open_vnode(vn, COSMO_O_RDWR, borrow mut f as *mut *mut file); // consumes vn's reference
+    if (rc != 0) {
+        return rc as i64;
+    }
+    let opened = Ptr.toBorrowMut(f);
+    let h = handle_install_flags(
+        handles(),
+        borrow mut opened.obj as *mut kobject,
+        HANDLE_RIGHT_READ | HANDLE_RIGHT_WRITE | HANDLE_RIGHT_OWNER,
+        if ((flags & LX_MFD_CLOEXEC) != 0) HANDLE_FLAG_CLOEXEC else 0,
+    );
+    file_put(f); // the table holds its own reference
+    return h as i64;
+}
+
+/// Safety: the dispatcher's.
+@export("lx_ftruncate")
+unsafe fn ftruncate(a: *mut syscall_args) -> i64 {
+    let len = truncate<i64>(arg(a, 1));
+    if (len < 0) {
+        return -EINVAL as i64;
+    }
+    let f = lx_file_of(arg32(a, 0), HANDLE_RIGHT_WRITE); // must be open for writing
+    if (f.isNull()) {
+        return -EBADF as i64;
+    }
+    let rc = vfs_ftruncate(Ptr.toBorrow(f as *file).vn, truncate<u64>(len));
+    file_put(f);
+    return rc as i64;
+}
+
+// --- epoll: an interest set of fds, waited on together (kernel/io/epoll.c). See docs/audit/next-subsystem-epoll.md.
+
+/// The readiness an epoll event mask asks for. ERR and HUP are always reported, never requested.
+fn eventsToIo(ev: u32) -> u32 {
+    var io: u32 = 0;
+    if ((ev & LX_EPOLLIN) != 0) {
+        io |= COSMO_IO_READABLE;
+    }
+    if ((ev & LX_EPOLLOUT) != 0) {
+        io |= COSMO_IO_WRITABLE;
+    }
+    return io;
+}
+
+/// A readiness as epoll's events, for a member that asked for `asked`.
+fn eventsFromIo(io: u32, asked: u32) -> u32 {
+    var ev: u32 = 0;
+    if ((io & COSMO_IO_READABLE) != 0) {
+        ev |= LX_EPOLLIN;
+    }
+    if ((io & COSMO_IO_WRITABLE) != 0) {
+        ev |= LX_EPOLLOUT;
+    }
+    if ((io & COSMO_IO_HANGUP) != 0) {
+        ev |= LX_EPOLLHUP | (asked & LX_EPOLLRDHUP); // RDHUP only if the caller asked, as poll does
+    }
+    if ((io & COSMO_IO_ERROR) != 0) {
+        ev |= LX_EPOLLERR;
+    }
+    return ev;
+}
+
+/// An epoll fd's object, referenced, or the error in `rc`.
+/// Safety: in a process's thread.
+unsafe fn epollOf(epfd: i32) -> Named {
+    let obj = handle_lookup(handles(), epfd, 0);
+    if (obj.isNull()) {
+        return Named { rc: -EBADF, obj: obj };
+    }
+    if (epoll_obj_from_kobject(obj).isNull()) {
+        kobject_put(obj);
+        return Named { rc: -EINVAL, obj: 0 as *mut kobject }; // not an epoll
+    }
+    return Named { rc: 0, obj: obj };
+}
+
+/// Safety: in a process's thread.
+unsafe fn epollCreateCommon(flags: u32) -> i64 {
+    if ((flags & (LX_EPOLL_CLOEXEC ^ NOT)) != 0) {
+        return -EINVAL as i64;
+    }
+    var obj = 0 as *mut kobject;
+    let rc = epoll_obj_create(borrow mut obj as *mut *mut kobject);
+    if (rc != 0) {
+        return rc as i64;
+    }
+    return install(obj, HANDLE_RIGHT_READ | HANDLE_RIGHT_OWNER, (flags & LX_EPOLL_CLOEXEC) != 0);
+}
+
+/// Safety: the dispatcher's.
+@export("lx_epoll_create1")
+unsafe fn epollCreate1(a: *mut syscall_args) -> i64 => epollCreateCommon(argU32(a, 0));
+
+/// The legacy call wants a positive size hint, then ignores it. x86-64's table only.
+/// Safety: the dispatcher's.
+@export("lx_epoll_create")
+unsafe fn epollCreate(a: *mut syscall_args) -> i64 =>
+    if (arg32(a, 0) <= 0) -EINVAL as i64 else epollCreateCommon(0);
+
+/// sizeof(struct lx_epoll_event): packed on x86-64.
+fn eventSize() -> usize {
+    if (cfg("LX_ABI_IS_X86_64")) {
+        return 12;
+    } else {
+        return 16;
+    }
+}
+
+/// Which 32-bit word of a struct lx_epoll_event its data starts at: the one after the events on x86-64, the third on
+/// AArch64.
+fn dataWord() -> usize {
+    if (cfg("LX_ABI_IS_X86_64")) {
+        return 1;
+    } else {
+        return 2;
+    }
+}
+
+/// Safety: the dispatcher's.
+@export("lx_epoll_ctl")
+unsafe fn epollCtl(a: *mut syscall_args) -> i64 {
+    let op = arg32(a, 1);
+    let fd = arg32(a, 2);
+    let e = epollOf(arg32(a, 0));
+    if (e.rc != 0) {
+        return e.rc as i64;
+    }
+    let ep = e.obj;
+    if (op == LX_EPOLL_CTL_DEL) {
+        let rc = epoll_obj_del(ep, fd);
+        kobject_put(ep);
+        return rc as i64;
+    }
+    if (op != LX_EPOLL_CTL_ADD && op != LX_EPOLL_CTL_MOD) {
+        kobject_put(ep);
+        return -EINVAL as i64;
+    }
+    // The record as 32-bit words: the events in the first, the data in the two from dataWord().
+    var w = [0u32; 4];
+    if (copy_from_user(borrow mut w as *mut [u32; 4] as *mut void, arg(a, 3), eventSize()) != 0) {
+        kobject_put(ep);
+        return -EFAULT as i64;
+    }
+    let events = w[0];
+    let data = w[dataWord()] as u64 | (w[dataWord() + 1] as u64) << 32;
+    let want = eventsToIo(events);
+    let oneshot = (events & LX_EPOLLONESHOT) != 0;
+    let edge = (events & LX_EPOLLET) != 0; // edge-triggered: report only on a transition
+    if (op == LX_EPOLL_CTL_MOD) {
+        let rc = epoll_obj_mod(ep, fd, want, events, data, oneshot, edge);
+        kobject_put(ep);
+        return rc as i64;
+    }
+    // ADD: the member must be a valid fd. A set may be a member of a set (the epoll-callback unit): the object
+    // refuses the set itself (-EINVAL) and a loop or a chain deeper than EPOLL_MAX_NESTS (-ELOOP), as Linux.
+    let target = handle_lookup(handles(), fd, 0);
+    if (target.isNull()) {
+        kobject_put(ep);
+        return -EBADF as i64;
+    }
+    let rc = epoll_obj_add(ep, fd, target, want, events, data, oneshot, edge); // takes target's ref on success
+    if (rc != 0) {
+        kobject_put(target);
+    }
+    kobject_put(ep);
+    return rc as i64;
+}
+
+/// Entry `i` of an array of struct epoll_ready.
+/// Safety: `buf` holds more than `i` entries.
+unsafe fn readyAt(buf: *mut u8, i: usize) -> borrow(static) epoll_ready =>
+    Ptr.toBorrow(buf.add(i * READY_SIZE) as *epoll_ready);
+
+/// Safety: in a process's thread.
+unsafe fn epollWaitCommon(epfd: i32, uevents: u64, maxevents: i32, timeoutMs: i32) -> i64 {
+    if (maxevents <= 0) {
+        return -EINVAL as i64;
+    }
+    var k = truncate<u32>(maxevents);
+    if (k > EPOLL_WAIT_MAX) {
+        k = EPOLL_WAIT_MAX;
+    }
+    let size = eventSize();
+    if (!user_range_ok(uevents, k as usize * size)) {
+        return -EFAULT as i64;
+    }
+    let e = epollOf(epfd);
+    if (e.rc != 0) {
+        return e.rc as i64;
+    }
+    let ep = e.obj;
+    let buf = kmalloc(k as usize * READY_SIZE, 0) as *mut u8;
+    if (buf.isNull()) {
+        kobject_put(ep);
+        return -ENOMEM as i64;
+    }
+    let timeoutNs = if (timeoutMs < 0) EPOLL_WAIT_FOREVER else truncate<u32>(timeoutMs) as u64 * 1000000;
+    let n = epoll_obj_wait(ep, buf as *mut epoll_ready, k, timeoutNs);
+    var rc = n;
+    if (n > 0) {
+        let count = truncate<usize>(n);
+        var i: usize = 0;
+        while (i < count) {
+            let r = readyAt(buf, i);
+            let events = eventsFromIo(r.io, r.events);
+            var w = [0u32; 4];
+            w[0] = events;
+            w[dataWord()] = truncate<u32>(r.data);
+            w[dataWord() + 1] = truncate<u32>(r.data >> 32);
+            if (copy_to_user(uevents.wrappingAdd((i * size) as u64), borrow w as *[u32; 4] as *void, size) != 0) {
+                break;
+            }
+            i += 1;
+        }
+        if (i < count) {
+            // The copy failed at i: re-arm what we could not deliver, so the event is not lost -- a one-shot collect
+            // disabled, and an edge member collect disarmed (its transition would otherwise be gone until the member
+            // is drained and refills).
+            var j = i;
+            while (j < count) {
+                let r = readyAt(buf, j);
+                if (r.oneshot || r.edge) {
+                    epoll_obj_rearm(ep, r.fd, r.id);
+                }
+                j += 1;
+            }
+            rc = if (i != 0) truncate<i64>(i) else -EFAULT as i64;
+        }
+    }
+    kfree(buf as *mut void);
+    kobject_put(ep);
+    return rc;
+}
+
+/// x86-64's table only: AArch64 has epoll_pwait alone.
+/// Safety: the dispatcher's.
+@export("lx_epoll_wait")
+unsafe fn epollWait(a: *mut syscall_args) -> i64 =>
+    epollWaitCommon(arg32(a, 0), arg(a, 1), arg32(a, 2), arg32(a, 3));
+
+/// Safety: the dispatcher's.
+@export("lx_epoll_pwait")
+unsafe fn epollPwait(a: *mut syscall_args) -> i64 {
+    // Swap in the caller's signal mask for the wait and restore it after, the way ppoll does; a NULL mask is the
+    // common path.
+    let swap = arg(a, 4) != 0;
+    var mask: u64 = 0;
+    var old: u64 = 0;
+    if (swap) {
+        if (arg(a, 5) != 8) {
+            return -EINVAL as i64;
+        }
+        if (copy_from_user(borrow mut mask as *mut u64 as *mut void, arg(a, 4), 8) != 0) {
+            return -EFAULT as i64;
+        }
+        old = signal_blocked();
+        signal_set_blocked(mask);
+    }
+    let rc = epollWaitCommon(arg32(a, 0), arg(a, 1), arg32(a, 2), arg32(a, 3));
+    if (swap) {
+        signal_set_blocked_saved(old);
+    }
+    return rc;
+}

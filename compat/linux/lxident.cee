@@ -1,0 +1,509 @@
+// lxident.cee - The Linux personality's calls on a process's identity (docs/compat/linux/design.md), in CeeSafe (roadmap
+// 2.0 SA8): the pid and the ids, the resource limits, the credentials, the supplementary groups, sessions and process
+// groups, arch_prctl, wait4 and getrusage, and the two answers the table gives calls it does not build (lx_zero, lx_nosys).
+// syscalls.c's table names them (linux_internal.h).
+//
+// A struct lx_rlimit is two words and a struct lx_rusage eighteen; the C compiler checks both (the extern block).
+
+@header(
+    "arch/cpu.h", "kernel/cputime.h", "kernel/cred.h", "kernel/errno.h", "kernel/process.h", "kernel/sched.h",
+    "kernel/syscall.h", "kernel/uaccess.h", "convert.h", "linux_abi.h", "linux_internal.h", "uapi/cosmo/syscall.h",
+)
+extern "C" {
+    struct syscall_args {
+        a: [u64; 6];
+    }
+    struct credentials {
+        ruid: u32;
+        euid: u32;
+        suid: u32;
+        rgid: u32;
+        egid: u32;
+        sgid: u32;
+        ngroups: u32;
+        groups: [u32; 16];
+    }
+    struct process {
+        pid: u32;
+        parent_pid: u32;
+        cred: credentials;
+    }
+    struct thread {
+        tls_base: usize;
+    }
+    struct cputime_pair {
+        user_ns: u64;
+        system_ns: u64;
+    }
+
+    @cvalue(
+        "sizeof(struct lx_rlimit) == 16 && offsetof(struct lx_rlimit, rlim_cur) == 0 && offsetof(struct lx_rlimit, rlim_max) == 8",
+    )
+    const RLIMIT_LAYOUT: bool = true;
+    @cvalue(
+        "sizeof(struct lx_rusage) == 144 && offsetof(struct lx_rusage, ru_utime) == 0 && offsetof(struct lx_rusage, ru_stime) == 16 && sizeof(struct lx_timeval) == 16 && offsetof(struct lx_timeval, tv_usec) == 8",
+    )
+    const RUSAGE_LAYOUT: bool = true;
+    @cvalue("sizeof(struct cputime_pair) == 16 && CRED_NGROUPS_MAX == 16 && sizeof(pid_t) == 4")
+    const SIZES: bool = true;
+    const LX_RLIMIT_RSS: u32 = 5;
+    const LX_RLIMIT_NPROC: u32 = 6;
+    const LX_RLIMIT_NOFILE: u32 = 7;
+    const LX_RLIMIT_AS: u32 = 9;
+    const LX_RLIMIT_NICE: u32 = 13;
+    const LX_RLIM_NLIMITS: u32 = 16;
+    const LX_RLIM_INFINITY: u64 = 0xFFFFFFFFFFFFFFFF;
+    const COSMO_RLIMIT_AS: u32 = 0;
+    const COSMO_RLIMIT_MEM: u32 = 1;
+    const COSMO_RLIMIT_NOFILE: u32 = 2;
+    const COSMO_RLIMIT_NPROC: u32 = 3;
+    const COSMO_RLIMIT_NICE: u32 = 5;
+    const COSMO_RLIM_INFINITY: u64 = 0xFFFFFFFFFFFFFFFF;
+    const LX_ARCH_SET_FS: u32 = 0x1002;
+    const LX_ARCH_GET_FS: u32 = 0x1003;
+    const LX_RUSAGE_SELF: i32 = 0;
+    const LX_RUSAGE_CHILDREN: i32 = -1;
+    const LX_RUSAGE_THREAD: i32 = 1;
+    const LX_WNOHANG: u32 = 1;
+    const LX_WUNTRACED: u32 = 2;
+    const LX_WCONTINUED: u32 = 8;
+    const PROCESS_WAIT_NOHANG: u32 = 1;
+    const PROCESS_WAIT_UNTRACED: u32 = 2;
+    const PROCESS_WAIT_CONTINUED: u32 = 4;
+    const PRIV_CRED: u32 = 16;
+    const CRED_NGROUPS_MAX: usize = 16;
+    const EPERM: i32 = 1;
+    const ECHILD: i32 = 10;
+    const EFAULT: i32 = 14;
+    const EINVAL: i32 = 22;
+    const ENOSYS: i32 = 38;
+
+    fn process_current() -> *mut process;
+    fn thread_current() -> *mut thread;
+    fn cred_current() -> *credentials;
+    fn cred_has(c: *credentials, priv: u32) -> bool;
+    fn user_range_ok(addr: u64, len: usize) -> bool;
+    fn copy_from_user(dst: *mut void, userSrc: u64, len: usize) -> i32;
+    fn copy_to_user(userDst: u64, src: *void, len: usize) -> i32;
+    fn process_setpgid(pid: u32, pgid: u32) -> i32;
+    fn process_getpgid(pid: u32, out: *mut u32) -> i32;
+    fn process_setsid(out: *mut u32) -> i32;
+    fn process_getsid(pid: u32, out: *mut u32) -> i32;
+    fn process_setresuid(ruid: i64, euid: i64, suid: i64) -> i32;
+    fn process_setresgid(rgid: i64, egid: i64, sgid: i64) -> i32;
+    fn process_setgroups(groups: *u32, n: u32) -> i32;
+    fn process_getrlimit(resource: u32, value: *mut u64) -> i32;
+    fn process_setrlimit(resource: u32, value: u64) -> i32;
+    fn process_wait_child(pid: i32, flags: u32, pidOut: *mut u32, statusOut: *mut i32, usage: *mut cputime_pair) -> i32;
+    fn process_cpu_times(p: *mut process, mine: *mut cputime_pair, children: *mut cputime_pair);
+    fn thread_cpu_times(mine: *mut cputime_pair);
+    fn arch_set_tls_base(base: usize);
+    fn lx_wait_status(nativeStatus: i32) -> i32;
+}
+
+/// Safety: the dispatcher's: `a` is the call's arguments.
+unsafe fn arg(a: *mut syscall_args, i: usize) -> u64 => Ptr.toBorrow(a as *syscall_args).a[i];
+
+/// The `i`th argument as C's (int) sees it.
+/// Safety: the dispatcher's.
+unsafe fn arg32(a: *mut syscall_args, i: usize) -> i32 => truncate<i32>(arg(a, i));
+
+/// The `i`th argument as C's (unsigned) and (pid_t)(int) see it.
+/// Safety: the dispatcher's.
+unsafe fn argU32(a: *mut syscall_args, i: usize) -> u32 => truncate<u32>(arg(a, i));
+
+/// Safety: in a process's thread.
+unsafe fn current() -> borrow(static) process => Ptr.toBorrow(process_current() as *process);
+
+/// Safety: in a process's thread.
+unsafe fn cred() -> borrow(static) credentials => Ptr.toBorrow(cred_current());
+
+/// Safety: the dispatcher's.
+@export("lx_getpid")
+unsafe fn getpid(a: *mut syscall_args) -> i64 => current().pid as i64;
+
+/// Safety: the dispatcher's.
+@export("lx_getppid")
+unsafe fn getppid(a: *mut syscall_args) -> i64 => current().parent_pid as i64;
+
+/// Safety: the dispatcher's.
+@export("lx_getuid")
+unsafe fn getuid(a: *mut syscall_args) -> i64 => current().cred.ruid as i64;
+
+/// Safety: the dispatcher's.
+@export("lx_getgid")
+unsafe fn getgid(a: *mut syscall_args) -> i64 => current().cred.rgid as i64;
+
+/// Safety: the dispatcher's.
+@export("lx_geteuid")
+unsafe fn geteuid(a: *mut syscall_args) -> i64 => current().cred.euid as i64;
+
+/// Safety: the dispatcher's.
+@export("lx_getegid")
+unsafe fn getegid(a: *mut syscall_args) -> i64 => current().cred.egid as i64;
+
+/// Linux ids are 32-bit with -1 meaning "keep"; the kernel takes int64.
+fn id(v: u64) -> i64 {
+    let low = truncate<u32>(v);
+    return if (low == 0xFFFFFFFF) -1 else low as i64;
+}
+
+// --- rlimits: one value per resource, reported as cur == max ---------------------------------------------------------
+
+/// Whether the kernel bounds the Linux resource `res`; the others read as infinity and accept any value.
+fn bounded(res: u32) -> bool =>
+    res == LX_RLIMIT_AS || res == LX_RLIMIT_RSS || res == LX_RLIMIT_NOFILE || res == LX_RLIMIT_NPROC ||
+        res == LX_RLIMIT_NICE;
+
+/// The native resource for the bounded Linux resource `res`.
+fn nativeResource(res: u32) -> u32 => if (res == LX_RLIMIT_AS) COSMO_RLIMIT_AS
+    else if (res == LX_RLIMIT_RSS) COSMO_RLIMIT_MEM
+    else if (res == LX_RLIMIT_NOFILE) COSMO_RLIMIT_NOFILE
+    else if (res == LX_RLIMIT_NPROC) COSMO_RLIMIT_NPROC
+    else COSMO_RLIMIT_NICE;
+
+/// Safety: in a process's thread.
+unsafe fn rlimitGet(res: u32, out: u64) -> i64 {
+    if (res >= LX_RLIM_NLIMITS) {
+        return -EINVAL as i64;
+    }
+    var r = [LX_RLIM_INFINITY, LX_RLIM_INFINITY]; // a struct lx_rlimit: rlim_cur, rlim_max
+    if (bounded(res)) {
+        var v: u64 = 0;
+        let rc = process_getrlimit(nativeResource(res), borrow mut v as *mut u64);
+        if (rc != 0) {
+            return rc as i64;
+        }
+        let shown = if (v == COSMO_RLIM_INFINITY) LX_RLIM_INFINITY else v;
+        r[0] = shown;
+        r[1] = shown;
+    }
+    return copy_to_user(out, borrow r as *[u64; 2] as *void, 16) as i64;
+}
+
+/// Safety: in a process's thread.
+unsafe fn rlimitSet(res: u32, from: u64) -> i64 {
+    if (res >= LX_RLIM_NLIMITS) {
+        return -EINVAL as i64;
+    }
+    var r = [0u64; 2]; // a struct lx_rlimit: rlim_cur, rlim_max
+    if (copy_from_user(borrow mut r as *mut [u64; 2] as *mut void, from, 16) != 0) {
+        return -EFAULT as i64;
+    }
+    if (r[0] > r[1]) {
+        return -EINVAL as i64;
+    }
+    if (!bounded(res)) {
+        return 0; // not enforced here: accepted and ignored
+    }
+    // One value: the maximum is what binds later raises, so it is the value stored; a maximum above the current limit
+    // needs privilege.
+    return process_setrlimit(nativeResource(res), if (r[1] == LX_RLIM_INFINITY) COSMO_RLIM_INFINITY else r[1]) as i64;
+}
+
+/// Safety: the dispatcher's.
+@export("lx_getrlimit")
+unsafe fn getrlimit(a: *mut syscall_args) -> i64 => rlimitGet(argU32(a, 0), arg(a, 1));
+
+/// Safety: the dispatcher's.
+@export("lx_setrlimit")
+unsafe fn setrlimit(a: *mut syscall_args) -> i64 => rlimitSet(argU32(a, 0), arg(a, 1));
+
+/// Safety: the dispatcher's.
+@export("lx_prlimit64")
+unsafe fn prlimit64(a: *mut syscall_args) -> i64 {
+    let pid = argU32(a, 0);
+    if (pid != 0 && pid != current().pid) {
+        return -EPERM as i64; // other processes' limits are theirs
+    }
+    if (arg(a, 3) != 0) {
+        let rc = rlimitGet(argU32(a, 1), arg(a, 3));
+        if (rc != 0) {
+            return rc;
+        }
+    }
+    if (arg(a, 2) != 0) {
+        return rlimitSet(argU32(a, 1), arg(a, 2));
+    }
+    return 0;
+}
+
+// --- credentials -----------------------------------------------------------------------------------------------------
+
+/// Safety: the dispatcher's.
+@export("lx_setresuid")
+unsafe fn setresuid(a: *mut syscall_args) -> i64 =>
+    process_setresuid(id(arg(a, 0)), id(arg(a, 1)), id(arg(a, 2))) as i64;
+
+/// Safety: the dispatcher's.
+@export("lx_setresgid")
+unsafe fn setresgid(a: *mut syscall_args) -> i64 =>
+    process_setresgid(id(arg(a, 0)), id(arg(a, 1)), id(arg(a, 2))) as i64;
+
+/// setuid(u): root sets all three; anyone else sets the effective id to a real or saved one. setgid likewise.
+/// Safety: the dispatcher's.
+@export("lx_setuid")
+unsafe fn setuid(a: *mut syscall_args) -> i64 {
+    let u = id(arg(a, 0));
+    if (cred_has(cred_current(), PRIV_CRED)) {
+        return process_setresuid(u, u, u) as i64;
+    }
+    return process_setresuid(-1, u, -1) as i64;
+}
+
+/// Safety: the dispatcher's.
+@export("lx_setgid")
+unsafe fn setgid(a: *mut syscall_args) -> i64 {
+    let g = id(arg(a, 0));
+    if (cred_has(cred_current(), PRIV_CRED)) {
+        return process_setresgid(g, g, g) as i64;
+    }
+    return process_setresgid(-1, g, -1) as i64;
+}
+
+/// The saved id setreuid(r, e) and setregid(r, e) set: it follows the effective one whenever the real id is set or the
+/// effective id becomes something other than the old real id (POSIX); -1 keeps it.
+fn savedId(r: i64, e: i64, oldReal: u32, oldEffective: u32) -> i64 {
+    if (r != -1 || (e != -1 && truncate<u32>(e) != oldReal)) {
+        return if (e != -1) e else oldEffective as i64;
+    }
+    return -1;
+}
+
+/// Safety: the dispatcher's.
+@export("lx_setreuid")
+unsafe fn setreuid(a: *mut syscall_args) -> i64 {
+    let c = cred();
+    let r = id(arg(a, 0));
+    let e = id(arg(a, 1));
+    return process_setresuid(r, e, savedId(r, e, c.ruid, c.euid)) as i64;
+}
+
+/// Safety: the dispatcher's.
+@export("lx_setregid")
+unsafe fn setregid(a: *mut syscall_args) -> i64 {
+    let c = cred();
+    let r = id(arg(a, 0));
+    let e = id(arg(a, 1));
+    return process_setresgid(r, e, savedId(r, e, c.rgid, c.egid)) as i64;
+}
+
+/// Three ids to the call's three pointers.
+/// Safety: the dispatcher's.
+unsafe fn getres3(a: *mut syscall_args, r: u32, e: u32, s: u32) -> i64 {
+    var ids = [r, e, s];
+    let p = borrow ids as *[u32; 3] as *u32;
+    if (copy_to_user(arg(a, 0), p as *void, 4) != 0 || copy_to_user(arg(a, 1), p.add(1) as *void, 4) != 0 ||
+        copy_to_user(arg(a, 2), p.add(2) as *void, 4) != 0) {
+        return -EFAULT as i64;
+    }
+    return 0;
+}
+
+/// Safety: the dispatcher's.
+@export("lx_getresuid")
+unsafe fn getresuid(a: *mut syscall_args) -> i64 {
+    let c = cred();
+    return getres3(a, c.ruid, c.euid, c.suid);
+}
+
+/// Safety: the dispatcher's.
+@export("lx_getresgid")
+unsafe fn getresgid(a: *mut syscall_args) -> i64 {
+    let c = cred();
+    return getres3(a, c.rgid, c.egid, c.sgid);
+}
+
+/// Safety: the dispatcher's.
+@export("lx_getgroups")
+unsafe fn getgroups(a: *mut syscall_args) -> i64 {
+    let c = cred();
+    let n = arg32(a, 0);
+    if (n < 0) {
+        return -EINVAL as i64;
+    }
+    if (n == 0) {
+        return c.ngroups as i64;
+    }
+    if (truncate<u32>(n) < c.ngroups) {
+        return -EINVAL as i64;
+    }
+    let count = c.ngroups as usize;
+    if (count > CRED_NGROUPS_MAX) {
+        return -EINVAL as i64; // not reached: a credential holds at most CRED_NGROUPS_MAX groups
+    }
+    if (count != 0 && copy_to_user(arg(a, 1), borrow c.groups as *[u32; 16] as *void, count * 4) != 0) {
+        return -EFAULT as i64;
+    }
+    return c.ngroups as i64;
+}
+
+/// Safety: the dispatcher's.
+@export("lx_setgroups")
+unsafe fn setgroups(a: *mut syscall_args) -> i64 {
+    let n = truncate<usize>(arg(a, 0));
+    if (n > CRED_NGROUPS_MAX) {
+        return -EINVAL as i64;
+    }
+    var groups = [0u32; 16];
+    if (n != 0 && copy_from_user(borrow mut groups as *mut [u32; 16] as *mut void, arg(a, 1), n * 4) != 0) {
+        return -EFAULT as i64;
+    }
+    return process_setgroups(borrow groups as *[u32; 16] as *u32, truncate<u32>(n)) as i64;
+}
+
+/// A call that succeeds and does nothing.
+/// Safety: the dispatcher's.
+@export("lx_zero")
+unsafe fn zero(a: *mut syscall_args) -> i64 => 0;
+
+/// A call this kernel does not build.
+/// Safety: the dispatcher's.
+@export("lx_nosys")
+unsafe fn nosys(a: *mut syscall_args) -> i64 => -ENOSYS as i64;
+
+// --- sessions and process groups (docs/kernel/process/design.md) -----------------------------------------------------
+// These were stubs -- setpgid did nothing, getpgrp and setsid answered the pid -- for as long as the kernel had no
+// groups. It has them now, and a rule enforced at one personality's door and faked at the other's is not enforced at
+// all, so these are the same calls the native personality makes.
+
+/// Safety: in a process's thread.
+unsafe fn pgidOf(pid: u32) -> i64 {
+    var pgid: u32 = 0;
+    let rc = process_getpgid(pid, borrow mut pgid as *mut u32);
+    return if (rc != 0) rc as i64 else pgid as i64;
+}
+
+/// x86-64's table only: AArch64 has no getpgrp.
+/// Safety: the dispatcher's.
+@export("lx_getpgrp")
+unsafe fn getpgrp(a: *mut syscall_args) -> i64 => pgidOf(0);
+
+/// Safety: the dispatcher's.
+@export("lx_setpgid")
+unsafe fn setpgid(a: *mut syscall_args) -> i64 => process_setpgid(argU32(a, 0), argU32(a, 1)) as i64;
+
+/// Safety: the dispatcher's.
+@export("lx_getpgid")
+unsafe fn getpgid(a: *mut syscall_args) -> i64 => pgidOf(argU32(a, 0));
+
+/// Safety: the dispatcher's.
+@export("lx_setsid")
+unsafe fn setsid(a: *mut syscall_args) -> i64 {
+    var sid: u32 = 0;
+    let rc = process_setsid(borrow mut sid as *mut u32);
+    return if (rc != 0) rc as i64 else sid as i64;
+}
+
+/// Safety: the dispatcher's.
+@export("lx_getsid")
+unsafe fn getsid(a: *mut syscall_args) -> i64 {
+    var sid: u32 = 0;
+    let rc = process_getsid(argU32(a, 0), borrow mut sid as *mut u32);
+    return if (rc != 0) rc as i64 else sid as i64;
+}
+
+/// x86-64's table only: the thread pointer is FS's base there.
+/// Safety: the dispatcher's.
+@export("lx_arch_prctl")
+unsafe fn archPrctl(a: *mut syscall_args) -> i64 {
+    let code = argU32(a, 0);
+    let addr = arg(a, 1);
+    if (code == LX_ARCH_SET_FS) {
+        if (addr != 0 && !user_range_ok(addr, 8)) {
+            return -EPERM as i64;
+        }
+        arch_set_tls_base(truncate<usize>(addr));
+        return 0;
+    }
+    if (code == LX_ARCH_GET_FS) {
+        var base: u64 = Ptr.toBorrow(thread_current() as *thread).tls_base as u64;
+        return if (copy_to_user(addr, borrow base as *u64 as *void, 8) != 0) -EFAULT as i64 else 0;
+    }
+    return -EINVAL as i64; // LX_ARCH_SET_GS, LX_ARCH_GET_GS and anything else
+}
+
+/// Safety: the dispatcher's.
+@export("lx_wait4")
+unsafe fn wait4(a: *mut syscall_args) -> i64 {
+    let pid = arg32(a, 0);
+    let options = argU32(a, 2);
+    // Waiting for a process group -- pid 0 or a negative pgid -- is not built. Process groups themselves exist (the
+    // signals unit), so this is a gap in wait4 rather than in the kernel; it is named in
+    // docs/compat/linux/invariants.md and in the job-control report.
+    if (pid == 0 || pid < -1) {
+        return -ECHILD as i64;
+    }
+    var got: u32 = 0;
+    var status: i32 = 0;
+    var wf: u32 = 0;
+    if ((options & LX_WNOHANG) != 0) {
+        wf = wf | PROCESS_WAIT_NOHANG;
+    }
+    if ((options & LX_WUNTRACED) != 0) {
+        wf = wf | PROCESS_WAIT_UNTRACED;
+    }
+    if ((options & LX_WCONTINUED) != 0) {
+        wf = wf | PROCESS_WAIT_CONTINUED;
+    }
+    var usage = [0u64; 2]; // a struct cputime_pair: a stopped or continued child reports none
+    let rc = process_wait_child(
+        pid,
+        wf,
+        borrow mut got as *mut u32,
+        borrow mut status as *mut i32,
+        borrow mut usage as *mut [u64; 2] as *mut cputime_pair,
+    );
+    if (rc != 0) {
+        return rc as i64;
+    }
+    if (got != 0 && arg(a, 1) != 0) {
+        var w: i32 = lx_wait_status(status);
+        if (copy_to_user(arg(a, 1), borrow w as *i32 as *void, 4) != 0) {
+            return -EFAULT as i64;
+        }
+    }
+    if (got != 0 && arg(a, 3) != 0) {
+        return if (putRusage(arg(a, 3), usage) != 0) -EFAULT as i64 else got as i64;
+    }
+    return got as i64;
+}
+
+/// A user/system pair (a struct cputime_pair's two words) written to user memory as a struct lx_rusage: the times
+/// truncated to the microsecond, as Linux truncates them, and the rest 0 (not kept). Not 0 when the copy faults.
+///
+/// Safety: copy_to_user checks the user address.
+unsafe fn putRusage(user: u64, usage: [u64; 2]) -> i32 {
+    var ru = [0u64; 18];
+    ru[0] = usage[0] / 1000000000;
+    ru[1] = usage[0] % 1000000000 / 1000;
+    ru[2] = usage[1] / 1000000000;
+    ru[3] = usage[1] % 1000000000 / 1000;
+    return copy_to_user(user, borrow ru as *[u64; 18] as *void, 144);
+}
+
+/// getrusage: the caller's process (every thread it has had), its waited-for children (with theirs), or the calling
+/// thread; only the two times are kept.
+///
+/// Safety: the dispatcher's.
+@export("lx_getrusage")
+unsafe fn getrusage(a: *mut syscall_args) -> i64 {
+    let who = arg32(a, 0);
+    var mine = [0u64; 2];
+    var children = [0u64; 2];
+    if (who == LX_RUSAGE_SELF || who == LX_RUSAGE_CHILDREN) {
+        process_cpu_times(
+            process_current(),
+            borrow mut mine as *mut [u64; 2] as *mut cputime_pair,
+            borrow mut children as *mut [u64; 2] as *mut cputime_pair,
+        );
+        if (who == LX_RUSAGE_CHILDREN) {
+            mine = children;
+        }
+    } else if (who == LX_RUSAGE_THREAD) {
+        thread_cpu_times(borrow mut mine as *mut [u64; 2] as *mut cputime_pair);
+    } else {
+        return -EINVAL as i64;
+    }
+    return if (putRusage(arg(a, 1), mine) != 0) -EFAULT as i64 else 0;
+}

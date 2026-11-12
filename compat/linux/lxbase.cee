@@ -1,0 +1,179 @@
+// lxbase.cee - What the Linux personality's path and descriptor calls start from (docs/compat/linux/design.md), in
+// CeeSafe (roadmap 1.3 K1): a path from user memory, the directory an *at call resolves from, and the file a
+// descriptor names. linux_internal.h declares them for the personality's other files.
+
+@header(
+    "kernel/errno.h", "kernel/handle.h", "kernel/object.h", "kernel/process.h", "kernel/string.h", "kernel/uaccess.h",
+    "kernel/vfs.h", "linux_abi.h", "linux_internal.h",
+)
+extern "C" {
+    struct kobject;
+    struct handle_table;
+    struct process {
+        handles: handle_table;
+    }
+    struct vnode {
+        @cname("type")
+        kind: u32;
+    }
+    struct file {
+        vn: *mut vnode;
+        dir_path: *mut CChar;
+    }
+
+    @cvalue("VFS_PATH_MAX == 1024 && sizeof(enum vnode_type) == sizeof(uint32_t)")
+    const SIZES: bool = true;
+    const VFS_PATH_MAX: usize = 1024;
+    const VNODE_DIR: u32 = 2;
+    const LX_AT_FDCWD: i32 = -100;
+    const HANDLE_RIGHT_READ: u32 = 1;
+    const HANDLE_RIGHT_WRITE: u32 = 2;
+    const HANDLE_RIGHT_MANAGE: u32 = 16;
+    const EPERM: i32 = 1;
+    const ENOENT: i32 = 2;
+    const EBADF: i32 = 9;
+    const EACCES: i32 = 13;
+    const ENOTDIR: i32 = 20;
+
+    fn process_current() -> *mut process;
+    fn process_cwd_get() -> *mut vnode;
+    fn process_cwd_snapshot(path: *mut CChar, len: usize) -> *mut vnode;
+    fn strncpy_from_user(dst: *mut CChar, userSrc: u64, max: usize) -> i32;
+    fn strlcpy(dst: *mut CChar, src: *CChar, size: usize) -> usize;
+    fn handle_get(t: *mut handle_table, h: i32, rightsOut: *mut u32) -> *mut kobject;
+    fn handle_lookup(t: *mut handle_table, h: i32, rightsNeeded: u32) -> *mut kobject;
+    fn handle_lookup_rights(t: *mut handle_table, h: i32, rightsNeeded: u32, missingRights: *mut bool) -> *mut kobject;
+    fn kobject_put(obj: *mut kobject);
+    fn file_from_kobject(obj: *mut kobject) -> *mut file;
+    fn file_put(f: *mut file);
+    fn file_dir_base_ok(f: *file) -> bool;
+    fn vnode_get(vn: *mut vnode);
+}
+
+/// Safety: in a process's thread.
+unsafe fn handles() -> *mut handle_table {
+    let p = Ptr.toBorrowMut(process_current());
+    return borrow mut p.handles as *mut handle_table;
+}
+
+/// A path from user memory into `buf`; an empty one is -ENOENT.
+///
+/// Safety: `buf` holds VFS_PATH_MAX bytes.
+@export("lx_get_path")
+unsafe fn getPath(uptr: u64, buf: *mut CChar) -> i32 {
+    let rc = strncpy_from_user(buf, uptr, VFS_PATH_MAX);
+    if (rc < 0) {
+        return rc;
+    }
+    return if ((buf as *u8).read() == 0) -ENOENT else 0;
+}
+
+/// The directory a relative path in an *at call resolves from, referenced (docs/audit/next-subsystem-dirfd.md,
+/// invariant P31). AT_FDCWD, or an absolute path -- which ignores its base -- gives the working directory; any other
+/// descriptor must be an open directory: -EBADF if no handle or not the right the call needs, -ENOTDIR if not a
+/// directory. The right is the handle's capability, not the directory's permission bits: READ to look a name up,
+/// WRITE to add, remove or rename an entry -- so a directory handle delegated read-only stays read-only (found in
+/// review: the first build demanded none). A directory opened at either door carries both, which is what Linux's
+/// open-a-directory-read-only then unlinkat relies on. The directory is referenced before the handle's reference
+/// goes, so a sibling thread closing the descriptor mid-call cannot free the base under the walk (V35). With
+/// `basepath`, also the base's name, from the same snapshot: the cwd's path, or the directory file's recorded one
+/// (empty if it has none), for a caller that must record a new name. With `have`, the base's own rights, which bound
+/// what a handle derived through it may carry (review: a READ-only base must not yield a child directory handle with
+/// WRITE).
+///
+/// This replaces a check that answered every real descriptor -ENOSYS on the premise that the VFS could not resolve
+/// from one. It always could: every entry point takes a start.
+///
+/// Safety: in a process's thread; `path` is terminated, `out` is writable, `basepath` is null or holds `n` bytes, and
+/// `have` is null or writable.
+@export("lx_at_base")
+unsafe fn atBase(
+    dirfd: i64,
+    path: *CChar,
+    rights: u32,
+    out: *mut *mut vnode,
+    basepath: *mut CChar,
+    n: usize,
+    have: *mut u32,
+) -> i32 {
+    if (truncate<i32>(dirfd) == LX_AT_FDCWD || (path as *u8).read() == 47) {
+        out.write(if (!basepath.isNull()) process_cwd_snapshot(basepath, n) else process_cwd_get());
+        if (!have.isNull()) {
+            have.write(HANDLE_RIGHT_READ | HANDLE_RIGHT_WRITE); // the process's own names
+        }
+        return 0;
+    }
+    var held: u32 = 0;
+    let obj = handle_get(handles(), truncate<i32>(dirfd), borrow mut held as *mut u32);
+    if (obj.isNull()) {
+        return -EBADF;
+    }
+    if ((held & rights) != rights) {
+        kobject_put(obj);
+        return -EBADF;
+    }
+    if (!have.isNull()) {
+        have.write(held);
+    }
+    let fp = file_from_kobject(obj);
+    if (fp.isNull()) {
+        kobject_put(obj);
+        return -ENOTDIR; // a socket or a pipe end is open and is not a directory
+    }
+    let f = Ptr.toBorrow(fp as *file);
+    if (Ptr.toBorrow(f.vn as *vnode).kind != VNODE_DIR) {
+        file_put(fp);
+        return -ENOTDIR;
+    }
+    // Opened under another root -- before a chroot, or by a process with a wider one: not a way out of this process's
+    // root (P39).
+    if (!file_dir_base_ok(fp as *file)) {
+        file_put(fp);
+        return -EACCES;
+    }
+    vnode_get(f.vn);
+    out.write(f.vn);
+    if (!basepath.isNull()) {
+        strlcpy(basepath, if (!f.dir_path.isNull()) f.dir_path as *CChar else "\0".ptr as *CChar, n);
+    }
+    file_put(fp);
+    return 0;
+}
+
+/// The file descriptor `h` names through a handle with `rights`, referenced; null if there is none or it is not a
+/// file.
+///
+/// Safety: in a process's thread.
+@export("lx_file_of")
+unsafe fn fileOf(h: i32, rights: u32) -> *mut file {
+    let obj = handle_lookup(handles(), h, rights);
+    if (obj.isNull()) {
+        return 0 as *mut file;
+    }
+    let f = file_from_kobject(obj);
+    if (f.isNull()) {
+        kobject_put(obj);
+    }
+    return f;
+}
+
+/// A file whose metadata the caller changes through a descriptor (fchmod, fchown, fchownat's AT_EMPTY_PATH): the
+/// handle needs MANAGE -- a change of how the object behaves, not of what it holds -- so a handle delegated without it
+/// cannot change the mode or the owner (found in review). Every Linux open grants MANAGE (HANDLE_RIGHT_OWNER). `err`
+/// is -EPERM for a handle without the right, as sys_setnonblock, else -EBADF.
+///
+/// Safety: in a process's thread; `err` is writable.
+@export("lx_file_of_manage")
+unsafe fn fileOfManage(h: i32, err: *mut i32) -> *mut file {
+    var noRights = false;
+    let obj = handle_lookup_rights(handles(), h, HANDLE_RIGHT_MANAGE, borrow mut noRights as *mut bool);
+    err.write(if (noRights) -EPERM else -EBADF);
+    if (obj.isNull()) {
+        return 0 as *mut file;
+    }
+    let f = file_from_kobject(obj);
+    if (f.isNull()) {
+        kobject_put(obj);
+    }
+    return f;
+}

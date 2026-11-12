@@ -26,8 +26,8 @@ as gaps, not attempted.
    kernel/arch/x86_64/syscall_entry.S  ─►  kernel/syscall/syscall.cee: pers->table[nr]
         │                                   (the same entry and dispatcher as the native personality)
         ▼
-   compat/linux/syscalls.c        personality_linux: 87 translated Linux calls, each translating arguments,
-   compat/linux/*.c               structures (stat, dirent64, utsname, timespec, iovec, sockaddr_in),
+   compat/linux/syscalls.c        personality_linux and its table: 87 translated Linux calls, each translating arguments,
+   compat/linux/lx*.cee           structures (stat, dirent64, utsname, timespec, iovec, sockaddr_in),
         │                         flags (O_*, MAP_*, AT_*, futex ops) and results (wait status, errno)
         ▼
    native kernel services         vfs_* / file_* (files), ksock_* (sockets), process_* (processes),
@@ -126,7 +126,7 @@ what Linux is.
 | The CosmoOS ELF note (`.note.cosmo`) | `libc/src/crt0.S`, `userland/user.ld`, `kernel/process/elfparse.cee` | personality selection |
 | Linux ABI definitions (numbers, structures, flags) | `compat/linux/linux_abi.h` | the translation only |
 | `futex_wait`/`futex_wake` | `kernel/include/kernel/futex.h` | the Linux personality (native programs have no futex call yet) |
-| `arch_prctl` → `thread->tls_base` → `MSR_FS_BASE` | `compat/linux/syscalls.c`, `kernel/arch/x86_64/context.c` | Linux libcs |
+| `arch_prctl` → `thread->tls_base` → `MSR_FS_BASE` | `compat/linux/lxident.cee`, `kernel/arch/x86_64/context.c` | Linux libcs |
 | `tests/linux/lxtest`, `lxhello`, `hello_musl` | `tests/linux/`, `/boot/tests/linux/` | `/etc/rc.test`, CI |
 
 Tests (`testing.md`): `tests/linux/lxtest.c` is a freestanding program
