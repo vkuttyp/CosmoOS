@@ -122,7 +122,8 @@ or issues a native system call; files go through `vfs_*`/`file_*`,
 sockets through `ksock_*`, processes through `process_*`, memory through
 `vm_user_*`, and the three shared bodies through
 `syscall_handle_read/write/stat`. Check: `grep -n "personality_native\|
-sys_" compat/linux/syscalls.c` finds nothing. Gap: review only.
+sys_" compat/linux/syscalls.c compat/linux/lx*.cee` finds only three
+comments that name a native call. Gap: review only.
 
 **L9. The heap stays where the program expects it.** `brk_start` is
 `page_align_up(info->hi)` (the page after the highest loaded segment)

@@ -208,10 +208,15 @@ moves them later.
 Progress: the first PR (#512, 2026-11-11) was those seven commits. The
 second moves the native table, the always-allowed list and the native
 personality's record to `kernel/syscall/native.cee` (ceesafec 0.37.0),
-and `native.c` is gone. Left: `compat/linux/syscalls.c` (4,223 lines)
-with its table and record.
+and `native.c` is gone. The third (2026-11-12) moves the rest of
+`compat/linux/syscalls.c` (4,223 lines) to sixteen CeeSafe files: what is
+left is the Linux table and `personality_linux` (311 lines), the one
+table still in C, since the native one turned out to be writable in
+CeeSafe. Its numbers differ by architecture and some entries exist on
+one only, which `native.cee`'s table by index does not yet express; C2
+moves it.
 
-- [ ] **Acceptance:** 2.0's SA8 acceptance with that one exception: no C
+- [x] **Acceptance:** 2.0's SA8 acceptance with that one exception: no C
   left in `compat/` or `kernel/syscall/` but the two tables and the
   personality records that hold them. SA8's box is ticked with the
   exception written beside it.

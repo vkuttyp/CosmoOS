@@ -3703,3 +3703,18 @@ See the [history index](README.md).
     the always-allowed list and `personality_native`, all in read-only
     data as they were in C.
   - Report: `docs/audit/2026-11-12-k1-native-table-report.md`.
+- **K1, third PR: the Linux personality's calls in CeeSafe; SA8 done but
+  for one table (2026-11-12, roadmap 1.3).**
+  - `compat/linux/syscalls.c` (4,223 lines) is left as the Linux call
+    table and `personality_linux` (311 lines). Its calls, the hooks the
+    record names and the helpers they share are sixteen CeeSafe files
+    (6,557 lines): `lxident`, `lxtime`, `lxproc`, `lxsys`, `lxpoll`,
+    `lxmount`, `lxbase`, `lxmem`, `lxattr`, `lxname`, `lxtty`, `lxio`,
+    `lxstat`, `lxfd`, `lxdir` and `lxhooks`.
+  - The table names `lx_unknown` for a number with no call by a range
+    initialiser: the copy made at the first Linux process and its lock
+    are gone, and the table the record names is read-only data.
+  - No C is left in `compat/` or `kernel/syscall/` but that table and
+    record; roadmap 2.0's SA8 and 1.3's K1 are ticked with the exception
+    written beside them.
+  - Report: `docs/audit/2026-11-12-k1-linux-calls-report.md`.
