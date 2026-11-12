@@ -301,6 +301,8 @@ PORTS = [
      "Linux's path and descriptor helpers: lx_get_path, lx_at_base, lx_file_of (linux_internal.h)", None, False),
     ("compat/linux/lxmem.cee", "compat/linux/lxmem.c",
      "Linux's memory calls: brk, mmap, mprotect, mremap and System V shm (linux_internal.h)", None, True),
+    ("compat/linux/lxattr.cee", "compat/linux/lxattr.c",
+     "Linux's chmod, chown, chroot and utimensat families (linux_internal.h)", None, False),
     ("compat/linux/lxtime.cee", "compat/linux/lxtime.c",
      "Linux's calls on the clocks, sleeping, nice values and rebooting (linux_internal.h)", None, False),
     ("compat/linux/lxident.cee", "compat/linux/lxident.c",

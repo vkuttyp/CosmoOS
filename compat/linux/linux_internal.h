@@ -168,6 +168,18 @@ int64_t lx_shmat(struct syscall_args *a);
 int64_t lx_shmdt(struct syscall_args *a);
 int64_t lx_shmctl(struct syscall_args *a);
 
+/* lxattr.cee: a file's mode, owner and times, and chroot. */
+int64_t lx_chmod(struct syscall_args *a);
+int64_t lx_fchmodat(struct syscall_args *a);
+int64_t lx_fchmodat2(struct syscall_args *a);
+int64_t lx_fchmod(struct syscall_args *a);
+int64_t lx_chown(struct syscall_args *a);
+int64_t lx_lchown(struct syscall_args *a);
+int64_t lx_fchownat(struct syscall_args *a);
+int64_t lx_fchown(struct syscall_args *a);
+int64_t lx_chroot(struct syscall_args *a);
+int64_t lx_utimensat(struct syscall_args *a);
+
 /* lxsock.cee: the socket calls. lx_accept is accept4 too (its fourth
  * argument, the flags, is 0 from accept). */
 int64_t lx_socket(struct syscall_args *a);
