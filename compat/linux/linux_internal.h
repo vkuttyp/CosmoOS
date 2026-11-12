@@ -227,6 +227,22 @@ int64_t lx_readlinkat(struct syscall_args *a);
 int64_t lx_symlink(struct syscall_args *a);
 int64_t lx_symlinkat(struct syscall_args *a);
 
+/* lxfd.cee: descriptor objects. */
+int64_t lx_eventfd(struct syscall_args *a);
+int64_t lx_eventfd2(struct syscall_args *a);
+int64_t lx_signalfd(struct syscall_args *a);
+int64_t lx_signalfd4(struct syscall_args *a);
+int64_t lx_timerfd_create(struct syscall_args *a);
+int64_t lx_timerfd_settime(struct syscall_args *a);
+int64_t lx_timerfd_gettime(struct syscall_args *a);
+int64_t lx_memfd_create(struct syscall_args *a);
+int64_t lx_ftruncate(struct syscall_args *a);
+int64_t lx_epoll_create(struct syscall_args *a);
+int64_t lx_epoll_create1(struct syscall_args *a);
+int64_t lx_epoll_ctl(struct syscall_args *a);
+int64_t lx_epoll_wait(struct syscall_args *a);
+int64_t lx_epoll_pwait(struct syscall_args *a);
+
 /* lxsock.cee: the socket calls. lx_accept is accept4 too (its fourth
  * argument, the flags, is 0 from accept). */
 int64_t lx_socket(struct syscall_args *a);
