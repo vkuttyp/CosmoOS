@@ -5111,6 +5111,21 @@ CPUs 1-3 were halted at `0xeccf9e1`. By the test above, this is the
 second case, the firmware's own state, not the device or QEMU. Still not
 attributed; what the loop is waiting for is the next question (OVMF's
 symbols for that address).
+**Seventh sighting, 2026-11-12:** CI, PR #513 at `c3dc88cb` (a
+documentation commit; run 43130766013, job 130894202257, `upgrade test
+(x86_64)`), `test-be`'s `be-intent-repaired` boot: up to `paging: root
+at 0xc34f000 (user root 0x0), 9/14 pool pages used`, then nothing
+(`no prompt after the first prompt before the deadline (301 s from
+launch; the last line at 1.8 s)`). The same job's earlier tests and
+`test-be`'s stages before it passed. The files agree with the sixth
+sighting's (artifact `test-upgrade-x86_64`): the trace has 32 requests
+and 29 pushes, the last push 4 bytes and the last request a 0-byte one;
+the queue is idle (`inuse` 0, `last_avail_idx` = `used_idx` = 29); CPU 0
+was running at `0xeceb370` at both samples, in the loop whose
+instructions include `0xeceb33a: movl 0x4bc(%rip), %ecx`, and CPUs 1-3
+were halted at `0xeccf9e1` -- the sixth sighting's addresses. The
+firmware's own state again, on a kernel and archive of yet another size.
+Still not attributed.
 
 ## `test-be`'s `be-space` boot on an encrypted root out of time, 2026-10-24
 
