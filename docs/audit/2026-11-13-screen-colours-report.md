@@ -54,8 +54,9 @@ GiB), 2026-11-13, both architectures one after the other on the tree of this PR'
 Also, on the same machine:
 
 - `make BUILD=release test-display`: x86-64 PASS in 34.9 s, AArch64 PASS in 22.5 s; on both, `colour: ESC [ 1 ; 31 m
-  drew 'RED' in (255, 85, 85) and ESC [ 0 m the next word in (208, 208, 208)`. On main the same row reads
-  `colour-check [1;31mRED[0m grey`: the console dropped the ESC and drew the rest, so the check fails there.
+  drew 'RED' in (255, 85, 85) and ESC [ 0 m the next word in (208, 208, 208)`. Main's `putc` drops a control
+  byte and draws the rest, so on main that row would read `colour-check [1;31mRED[0m grey` and the check would
+  fail on the missing `colour-check RED grey` (from the code; the check was not run against main).
 - The debug boots' self-tests: `fb-escapes`, `fb-console`, `console-log-floor`, `fb-bench` and `fb-switch` ok on both
   architectures.
 - `python3 scripts/cee-share.py --gate origin/main`: no tree has more C to convert than origin/main.
