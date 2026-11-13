@@ -80,6 +80,10 @@ Also, on the developer's Mac at a one-minute load average under 16, release buil
 | `make test-upgrade` | PASS in 167.7 s | PASS in 135.8 s |
 | `make test-display` | PASS in 24.5 s | PASS in 31.1 s |
 
+After the rebase onto main at `727b4bba` (#520 with its review fixes: blank cells take the colours being written),
+on the same Mac, release builds: `make test-install` x86-64 PASS in 61.7 s, AArch64 PASS in 56.3 s; `make
+test-display` x86-64 PASS in 32.9 s, AArch64 PASS in 22.2 s. The matrix was not run again on the rebased tree.
+
 The welcome script ran on the owner's Parallels VM (v1.1.0, before #520): the logo and facts lined up, the escapes
 drawn as text by that kernel, as expected.
 
