@@ -59,7 +59,7 @@ validates the text. The kernel's `bootinfo_init` checks the two fields
 (size within the limit, the range inside the direct map, the NUL where
 the size says) and copies the text into kernel memory (BT14).
 
-Syntax (`kernel/core/cmdline.c`): tokens separated by white space, each
+Syntax (`kernel/core/cmdline.cee`): tokens separated by white space, each
 `key=value` or a bare `key`; `#` starts a comment to the end of the line;
 the first token with a key wins; unknown keys are ignored. The kernel
 logs the line once (`cmdline: ...`, line breaks shown as spaces) and

@@ -211,6 +211,45 @@ Not changed: the loader's own lines, which are on the screen until the
 kernel clears it (backlog BOOT-10), and what init and the services
 print, which the screen shows as they print it (backlog USR-9).
 
+## Colours and escapes
+
+The framebuffer console obeys the escape sequences a terminal program
+writes for colour and for the screen's layout, as the Linux console
+does, so a program can colour its output and clear the screen
+(`clear`, the welcome screen). Each cell keeps an attribute byte beside
+its character (`fbcon.attr`, in the same allocation as `fbcon.text`):
+a foreground and a background, each one of sixteen colours, and a
+scroll, a repaint and a surface switch carry it with the character.
+
+What a byte means is decided in CeeSafe, `fbcon_esc_feed` in
+`kernel/core/fbrules.cee`, from the bytes before it (`struct
+fbcon_esc`, one per console); `fbcon.c` does what it says:
+
+| Sequence | Effect |
+|---|---|
+| `ESC [ … m` | colours: 0 resets, 1 makes the eight colours bright, 22 undoes it, 30-37 and 90-97 the foreground, 40-47 and 100-107 the background, 39 and 49 the defaults; others ignored |
+| `ESC [ 2 J`, `ESC [ 3 J` | clear the screen, the cursor to the top left |
+| `ESC c` | clear and reset the colours |
+| `ESC [ r ; c H`, `ESC [ r ; c f` | the cursor to row r, column c (1-based, kept on the screen) |
+| `ESC [ n A` to `D` | the cursor up, down, right, left by n (1 when absent), kept on the screen |
+| `ESC [ K` | blank from the cursor to the end of its row |
+
+Any other sequence, `ESC [ ? 25 l` among them, is read to its final byte
+and draws nothing; before this the console dropped the ESC and drew the
+rest (`[?25l`). A byte that cannot be part of a sequence ends it and is
+drawn or obeyed as itself. The colours are the PC's (`fbcon_palette`),
+but for light grey, which is the 0xd0 grey the console has always drawn
+in; the default is light grey on black (attribute 0x07).
+
+The serial port is not a screen: what a program writes reaches it as
+written, escapes and all, for the terminal at the other end. The log
+ring holds no escapes the kernel wrote; a program's escapes go to the
+console's sinks, not the ring.
+
+The unit moved `kernel/core/cmdline.c` to CeeSafe (`cmdline.cee`, the
+same parser, held to `tests/host/test_gpt.c`'s cases) so that the
+kernel's C does not grow (CI's `cee-share`).
+
 ## log.c: levels, prefix, truncation
 
 Levels: `KLOG_DEBUG` (0), `KLOG_INFO`, `KLOG_WARN`, `KLOG_ERROR`,

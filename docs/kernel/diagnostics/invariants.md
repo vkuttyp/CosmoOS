@@ -173,3 +173,14 @@ ring holds every line: what the screen does not show is in `dmesg`.
 **Checked by** `console-log-floor` (two sinks, the same four writes),
 and by review of `console_write_log`'s panic path, which calls
 `write_unlocked` before any floor is read.
+
+## I-DIAG-22: An escape keeps the cursor on the screen and draws nothing of itself
+
+Every cursor position an escape sequence sets or moves to is a cell of
+the screen (`fbcon_esc_place` clamps to `cols - 1`, `rows - 1`), so no
+later glyph is drawn outside the framebuffer whatever a program writes.
+The bytes of a sequence, recognised or not, are not drawn; a byte that
+ends one early is handled as itself. **Checked by** `fb-escapes` (a
+move of 300 columns, a private mode, an unfinished sequence) and by
+`make test-display`'s colour check (the row reads back with no escape
+drawn).

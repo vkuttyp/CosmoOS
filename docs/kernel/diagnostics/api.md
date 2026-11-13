@@ -155,6 +155,20 @@ channel wider than 32 bits or shifted past bit 31 contributes 0), and
 how many screen pixels a font pixel is each way on a screen of that
 size, 1 to `max`.
 
+### `uint32_t fbcon_esc_feed(struct fbcon_esc *e, uint32_t b)` and the rest of the escape parser
+
+`kernel/core/fbrules.cee`, for `fbcon.c` ("Colours and escapes" in
+`design.md`). `fbcon_esc_feed` says what byte `b` means after the bytes
+before it: `FBCON_ESC_PUT` (draw or obey it as itself), `NONE` (part of
+a sequence), `CLEAR`, `MOVE` (row `e->a`, column `e->n`, from 0), `REL`
+(direction `e->a`, 'A' to 'D', by `e->n`) or `ERASE`.
+`fbcon_esc_place` turns a MOVE or REL into the cursor's new cell on a
+screen of `cols` by `rows`; `fbcon_esc_attr` is the attribute byte the
+state draws with (foreground | background << 4); `fbcon_esc_reset`
+restores the defaults; `fbcon_palette` writes `fb`'s sixteen colours;
+`fbcon_tail_start` is where the last `rows` lines of a text start. The
+caller owns `e` and serialises its calls (the console lock).
+
 ## `kernel/log.h`
 
 ### `void klog(enum klog_level level, const char *fmt, ...)` / `void kvlog(level, fmt, va_list)`
