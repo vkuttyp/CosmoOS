@@ -235,7 +235,7 @@ static void scroll(struct fbcon *c)
     memmove(c->text, c->text + (size_t)n * c->cols, keep);
     memset(c->text + keep, ' ', (size_t)n * c->cols);
     memmove(c->attr, c->attr + (size_t)n * c->cols, keep);
-    memset(c->attr + keep, 0x07, (size_t)n * c->cols);
+    memset(c->attr + keep, fbcon_esc_attr(&c->esc), (size_t)n * c->cols);   /* the erase colours, as a clear's */
     fbcon_draw_repaint(c);
     damage(c, 0, c->rows * c->cell_h);
     g_stats.scrolls++;
@@ -266,13 +266,13 @@ static void fbcon_start(struct fbcon *c)
     damage(c, 0, c->height);
 }
 
-/* Cells [from, to) of the cursor's row blank. */
+/* Cells [from, to) of the cursor's row blank, in the colours being written (as the Linux console erases). */
 static void blank(struct fbcon *c, uint32_t from, uint32_t to)
 {
     for (uint32_t x = from; x < to && x < c->cols; x++) {
         c->text[c->cy * c->cols + x] = ' ';
-        c->attr[c->cy * c->cols + x] = 0x07;
-        fbcon_draw_glyph(c, x, c->cy, ' ', 0x07);
+        c->attr[c->cy * c->cols + x] = (uint8_t)fbcon_esc_attr(&c->esc);
+        fbcon_draw_glyph(c, x, c->cy, ' ', c->attr[c->cy * c->cols + x]);
     }
     damage(c, c->cy * c->cell_h, (c->cy + 1) * c->cell_h);
 }
@@ -284,8 +284,11 @@ static void putc(struct fbcon *c, char ch)
     switch (fbcon_esc_feed(&c->esc, b)) {
     case FBCON_ESC_PUT:
         break;
-    case FBCON_ESC_CLEAR:
-        fbcon_start(c);
+    case FBCON_ESC_CLEAR:   /* in the colours being written; ESC c has reset them */
+        memset(c->text, ' ', (size_t)c->cols * c->rows);
+        memset(c->attr, fbcon_esc_attr(&c->esc), (size_t)c->cols * c->rows);
+        fbcon_draw_repaint(c);
+        damage(c, 0, c->height);
         c->cx = c->cy = 0;
         return;
     case FBCON_ESC_MOVE:
@@ -293,6 +296,7 @@ static void putc(struct fbcon *c, char ch)
         fbcon_esc_place(&c->esc, &c->cx, &c->cy, c->cols, c->rows);
         return;
     case FBCON_ESC_ERASE:
+        c->cx = c->cx < c->cols ? c->cx : c->cols - 1;   /* a pending wrap (cx == cols): the last cell, and no wrap */
         blank(c, c->cx, c->cols);
         return;
     default:
@@ -570,24 +574,25 @@ void fbcon_cursor(uint32_t *col, uint32_t *row)
 
 /*
  * The screen a switch replaces, onto `c` (just started, blank): its rows
- * up to the cursor's, the newest at the bottom when they do not all fit,
- * each cut or padded to c's width, and the cursor where it was on its
- * row. What a program wrote to the terminal (tty.c writes the sinks, not
+ * through the cursor's and through any below it with text (a program may
+ * have moved the cursor up), the newest at the bottom when they do not all
+ * fit but the cursor's row kept, each cut or padded to c's width, and the
+ * cursor where it was on its row. What a program wrote to the terminal (tty.c writes the sinks, not
  * the log ring) and a line being typed stay on the screen. Not reflowed:
  * a row wider than the new screen loses its end.
  */
 static void carry_text(struct fbcon *c, const struct fbcon *prev)
 {
-    uint32_t used = prev->cy < prev->rows ? prev->cy + 1 : prev->rows;
+    uint32_t used = fbcon_rows_used(prev->text, prev->cols, prev->rows, prev->cy);
     uint32_t n = used < c->rows ? used : c->rows;
-    uint32_t first = used - n;
+    uint32_t first = used - n < prev->cy ? used - n : prev->cy;
     uint32_t w = prev->cols < c->cols ? prev->cols : c->cols;
     for (uint32_t i = 0; i < n; i++) {
         memcpy(c->text + (size_t)i * c->cols, prev->text + (size_t)(first + i) * prev->cols, w);
         memcpy(c->attr + (size_t)i * c->cols, prev->attr + (size_t)(first + i) * prev->cols, w);
     }
     c->esc = prev->esc;
-    c->cy = n - 1;
+    c->cy = prev->cy - first;
     c->cx = prev->cx < c->cols ? prev->cx : c->cols;
     fbcon_draw_repaint(c);
     damage(c, 0, c->height);

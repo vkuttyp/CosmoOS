@@ -52,8 +52,8 @@ firmware names no serial port (boot protocol v9;
 `serial=none`; x86-64 always has COM1 by then and never takes it. There
 is no heap and no `vm_map_phys` yet, so it draws through the loader's
 direct map at `bootinfo_phys_to_virt(fb->phys)` with a static text
-shadow of 65536 cells (`FBCON_EARLY_CELLS`; a larger mode uses its top
-rows), after the same refusals: no framebuffer, a range beyond
+buffer of 65536 bytes (`FBCON_EARLY_CELLS`), half characters and half
+their colours, so 32768 cells (a larger mode uses its top rows), after the same refusals: no framebuffer, a range beyond
 `hhdm_size`, or one overlapping usable RAM. The mapping survives the
 kernel's takeover because the architecture carries that range into its
 own root (AArch64: `map_early_devices`, uncached, at the same direct-map
@@ -228,16 +228,28 @@ fbcon_esc`, one per console); `fbcon.c` does what it says:
 | Sequence | Effect |
 |---|---|
 | `ESC [ … m` | colours: 0 resets, 1 makes the eight colours bright, 22 undoes it, 30-37 and 90-97 the foreground, 40-47 and 100-107 the background, 39 and 49 the defaults; others ignored |
-| `ESC [ 2 J`, `ESC [ 3 J` | clear the screen, the cursor to the top left |
-| `ESC c` | clear and reset the colours |
+| `ESC [ 2 J`, `ESC [ 3 J` | clear the screen in the current background, the cursor to the top left |
+| `ESC c` | reset the colours and clear |
 | `ESC [ r ; c H`, `ESC [ r ; c f` | the cursor to row r, column c (1-based, kept on the screen) |
 | `ESC [ n A` to `D` | the cursor up, down, right, left by n (1 when absent), kept on the screen |
-| `ESC [ K` | blank from the cursor to the end of its row |
+| `ESC [ K` | blank from the cursor to the end of its row in the current background; a pending wrap (the cursor past the last column) blanks the last cell and is cancelled |
 
-Any other sequence, `ESC [ ? 25 l` among them, is read to its final byte
-and draws nothing; before this the console dropped the ESC and drew the
-rest (`[?25l`). A byte that cannot be part of a sequence ends it and is
-drawn or obeyed as itself. The colours are the PC's (`fbcon_palette`),
+A blank cell takes the colours being written, as on the Linux console:
+an erase, a clear and the rows a scroll opens. A screen's setup and a
+surface switch start from the defaults.
+
+Any other sequence is read to its end and draws nothing; before this the
+console dropped the ESC and drew the rest (`[?25l`). That is a CSI
+sequence with another final byte, or with a private or intermediate
+byte anywhere in it, whatever its final byte would mean without one
+(`ESC [ ? 25 l`, `ESC [ ? 2 J`, `ESC [ > 4 ; 1 m`); an ESC with
+intermediate bytes, to the byte after them (`ESC ( B`); and a control
+string (`ESC ]`, OSC, and DCS, SOS, PM, APC), to its BEL or its ST
+(`ESC \`). A control byte that cannot be part of a sequence ends it and
+is drawn or obeyed as itself; an ESC ends it and begins the next. A
+control string ended by a control byte other than BEL is a choice the
+Linux console does not make: it keeps reading, and a string a program
+never ends would hide every later line. The colours are the PC's (`fbcon_palette`),
 but for light grey, which is the 0xd0 grey the console has always drawn
 in; the default is light grey on black (attribute 0x07).
 

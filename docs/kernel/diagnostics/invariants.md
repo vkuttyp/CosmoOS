@@ -181,6 +181,8 @@ the screen (`fbcon_esc_place` clamps to `cols - 1`, `rows - 1`), so no
 later glyph is drawn outside the framebuffer whatever a program writes.
 The bytes of a sequence, recognised or not, are not drawn; a byte that
 ends one early is handled as itself. **Checked by** `fb-escapes` (a
-move of 300 columns, a private mode, an unfinished sequence) and by
+move of 300 columns, to row 66 of 67 and of 48, from a pending wrap; a
+private mode, a private clear, a character set, a title to its BEL and
+to its ST; an unfinished sequence ended by a newline and by an ESC) and by
 `make test-display`'s colour check (the row reads back with no escape
 drawn).

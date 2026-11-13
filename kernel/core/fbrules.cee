@@ -49,6 +49,7 @@ extern "C" {
         bold: u32;
         a: u32;
         n: u32;
+        kind: u32;
     }
     // fbcon.h's meanings of a byte, which the C compiler checks.
     const FBCON_ESC_PUT: u32 = 0;
@@ -186,6 +187,15 @@ fn scaleC(width: u32, height: u32, max: u32) -> u32 {
 const GROUND: u32 = 0;
 const ESCAPE: u32 = 1;
 const CSI: u32 = 2;
+/// A CSI sequence with a private or intermediate byte (`ESC [ ? 25 l`, `ESC [ > 4 ; 1 m`): read to its final byte and
+/// not obeyed, whatever that byte means without them.
+const CSI_SKIP: u32 = 3;
+/// ESC and an intermediate byte (`ESC ( B`, a character set): read to the byte that ends it.
+const ESC_INTER: u32 = 4;
+/// A control string (`ESC ] 0 ; title BEL`, and DCS, SOS, PM, APC): read to its BEL or its ST (`ESC \`).
+const STRING: u32 = 5;
+/// ESC in a control string: `\` ends the string; any other byte goes on as the byte after an ESC.
+const STRING_ESC: u32 = 6;
 /// A parameter's ceiling: larger numbers saturate rather than wrap.
 const PARAM_MAX: u32 = 9999;
 /// The parameters kept; a fifth and later are read and ignored.
@@ -216,6 +226,7 @@ fn reset(e: borrow mut fbcon_esc) {
     e.fg = DEFAULT_FG;
     e.bg = DEFAULT_BG;
     e.bold = 0;
+    e.kind = FBCON_ESC_NONE;
 }
 
 /// One SGR parameter (ECMA-48 8.3.117, as the Linux console reads it): reset, bold, the eight colours and their
@@ -244,57 +255,35 @@ fn sgr(e: borrow mut fbcon_esc, v: u32) {
     }
 }
 
-/// What a byte means to the screen, given the bytes before it: FBCON_ESC_PUT (draw it, or the control it is),
-/// FBCON_ESC_NONE (part of an escape sequence, or one with nothing to draw), CLEAR (`ESC [ 2 J`, `ESC [ 3 J`,
-/// `ESC c`), MOVE to row `e.a`, column `e.n` (`ESC [ r ; c H`, 1-based in the stream), REL by `e.n` cells in
-/// direction `e.a` (`ESC [ n A` to `D`), ERASE to the end of the line (`ESC [ K`). An escape sequence the screen does not obey is
-/// consumed whole and draws nothing. A byte that cannot be in one ends it and is drawn.
-fn feed(e: borrow mut fbcon_esc, b: u32) -> u32 {
-    if (e.state == GROUND) {
-        if (b == 27) {
-            e.state = ESCAPE;
-            return FBCON_ESC_NONE;
-        }
-        return FBCON_ESC_PUT;
-    }
-    if (e.state == ESCAPE) {
-        if (b == 91) { // '['
-            e.state = CSI;
-            e.count = 0;
-            e.p0 = 0;
-            e.p1 = 0;
-            e.p2 = 0;
-            e.p3 = 0;
-            return FBCON_ESC_NONE;
-        }
-        e.state = GROUND;
-        if (b == 99) { // 'c': a full reset
-            reset(e);
-            return FBCON_ESC_CLEAR;
-        }
-        return if (b < 32) FBCON_ESC_PUT else FBCON_ESC_NONE;
-    }
-    // CSI: parameters, then one final byte.
-    if (b >= 48 && b <= 57) { // a digit
-        if (e.count < PARAMS) {
-            let v = param(e, e.count) * 10 + (b - 48);
-            setParam(e, e.count, if (v > PARAM_MAX) PARAM_MAX else v);
-        }
+/// The byte after an ESC (or after an ESC in a control string that is not its ST).
+fn afterEsc(e: borrow mut fbcon_esc, b: u32) -> u32 {
+    if (b == 91) { // '['
+        e.state = CSI;
+        e.count = 0;
+        e.p0 = 0;
+        e.p1 = 0;
+        e.p2 = 0;
+        e.p3 = 0;
         return FBCON_ESC_NONE;
     }
-    if (b == 59) { // ';'
-        if (e.count < PARAMS) {
-            e.count += 1;
-        }
+    if (b == 93 || b == 80 || b == 88 || b == 94 || b == 95) { // ']' OSC, 'P' DCS, 'X' SOS, '^' PM, '_' APC
+        e.state = STRING;
         return FBCON_ESC_NONE;
     }
-    if (b >= 32 && b < 64) { // '?', '>' and other private or intermediate bytes: read past
+    if (b >= 32 && b < 48) { // an intermediate byte: '(' and ')' choose a character set, '#' and '%' others
+        e.state = ESC_INTER;
         return FBCON_ESC_NONE;
     }
     e.state = GROUND;
-    if (b < 32 || b > 126) {
-        return FBCON_ESC_PUT; // not a sequence after all: the byte is drawn (or obeyed) on its own
+    if (b == 99) { // 'c': a full reset
+        reset(e);
+        return FBCON_ESC_CLEAR;
     }
+    return if (b < 32) FBCON_ESC_PUT else FBCON_ESC_NONE;
+}
+
+/// A CSI sequence's final byte, its parameters read: what it asks of the screen.
+fn csiFinal(e: borrow mut fbcon_esc, b: u32) -> u32 {
     if (b == 109) { // 'm'
         let last = if (e.count < PARAMS) e.count else PARAMS - 1;
         var i: u32 = 0;
@@ -308,11 +297,13 @@ fn feed(e: borrow mut fbcon_esc, b: u32) -> u32 {
         return if (e.p0 == 2 || e.p0 == 3) FBCON_ESC_CLEAR else FBCON_ESC_NONE;
     }
     if (b == 72 || b == 102) { // 'H', 'f'
+        e.kind = FBCON_ESC_MOVE;
         e.a = if (e.p0 > 0) e.p0 - 1 else 0;
         e.n = if (e.p1 > 0) e.p1 - 1 else 0;
         return FBCON_ESC_MOVE;
     }
     if (b >= 65 && b <= 68) { // 'A' to 'D'
+        e.kind = FBCON_ESC_REL;
         e.a = b;
         e.n = if (e.p0 > 0) e.p0 else 1;
         return FBCON_ESC_REL;
@@ -320,6 +311,80 @@ fn feed(e: borrow mut fbcon_esc, b: u32) -> u32 {
     if (b == 75) { // 'K'
         return if (e.p0 == 0) FBCON_ESC_ERASE else FBCON_ESC_NONE;
     }
+    return FBCON_ESC_NONE;
+}
+
+/// What a byte means to the screen, given the bytes before it: FBCON_ESC_PUT (draw it, or the control it is),
+/// FBCON_ESC_NONE (part of an escape sequence, or one with nothing to draw), CLEAR (`ESC [ 2 J`, `ESC [ 3 J`,
+/// `ESC c`), MOVE to row `e.a`, column `e.n` (`ESC [ r ; c H`, 1-based in the stream), REL by `e.n` cells in
+/// direction `e.a` (`ESC [ n A` to `D`), ERASE to the end of the line (`ESC [ K`). An escape sequence the screen does
+/// not obey is consumed whole and draws nothing: a CSI with a private or intermediate byte, a character set's
+/// `ESC ( B`, a control string to its BEL or ST. A control byte that cannot be in a sequence ends it and is obeyed;
+/// an ESC ends it and begins the next.
+fn feed(e: borrow mut fbcon_esc, b: u32) -> u32 {
+    if (e.state == GROUND) {
+        if (b == 27) {
+            e.state = ESCAPE;
+            return FBCON_ESC_NONE;
+        }
+        return FBCON_ESC_PUT;
+    }
+    if (b == 27) {
+        e.state = if (e.state == STRING) STRING_ESC else ESCAPE;
+        return FBCON_ESC_NONE;
+    }
+    if (e.state == ESCAPE) {
+        return afterEsc(e, b);
+    }
+    if (e.state == STRING_ESC) {
+        if (b == 92) { // '\\': the string's ST
+            e.state = GROUND;
+            return FBCON_ESC_NONE;
+        }
+        return afterEsc(e, b);
+    }
+    if (e.state == STRING) {
+        if (b == 7) { // BEL ends it
+            e.state = GROUND;
+            return FBCON_ESC_NONE;
+        }
+        if (b < 32) {
+            e.state = GROUND;
+            return FBCON_ESC_PUT;
+        }
+        return FBCON_ESC_NONE; // the string, UTF-8 included
+    }
+    if (b < 32 || b > 126) {
+        e.state = GROUND;
+        return FBCON_ESC_PUT; // not a sequence after all: the byte is drawn (or obeyed) on its own
+    }
+    if (e.state == ESC_INTER) {
+        if (b < 48) {
+            return FBCON_ESC_NONE; // another intermediate byte
+        }
+        e.state = GROUND;
+        return FBCON_ESC_NONE;
+    }
+    // CSI: parameters, then one final byte.
+    if (b >= 64) {
+        let skip = e.state == CSI_SKIP;
+        e.state = GROUND;
+        return if (skip) FBCON_ESC_NONE else csiFinal(e, b);
+    }
+    if (e.state == CSI && b >= 48 && b <= 57) { // a digit
+        if (e.count < PARAMS) {
+            let v = param(e, e.count) * 10 + (b - 48);
+            setParam(e, e.count, if (v > PARAM_MAX) PARAM_MAX else v);
+        }
+        return FBCON_ESC_NONE;
+    }
+    if (e.state == CSI && b == 59) { // ';'
+        if (e.count < PARAMS) {
+            e.count += 1;
+        }
+        return FBCON_ESC_NONE;
+    }
+    e.state = CSI_SKIP; // '?', '>', ':', an intermediate byte: a sequence the screen does not obey
     return FBCON_ESC_NONE;
 }
 
@@ -339,9 +404,12 @@ fn place(e: borrow fbcon_esc, cx: u32, cy: u32, cols: u32, rows: u32) -> u64 {
     if (e.state != GROUND || cols == 0 || rows == 0) {
         return (cx as u64 << 32) | cy as u64;
     }
-    var x = cx;
-    var y = cy;
-    if (e.a == 65) { // 'A': up
+    var x = if (cx < cols) cx else cols - 1; // cx == cols: a wrap pending, the cursor on the last column
+    var y = if (cy < rows) cy else rows - 1;
+    if (e.kind != FBCON_ESC_REL) { // MOVE: row e.a, column e.n
+        y = if (e.a < rows) e.a else rows - 1;
+        x = if (e.n < cols) e.n else cols - 1;
+    } else if (e.a == 65) { // 'A': up
         y = if (y > e.n) y - e.n else 0;
     } else if (e.a == 66) { // 'B': down
         y = if (y + e.n < rows - 1) y + e.n else rows - 1;
@@ -349,9 +417,6 @@ fn place(e: borrow fbcon_esc, cx: u32, cy: u32, cols: u32, rows: u32) -> u64 {
         x = if (x + e.n < cols - 1) x + e.n else cols - 1;
     } else if (e.a == 68) { // 'D': left
         x = if (x > e.n) x - e.n else 0;
-    } else { // MOVE: row e.a, column e.n
-        y = if (e.a < rows) e.a else rows - 1;
-        x = if (e.n < cols) e.n else cols - 1;
     }
     return (x as u64 << 32) | y as u64;
 }
@@ -412,6 +477,26 @@ fn tailStart(text: Slice<u8>, rows: u32) -> usize {
 /// Safety: `buf` points to `n` readable bytes.
 @export("fbcon_tail_start")
 unsafe fn tailStartC(buf: *CChar, n: usize, rows: u32) -> usize => tailStart(Slice.fromRaw(buf as *u8, n), rows);
+
+/// The rows of a screen of `cols` by `rows` cells to keep when it is replaced, from the top: through the cursor's row
+/// (`cy`) and through the last row below it with a character other than a space, which a program that moved the cursor
+/// up left there.
+fn rowsUsed(text: Slice<u8>, cols: u32, rows: u32, cy: u32) -> u32 {
+    var used = if (cy < rows) cy + 1 else rows;
+    var i = used as usize * cols as usize;
+    while (i < text.length) {
+        if (text[i] != 32) {
+            used = truncate<u32>(i / cols as usize) + 1;
+        }
+        i += 1;
+    }
+    return used;
+}
+
+/// Safety: `text` points to `cols` * `rows` bytes nothing writes during the call.
+@export("fbcon_rows_used")
+unsafe fn rowsUsedC(text: *CChar, cols: u32, rows: u32, cy: u32) -> u32 =>
+    rowsUsed(Slice.fromRaw(text as *u8, cols as usize * rows as usize), cols, rows, cy);
 
 // ---- The self-test console-log-floor ----
 
@@ -574,6 +659,38 @@ unsafe fn escapesTest(reason: *mut *CChar) -> bool {
     }
     if (tailStart("a\nb\nc".bytes(), 2) != 2 || tailStart("abc".bytes(), 2) != 0) {
         return failed(reason, "check failed: the last two rows of a\\nb\\nc start at b\0");
+    }
+    // Rows 65 to 68 are rows, not the directions A to D (1920x1080 has 67 rows), and a short screen keeps them on it.
+    if (esc(borrow mut e, "[66;1H") != FBCON_ESC_MOVE || place(borrow e, 5, 5, 240, 67) != 65 ||
+        place(borrow e, 5, 5, 128, 48) != 47) {
+        return failed(reason, "check failed: ESC [ 66 ; 1 H moves to row 65, the last row of a shorter screen\0");
+    }
+    if (esc(borrow mut e, "[1D") != FBCON_ESC_REL || place(borrow e, 128, 3, 128, 48) != ((126 as u64 << 32) | 3)) {
+        return failed(reason, "check failed: a pending wrap (cx == cols) moves from the last column\0");
+    }
+    if (esc(borrow mut e, "[>4;1m") != FBCON_ESC_NONE || attr(borrow e) != 0x07 || esc(borrow mut e, "[?2J") !=
+        FBCON_ESC_NONE) {
+        return failed(reason, "check failed: a CSI with a private byte is not obeyed (no bold, no clear)\0");
+    }
+    if (esc(borrow mut e, "(B") != FBCON_ESC_NONE || feed(borrow mut e, 120) != FBCON_ESC_PUT) {
+        return failed(reason, "check failed: ESC ( B is read whole and the next byte drawn\0");
+    }
+    if (esc(borrow mut e, "]0;title") != FBCON_ESC_NONE || feed(borrow mut e, 7) != FBCON_ESC_NONE ||
+        feed(borrow mut e, 120) != FBCON_ESC_PUT) {
+        return failed(reason, "check failed: ESC ] 0 ; title BEL is read whole and the next byte drawn\0");
+    }
+    if (esc(borrow mut e, "]0;t") != FBCON_ESC_NONE || esc(borrow mut e, "\\") != FBCON_ESC_NONE ||
+        feed(borrow mut e, 120) != FBCON_ESC_PUT) {
+        return failed(reason, "check failed: ESC ] 0 ; t ESC \\ is read whole and the next byte drawn\0");
+    }
+    if (esc(borrow mut e, "[1") != FBCON_ESC_NONE || esc(borrow mut e, "[31m") != FBCON_ESC_NONE ||
+        attr(borrow e) != 0x01) {
+        return failed(reason, "check failed: an ESC ends an unfinished sequence and begins the next\0");
+    }
+    reset(borrow mut e);
+    if (rowsUsed("ab    cd".bytes(), 2, 4, 0) != 4 || rowsUsed("ab      ".bytes(), 2, 4, 0) != 1 ||
+        rowsUsed("ab      ".bytes(), 2, 4, 2) != 3) {
+        return failed(reason, "check failed: the rows kept run through the cursor's and the last with text\0");
     }
     return true;
 }
