@@ -6,7 +6,7 @@ From now on you boot `disk.img` alone. The `hostfwd` option forwards
 port 2222 on your computer to the system's ssh server, which [ssh](ssh.md)
 uses; it does no harm before then. On x86-64:
 
-<!-- test: session x86_64 prompt="cosmo$ " -->
+<!-- test: session x86_64 prompt="cosmo$ " login -->
 ```sh
 qemu-system-x86_64 -machine q35 -cpu qemu64,+nx -smp 2 -m 512M \
     -drive if=pflash,format=raw,readonly=on,file=efi-x86_64.fd \
@@ -19,7 +19,7 @@ qemu-system-x86_64 -machine q35 -cpu qemu64,+nx -smp 2 -m 512M \
 
 On AArch64:
 
-<!-- test: session aarch64 prompt="cosmo$ " -->
+<!-- test: session aarch64 prompt="cosmo$ " login -->
 ```sh
 qemu-system-aarch64 -machine virt -cpu cortex-a72 -smp 2 -m 512M \
     -drive if=pflash,format=raw,readonly=on,file=efi-aarch64.fd \
@@ -38,16 +38,52 @@ init: switched to the disk root ... (root=boot-disk)
 CosmoOS userland ready
 ```
 
-(the root's check, [Checking and repairing](checking.md))
+(the root's check, [Checking and repairing](checking.md)). On the first
+boot `/etc/rc` also makes the ssh server's host key, which takes a
+moment.
 
-and the console shell's prompt. On the first boot `/etc/rc` also makes
-the ssh server's host key, which takes a moment.
+## Logging in
+
+The console then asks for a password for root, once, at the system's
+first boot: choose one and type it twice (nothing is shown as you
+type). A system upgraded from v1.1.0 or older asks the same at its first
+boot after the upgrade.
+
+```text
+Welcome to CosmoOS. root has no password yet: choose one now.
+The console asks for it at each login. (ssh logs in with a key, not a password.)
+
+Changing password for root
+New password:
+Retype password:
+passwd: password for root changed by root
+```
+
+From then on every boot ends at the login screen: the release, the
+machine's name and its address. Log in as `root` with that password:
+
+```text
+CosmoOS vX.Y.Z (x86_64) - CosmoOS
+
+IP address: 10.0.2.15   (ssh root@10.0.2.15 with a key)
+
+CosmoOS login: root
+Password:
+```
+
+and the welcome screen shows the machine's facts beside the CosmoOS
+logo, in colour on a screen, then the prompt. Logging out (`exit`)
+brings the login screen back; `poweroff` turns the machine off. The
+password is kept hashed (SHA-512) in `/etc/shadow`, which only root
+reads; `passwd` changes it. The live image you installed from asks for
+none: it has no accounts to protect.
 
 ## The shell
 
 The console shell of an installed system is BusyBox `ash` (BusyBox 1.37,
 built statically against musl): a POSIX shell with history, line
-editing, `$(...)`, functions and job control. It runs as root, in `/`.
+editing, `$(...)`, functions and job control. It runs as root, in root's
+home, `/root`.
 
 <!-- test: console -->
 ```console
@@ -130,13 +166,13 @@ The shell and its applets behave as on Linux, but the system around them
 is smaller. Among what you will notice: no `ping6`; no `/sys`; one user, root; no swap. [Known limitations](limitations.md) has the full
 list.
 
-Power off with `exit` (or `poweroff`, which works from any shell); QEMU
-exits once the disk is synced:
+Power off with `poweroff`, which works from any shell; QEMU exits once
+the disk is synced (`exit` logs out, to the login screen):
 
 <!-- test: console -->
 ```console
-cosmo$ exit
-...init: disk root synced
+cosmo$ poweroff
+...init: power off requested
 ```
 
 Next: [Networking](networking.md).

@@ -5563,3 +5563,28 @@ with `process-user` at 8547, 6960 and 6902 ms and, in `test-net-login`'s
 three boots, 7528, 6991 and 6288 ms. The host's load, as in the entries
 of 2026-10-25 and 2026-11-11: this time what loaded it is named, and
 the same tree passes when it is quiet. Nothing was changed.
+
+## Two x86-64 four-CPU debug boots over their 300 s timeout on the other machine, 2026-11-13
+
+The console login's matrix (`eedc0004`, no kernel source changed from
+the screen-colours tree), on the other machine (the CI image, a
+container of 4 of 8 CPUs at CPU weight 128): `test-x86_64-smp4`
+(16:54-16:59) `boot-test: FAIL after 304.0s`, and `test-harness-retry-x86_64`
+(17:07-17:12) `FAIL after 304.5s`, both `timed out after 300s`, `missing
+marker /^interactive-ok$/`, no self-test failed. Their 527 self-tests
+took 242741 and 242255 ms, the network harness ready at 216.1 and 216.0 s.
+The four boots between and around them, of one and two CPUs and the
+chaos boot, passed in 235 to 256 s (`QEMU_SMP=2`: 180360 ms of
+self-tests, ready at 157.2 s). The same images booted again at 18:02 and
+18:07 passed, 253.1 s each: 196433 and 196116 ms of self-tests, ready at
+172.6 s. Between the failed four-CPU boot and its rerun: `cosmofs-replay`
+48049 and 35263 ms, `cosmofs-snap-reserved` 7228 and 5546 ms,
+`mutex-wake-bench` 3170 and 2236 ms, but `lockdep-graph-bench` 8919 and
+9120 ms and `sched-fair` 2632 and 2622 ms. The tests that run on several
+CPUs were slower and those on one were not, which is what four virtual
+CPUs get when the host gives the container fewer than four at once. The
+host keeps no load history (`sar` is not installed) and its load was not
+read during the failed boots (0.10 before the reruns, 1.41 after), so
+what took the CPUs is not known. The screen-colours matrix's four-CPU
+boot on the same machine that morning passed in 241.3 s. Nothing was
+changed.

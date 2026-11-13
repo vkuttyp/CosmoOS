@@ -2,8 +2,9 @@
 
 An installed system runs the dropbear ssh server (2026.94, static, on
 port 22) as a service. It accepts **root** only, by **public key** only:
-root has no password (its `/etc/passwd` entry is `root:*:...`), and
-password authentication is compiled out of dropbear. You log in with an
+password authentication is compiled out of dropbear, so root's password,
+the one the console asks for ([Logging in](shell.md#logging-in)), does
+not log in over ssh. You log in with an
 Ed25519 or an RSA key, so an existing `~/.ssh/id_rsa.pub` works (RSA with
 SHA-256 signatures, `rsa-sha2-256`, which current OpenSSH clients offer;
 not the old SHA-1 `ssh-rsa`). The server's own host key is Ed25519:
@@ -26,7 +27,7 @@ until python3 -c 'import socket; socket.create_connection(("127.0.0.1", 8000))' 
 Boot the installed system (the `hostfwd` option in these commands is
 what makes port 2222 on your computer reach port 22):
 
-<!-- test: session x86_64 prompt="cosmo$ " -->
+<!-- test: session x86_64 prompt="cosmo$ " login -->
 ```sh
 qemu-system-x86_64 -machine q35 -cpu qemu64,+nx -smp 2 -m 512M \
     -drive if=pflash,format=raw,readonly=on,file=efi-x86_64.fd \
@@ -39,7 +40,7 @@ qemu-system-x86_64 -machine q35 -cpu qemu64,+nx -smp 2 -m 512M \
 
 On AArch64:
 
-<!-- test: session aarch64 prompt="cosmo$ " -->
+<!-- test: session aarch64 prompt="cosmo$ " login -->
 ```sh
 qemu-system-aarch64 -machine virt -cpu cortex-a72 -smp 2 -m 512M \
     -drive if=pflash,format=raw,readonly=on,file=efi-aarch64.fd \
@@ -135,8 +136,8 @@ Power off from the console:
 
 <!-- test: console -->
 ```console
-cosmo$ exit
-...init: disk root synced
+cosmo$ poweroff
+...init: power off requested
 ```
 
 Next: [Packages](packages.md).

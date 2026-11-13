@@ -6875,8 +6875,8 @@ int main(int argc, char **argv)
             pkg_undone_prune();
         }
     }
-    const char *sh_argv[] = { "sh", NULL };
-    int status = run_and_wait("the shell", shell, sh_argv, true);
+    const char *sh_argv[] = { "sh", access("/sbin/cosmo-console", R_OK) ? NULL : "/sbin/cosmo-console", NULL };
+    int status = run_and_wait("the shell", sh_argv[1] ? "/bin/sh" : shell, sh_argv, true);   /* a script: ash runs it */
     if (status < 0)
         return 1;
     printf("init: shell exited with status %d\n", status);

@@ -35,7 +35,7 @@ Open lines (struck lines are not counted):
 |---|---|---|---|---|---|
 | Block devices | 3 | 0 | 2 | 4 | 9 |
 | Boot chain and verified boot | 0 | 6 | 3 | 1 | 10 |
-| Build and tooling | 1 | 2 | 0 | 5 | 8 |
+| Build and tooling | 1 | 2 | 0 | 6 | 9 |
 | cosmofs and storage | 4 | 1 | 7 | 13 | 25 |
 | Documentation | 0 | 0 | 1 | 1 | 2 |
 | Drivers and platforms | 4 | 0 | 2 | 12 | 18 |
@@ -50,10 +50,10 @@ Open lines (struck lines are not counted):
 | Scheduler and SMP | 1 | 0 | 1 | 5 | 7 |
 | Security and isolation | 0 | 11 | 1 | 2 | 14 |
 | Testing and CI | 9 | 0 | 0 | 12 | 21 |
-| Commands | 1 | 0 | 6 | 1 | 8 |
+| Commands | 1 | 0 | 6 | 2 | 9 |
 | VFS | 3 | 0 | 5 | 3 | 11 |
 | Virtualisation | 3 | 0 | 0 | 6 | 9 |
-| **all** | **48** | **23** | **50** | **104** | **225** |
+| **all** | **48** | **23** | **50** | **106** | **227** |
 
 ## Block devices
 
@@ -92,6 +92,7 @@ Open lines (struck lines are not counted):
 - **BUILD-8** nice-to-have, S. The BusyBox port's `libclang_rt.builtins.a` takes every file of compiler-rt's `lib/builtins`, `crtbegin.c` and `crtend.c` with them: a link with clang's own `clang_rt.crtbegin.o` pulls `crtend.o` in a second time (duplicate `__CTOR_LIST_END__`). The ports' links use no crtbegin and are unaffected; exclude the two files (A1's clang evaluation, whose package drops them).
 - **BUILD-9** nice-to-have, S. `make BUILD=release SELFTEST=1` does not compile: `kernel/timer/timer.c:721` reads `g_test_cpu_offset_ns`, which only a debug build declares (main at `bf595f3a`; `docs/audit/2026-11-13-quiet-screen-report.md`). No target or CI job builds that pair.
 - **BUILD-10** correctness, S. A release run's package-repository job (`release.yml` calls `repository.yml`) gets an empty key since the key became the `release` environment's secret (BUILD-2): `release-key: KEY is empty or not hex` in the v1.1.0-rc2 and v1.1.0 runs (43386772777, 43411375903), where v1.0.14's passed. The scheduled and dispatched runs read it; v1.1.0's index was published by a dispatch (43415063246).
+- **BUILD-11** nice-to-have, S. Regenerating `ports/busybox/busybox.config` by its README's recipe from the built source gives `CONFIG_BZIP2_SMALL=8` and `CONFIG_FEATURE_SYSLOG_INFO=y` where the checked-in file has 0 and unset: the file was made from another defconfig. The landing terminal's second PR kept them as they were.
 
 ## cosmofs and storage
 
@@ -350,6 +351,7 @@ Open lines (struck lines are not counted):
 - **USR-7** usability, S. No `/dev/urandom` or `/dev/random`: a shell script wanting random or incompressible bytes reads nothing (`head -c N /dev/urandom` gives at most the error); tests use awk's `rand()` or gzip output instead (test-pkgtx, test-fsck).
 - ~~**USR-8** correctness, S. On the installed system `/run/svc` is on the root disk and nothing clears it at boot, so a pid file outlives its service; `svc`'s `running()` trusts any pid `kill(p, 0)` can signal, and a boot where another process has that pid says `svc: dropbear is already running` and never starts it. Seen on the Parallels VM 2026-10-23: `dropbear.pid` held 13 from 2026-10-22, pid 13 was `syslogd` at every boot, and ssh was refused through several boots and upgrades (cleared by hand). Clear `/run` at boot (or mount a ramfs on it), or check the pid is the service's supervisor.~~ Done by #446 (a fresh ramfs on `/run` at every boot; a pid file records the start time and is checked against the supervisor's cmdline; U14).
 - **USR-9** usability, S. The quiet screen shows init's and the services' lines as they print them: there is no one line per service started or failed, as a Linux distribution's boot has.
+- **USR-10** nice-to-have, S. BusyBox `passwd` warns `can't lock '/etc/shadow': Invalid argument` (and `/etc/passwd`), and syslogd logs it as `auth.err`: fcntl record locks are refused (EINVAL). The password is changed all the same (the landing terminal's second PR).
 
 ## VFS
 

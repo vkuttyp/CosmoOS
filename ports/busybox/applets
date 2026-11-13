@@ -148,3 +148,6 @@ umount
 # setpriority(2); ps -o nice shows them.
 nice
 renice
+# The console's login (docs/userland/design.md, "The console's session"):
+# /sbin/cosmo-console runs login, and passwd for root's first password.
+login passwd

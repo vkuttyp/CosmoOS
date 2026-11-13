@@ -30,6 +30,7 @@ work directory. Exit 0 PASS, 1 FAIL.
 import argparse
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -56,6 +57,16 @@ PROMPT = b"\ncosmo$ "
 # stage runs the B1-B4 tests this way).
 ENCRYPT_PASS = os.environ.get("COSMO_TEST_ENCRYPT", "")
 ENCRYPT_PROMPTS = (b"new passphrase: ", b"new passphrase again: ", b"passphrase for cosmo-root: ")
+
+# An installed system's console logs in (docs/userland/design.md, "The
+# console's session"): at its first boot it asks for root's password, then
+# at every boot for the login. Boot answers each prompt as a person would,
+# with this password, so every test of an installed system logs in. It is
+# made for the run, and kept in the environment so that a test this one
+# starts logs in to the same disks.
+LOGIN_PASS = os.environ.setdefault("COSMO_TEST_LOGIN", "cosmo-" + secrets.token_hex(6))
+LOGIN_ANSWERS = ((b"New password: ", LOGIN_PASS), (b"Retype password: ", LOGIN_PASS), (b" login: ", "root"),
+                 (b"\nPassword: ", LOGIN_PASS))
 
 
 # The format a fresh install is at, and the one a first snapshot leaves:
@@ -88,6 +99,8 @@ class Boot:
         self.log_path = os.path.join(workdir, f"boot-{name}.log")
         self.lock = threading.Lock()
         self.prompts_seen = 0
+        self.logged_in = False   # a login prompt was answered: `exit` would log out, not end the boot
+        self.auto_answer = True  # the reader answers the prompts (answers() pauses it)
         # Seconds each command typed may take, when a boot's length is the
         # sum of its commands rather than a property (per_command below).
         self.command_budget = None
@@ -115,6 +128,7 @@ class Boot:
                     os.replace(env["QEMU_TRACE_LOG"], os.path.splitext(self.log_path)[0] + "-stall-trace.log")
             # Each attempt's reader appends to that attempt's own buffer.
             self.buf = bytearray()
+            self.answered = 0   # where the last prompt answered (a passphrase, a password, the login) ends
             self.deadline = time.monotonic() + timeout
             self.t0 = time.monotonic()
             # QEMU's own messages go to a file of their own: one printed
@@ -157,7 +171,6 @@ class Boot:
             raise Fail(f"{name}: {e}")
 
     def _read(self, proc, log, buf):
-        answered = 0   # where the last passphrase prompt answered ends
         partial = b""
         times = self.times
         while True:
@@ -173,19 +186,57 @@ class Boot:
                 self.last_line_s = time.monotonic() - self.t0
                 times.write(b"".join(b"%8.2f %s\n" % (self.last_line_s, ln.rstrip(b"\r")) for ln in lines))
                 times.flush()
-            while ENCRYPT_PASS:
+            answers = LOGIN_ANSWERS + (tuple((p, ENCRYPT_PASS) for p in ENCRYPT_PROMPTS) if ENCRYPT_PASS else ())
+            while True:
                 with self.lock:
-                    hits = [(buf.find(p, answered), p) for p in ENCRYPT_PROMPTS]
-                hits = [(i, p) for i, p in hits if i >= 0]
-                if not hits:
-                    break
-                i, p = min(hits)
-                answered = i + len(p)
+                    if not self.auto_answer:
+                        break
+                    hits = [(buf.find(p, self.answered), p, a) for p, a in answers]
+                    hits = [h for h in hits if h[0] >= 0]
+                    if not hits:
+                        break
+                    i, p, a = min(hits)
+                    self.answered = i + len(p)
+                if p == b" login: ":
+                    self.logged_in = True
+                elif p in (b"New password: ", b"Retype password: ", b"\nPassword: "):
+                    # As a person types it: after the prompt, which BusyBox
+                    # prints before it turns echo off (bb_ask_noecho).
+                    time.sleep(0.5)
                 try:
-                    proc.stdin.write(ENCRYPT_PASS.encode() + b"\n")
+                    proc.stdin.write(a.encode() + b"\n")
                     proc.stdin.flush()
                 except (BrokenPipeError, ValueError):
                     return
+
+    def answers(self, on):
+        """Pause or resume the reader's answers to the prompts: a test that
+        types at the login itself pauses them. Resumed, the reader answers
+        the prompts that come from then on."""
+        with self.lock:
+            self.auto_answer = on
+            self.answered = len(self.buf)
+
+    def mark(self):
+        with self.lock:
+            return len(self.buf)
+
+    def type(self, line):
+        self.proc.stdin.write(line.encode() + b"\n")
+        self.proc.stdin.flush()
+
+    def wait_text(self, needle, start, what):
+        """Wait for `needle` in the log from offset `start`; return the
+        offset after it."""
+        while time.monotonic() < self.deadline:
+            with self.lock:
+                i = self.buf.find(needle, start)
+            if i >= 0:
+                return i + len(needle)
+            if self.proc.poll() is not None:
+                raise Fail(f"{self.name}: QEMU exited (code {self.proc.returncode}) waiting for {what}")
+            time.sleep(0.1)
+        raise Fail(f"{self.name}: no {needle!r} for {what} before the deadline")
 
     def text(self):
         with self.lock:
@@ -235,7 +286,13 @@ class Boot:
         return out + self.run(f"echo {tag}=$?")
 
     def finish(self, cmd="exit"):
-        """Type `cmd` (ending init), wait for QEMU to exit, return its code."""
+        """Type `cmd` (ending init), wait for QEMU to exit, return its code.
+        After a login, `exit` logs out to the login screen: SIGUSR2 to init
+        ends the boot as `exit` from the console shell did (BusyBox's
+        `poweroff` sends it, but a test may have rolled the base system back
+        to a release without that applet; `kill` is the shell's own)."""
+        if cmd == "exit" and self.logged_in:
+            cmd = "kill -USR2 1"
         if self.command_budget is not None:
             self.deadline = max(self.deadline, time.monotonic() + self.command_budget)
         self.proc.stdin.write(cmd.encode() + b"\n")
@@ -423,6 +480,35 @@ def stage_install(args, results):
     return {"target": target, "partuuid": partuuid}
 
 
+def stage_login_guard(b):
+    """The login guards the shell (U17), typed by hand with the reader's
+    answers paused: a logout brings the login screen back, a wrong password
+    is refused and the login asked again, and no shell prompt comes until
+    the right one."""
+    b.answers(False)
+    try:
+        at = b.mark()
+        b.type("exit")
+        at = b.wait_text(b" login: ", at, "the login screen after a logout")
+        b.type("root")
+        at = b.wait_text(b"\nPassword: ", at, "the password prompt")
+        time.sleep(0.5)   # after the prompt, when echo is off (Boot._read)
+        b.type(LOGIN_PASS + "-wrong")
+        at = b.wait_text(b"Login incorrect", at, "a wrong password refused")
+        at = b.wait_text(b" login: ", at, "the login asked again after a wrong password")
+        with b.lock:
+            prompts = b.buf.count(PROMPT)
+        if prompts != b.prompts_seen:
+            raise Fail("a shell prompt after a logout and a wrong password: the login did not guard the shell")
+        b.type("root")
+        b.wait_text(b"\nPassword: ", at, "the password prompt")
+        time.sleep(0.5)
+        b.type(LOGIN_PASS)
+        b.wait_prompt("the login with root's password")
+    finally:
+        b.answers(True)
+
+
 def stage_reboot(args, results, inst, nonce):
     """Boot the installed disk alone, write a file, power off."""
     b = Boot("reboot", inst["target"], args.workdir, {"QEMU_DISKS": "boot"}, args.timeout)
@@ -438,6 +524,16 @@ def stage_reboot(args, results, inst, nonce):
         need(log, r"^\[ INFO\] vfs: root switched to cosmofs on \S+; [1-9]\d* mount\(s\) moved onto it$",
              "the installed boot")
         need(log, r"^CosmoOS userland ready$", "the installed /etc/rc")
+        # The console's session (U17): the first boot asks for root's
+        # password, which then lives hashed in /etc/shadow, root's alone,
+        # and the shell came after a login.
+        need(log, r"root has no password yet: choose one now\.$", "the first boot's password")
+        need(log, r"^passwd: password for root changed by root$", "the first boot's password")
+        need(log, r" login: root$", "the login")
+        out = b.run("ls -l /etc/shadow; grep -c '^root:\\$6\\$' /etc/shadow; grep '^root:' /etc/passwd")
+        need(out, r"^-rw-------\s+1 root\s+root\s", "/etc/shadow readable by root alone")
+        need(out, r"^1$", "root's password as a SHA-512 crypt hash")
+        need(out, r"^root:x:0:0:", "/etc/passwd naming /etc/shadow")
         no_free_warning(log, "the installed boot's root mount")
         # Roadmap M3: the installed system's console -- and its /etc/rc --
         # is BusyBox ash (/etc/console-shell), which the kernel names 'sh';
@@ -467,9 +563,12 @@ def stage_reboot(args, results, inst, nonce):
                        "echo 1 > /run/svc/$s.pid; echo 1 > /run/svc/$s.child; done && sync && "
                        "cat /run/svc/dropbear.pid", "stale")
         need(out, r"^stale=0$", "stale pid files on the root's own /run")
+        stage_login_guard(b)
         rc = b.finish()
-        # After the shell's next prompt, when poweroff exits first.
-        need(b.text(), r"^(?:cosmo\$ )?init: disk root synced$", "the installed boot's power-off")
+        # After the shell's next prompt, when poweroff exits first. After a
+        # login, finish() powers off (`exit` logs out): init's SIGUSR2
+        # handler syncs and says so with its own line.
+        need(b.text(), r"^(?:cosmo\$ )?init: (?:disk root synced|power off requested)$", "the installed boot's power-off")
         if rc != EXIT_SUCCESS:
             raise Fail(f"reboot boot: QEMU exit code {rc}")
     except Exception:

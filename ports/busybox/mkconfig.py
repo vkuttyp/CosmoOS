@@ -28,10 +28,11 @@ PS KILL
 CHOWN CHGRP SU
 REBOOT HALT HWCLOCK NTPD
 MOUNT UMOUNT
-NICE RENICE""".split())
+NICE RENICE
+LOGIN PASSWD""".split())
 # M4 (decision 5); v1.0.2's everyday commands; ping over raw ICMP sockets; poweroff; shell completeness S1's
-# network inspection, S2's applets, S3's process tools, S4's ownership, S5's power and clock, S6's mounting and
-# roadmap 1.2 A5's nice values
+# network inspection, S2's applets, S3's process tools, S4's ownership, S5's power and clock, S6's mounting,
+# roadmap 1.2 A5's nice values, and the console's login (docs/userland/design.md, "The console's session")
 
 FORCE = {
     "STATIC": "y",                 # decision 6: a static binary
@@ -74,6 +75,9 @@ FORCE = {
     "FEATURE_MOUNT_LOOP": "n",
     "FEATURE_MOUNT_LOOP_CREATE": "n",
     "FEATURE_MTAB_SUPPORT": "n",
+    # The console's login: passwd hashes a new password with SHA-512 crypt ($6$), not defconfig's DES, which keeps
+    # eight characters and is broken by brute force.
+    "FEATURE_DEFAULT_PASSWD_ALGO": '"sha512"',
 }
 
 

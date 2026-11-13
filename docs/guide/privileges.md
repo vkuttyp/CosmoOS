@@ -23,7 +23,7 @@ the effective uid is 0, so a process that changes just its effective uid
 keeps its set, unusable until it switches back. Boot the installed
 system:
 
-<!-- test: session x86_64 prompt="cosmo$ " -->
+<!-- test: session x86_64 prompt="cosmo$ " login -->
 ```sh
 qemu-system-x86_64 -machine q35 -cpu qemu64,+nx -smp 2 -m 512M \
     -drive if=pflash,format=raw,readonly=on,file=efi-x86_64.fd \
@@ -36,7 +36,7 @@ qemu-system-x86_64 -machine q35 -cpu qemu64,+nx -smp 2 -m 512M \
 
 On AArch64:
 
-<!-- test: session aarch64 prompt="cosmo$ " -->
+<!-- test: session aarch64 prompt="cosmo$ " login -->
 ```sh
 qemu-system-aarch64 -machine virt -cpu cortex-a72 -smp 2 -m 512M \
     -drive if=pflash,format=raw,readonly=on,file=efi-aarch64.fd \
@@ -89,8 +89,8 @@ Power off:
 
 <!-- test: console -->
 ```console
-cosmo$ exit
-...init: disk root synced
+cosmo$ poweroff
+...init: power off requested
 ```
 
 Next: [Known limitations](limitations.md).

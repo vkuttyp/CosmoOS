@@ -35,12 +35,16 @@ prints 1, `sh -c "exit 3"` prints 3, a missing command prints 127);
 `init --selftest` (`exit 7` seen through `waitpid`; a killed `cat`
 reports 137). Gap: none.
 
-**U4. The boot ends when init's console shell exits, with the shell's
-status.** init runs `/etc/rc` to completion first, then one shell, and
-returns that shell's status; the kernel logs `init exited with status N`
+**U4. The boot ends when init's console session exits, with its
+status.** init runs `/etc/rc` to completion first, then one session
+(`/sbin/cosmo-console` where it exists, else the console shell), and
+returns its status. On the live system the session becomes the console
+shell, so the shell's exit ends the boot; on an installed system it is
+the login loop (U17), where a shell's exit is a logout and the boot ends
+with `poweroff`; the kernel logs `init exited with status N`
 and shuts down with success only for 0. Check: the boot test requires
 `init: shell exited with status 0` and the success exit code after the
-harness types `exit 0`. Gap: this single-shell policy is the bring-up
+harness types `exit 0`. Gap: this single-session policy is the bring-up
 choice; a respawn or service supervisor replaces it and this invariant
 with it.
 
@@ -75,7 +79,8 @@ Gap: none.
   arithmetic in the shell. (Background jobs and job control arrived with
   the job-control unit.)
 - No `getopt`; options are parsed by hand and must precede operands.
-- No service supervision, `getty`, login, users.
+- No `getty`, and no user but root: the console's login (U17) is root's
+  alone. (Services are supervised by `svc`.)
 - The utilities are a rescue set; the ports system (Phase 10) brings
   real ones.
 
@@ -269,3 +274,17 @@ mount; every stage: no passphrase in the serial log; `keyfile`: no prompt).
 Gap: the prompt's code is the signed boot archive's (verified boot), but
 the disk it unlocks is not verified before it mounts (backlog BOOT-4): a
 disk replaced wholesale by a plain pool boots without asking.
+
+**U17. An installed system's console runs no shell before a login, and
+its password is readable by root alone.** On a cosmofs root,
+`/sbin/cosmo-console` runs `passwd` while root has no password and then
+only `login`; the shell runs as `login`'s child after a password that
+matches `/etc/shadow`, which it keeps at mode 0600, and a logout returns
+to `login`. The live image, which has no accounts, runs the console
+shell after the welcome. Check: every installed-system test boots through
+`tests/boot/install_test.py`'s `Boot`, which reaches a prompt only by
+answering the password and login prompts (`test-install` among them);
+`make test-install` also checks the password's first boot and
+`/etc/shadow`'s mode. Gap: the serial console is the same console, so
+anyone at it is at the login screen too, as on other systems; ssh is
+unchanged (key only).
