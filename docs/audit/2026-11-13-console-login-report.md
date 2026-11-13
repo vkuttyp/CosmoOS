@@ -47,6 +47,21 @@ harnesses that drive an installed system's console.
 | `passwd` warns `can't lock '/etc/shadow': Invalid argument` (fcntl locks refused) | not fixed; the password is changed (backlog USR-10) |
 | Regenerating `busybox.config` by its README changes two unrelated options | kept as they were (backlog BUILD-11) |
 
+## Found in review
+
+Greptile and GitGuardian on #521; Codex found nothing.
+
+| Finding | Fix |
+|---|---|
+| The welcome wrote its facts, as root, to `/tmp/.welcome.$$`: `/tmp` is everyone's, and a link another user made under that name would be followed (onto `/etc/shadow`, say) | the facts are kept in a shell variable; the welcome writes no file |
+| `docs/guide/ssh.md` still said root has no password and `root:*` | it says the console's password does not log in over ssh |
+| `test-install` typed only the right password: a login that let anyone in would pass | `stage_login_guard`: a logout brings the login back, a wrong password is refused, no shell prompt until the right one. With the right password typed where the wrong one is expected, the stage fails (`no b'Login incorrect' for a wrong password refused`) |
+| The harness and the guide's runner each held a literal password for their throwaway guests, which the secret scanner flagged | each is made for the run (`secrets.token_hex`); the branch was rewritten so no commit holds one |
+
+After these fixes, on the developer's Mac, release builds: `make test-install` x86-64 PASS in 110.8 s, AArch64 PASS
+in 159.1 s (the Mac was busier: a one-minute load average near 9 at the start); both reboot logs show `Login
+incorrect` once and no password.
+
 ## Validation
 
 On the other machine (`docs/development.md`, "Running the matrix": the CI image, one container of 4 CPUs and 6

@@ -2,8 +2,9 @@
 
 An installed system runs the dropbear ssh server (2026.94, static, on
 port 22) as a service. It accepts **root** only, by **public key** only:
-root has no password (its `/etc/passwd` entry is `root:*:...`), and
-password authentication is compiled out of dropbear. You log in with an
+password authentication is compiled out of dropbear, so root's password,
+the one the console asks for ([Logging in](shell.md#logging-in)), does
+not log in over ssh. You log in with an
 Ed25519 or an RSA key, so an existing `~/.ssh/id_rsa.pub` works (RSA with
 SHA-256 signatures, `rsa-sha2-256`, which current OpenSSH clients offer;
 not the old SHA-1 `ssh-rsa`). The server's own host key is Ed25519:

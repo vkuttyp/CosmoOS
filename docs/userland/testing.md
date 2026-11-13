@@ -233,7 +233,7 @@ typed at the prompt, every serial log kept in `$(OUT)/test-install/`.
 
 Every boot of an installed system logs in (design.md, "The console's
 session"), and `Boot` answers as a person would: root's password
-(`LOGIN_PASS`) at the first boot's `New password:` and `Retype
+(`LOGIN_PASS`, made for the run and passed on in `COSMO_TEST_LOGIN`) at the first boot's `New password:` and `Retype
 password:`, then `root` and the password at each login. It types a
 password half a second after its prompt: BusyBox prints the prompt
 before it turns echo off, so an answer at once would be echoed into the
@@ -243,7 +243,10 @@ have rolled the base system back to a release without `poweroff`. The
 reboot stage checks the first boot's password (`root has no password
 yet`, `passwd: password for root changed by root`), the login, a 0600
 `/etc/shadow` holding a `$6$` hash for root, and `root:x` in
-`/etc/passwd`. The user guide's runner does the same for a session line
+`/etc/passwd`. Then, with `Boot`'s answers paused (`stage_login_guard`),
+it types the login itself: `exit` brings the login screen back, a wrong
+password gets `Login incorrect` and the login again, no shell prompt
+comes meanwhile, and root's password logs in. The user guide's runner does the same for a session line
 marked `login` (`tests/guide/run_guide.py`).
 
 ## `make test-upgrade` (`tests/boot/upgrade_test.py`)

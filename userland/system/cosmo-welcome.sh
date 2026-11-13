@@ -43,15 +43,16 @@ logo_rows='   ____
   \____\___/|___/_| |_| |_|\___/'
 
 printf '%s[2J%s[H\n' "$esc" "$esc"
-facts > /tmp/.welcome.$$
+# The facts are kept in a variable, not a file: /tmp is everyone's, and root must not write to a name there that
+# another user could have made a link.
+facts_out=$(facts)
 i=0
 while :; do
     i=$((i + 1))
     row=$(printf '%s\n' "$logo_rows" | sed -n "${i}p")
-    fact=$(sed -n "${i}p" /tmp/.welcome.$$)
+    fact=$(printf '%s\n' "$facts_out" | sed -n "${i}p")
     [ -z "$row" ] && [ -z "$fact" ] && break
     printf '%s%-34s%s %s\n' "$logo" "$row" "$off" "$fact"
 done
-rm -f /tmp/.welcome.$$
 printf '\n %sdmesg%s the kernel'"'"'s log   %spkg%s packages   %scosmo-upgrade --check%s a newer release   %spoweroff%s\n\n' \
     "$esc[1m" "$off" "$esc[1m" "$off" "$esc[1m" "$off" "$esc[1m" "$off"
