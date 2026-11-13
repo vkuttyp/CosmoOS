@@ -194,7 +194,10 @@ The two replays of the ring (`replay_log`, and `fbcon_attach` with no
 screen before) apply the floor to the ring's text, where the tag is all
 there is: `fbcon_drop_hidden` removes each line that begins with the tag
 of a level below the floor (`[DEBUG] `, `[ INFO] ` and `[ WARN] ` for
-ERROR) and keeps every other line.
+ERROR) and keeps every other line. Both ask `klog_copy` for one byte less
+than the ring holds: a ring that has wrapped then begins at a whole line
+(`klog_copy` skips to one whenever it was asked for less than it has),
+so the filter is not given the tail of a line whose tag is gone.
 
 These rules are CeeSafe, `kernel/core/fbrules.cee`: the floor, the
 filter and the self-test `console-log-floor`. Two pure functions of

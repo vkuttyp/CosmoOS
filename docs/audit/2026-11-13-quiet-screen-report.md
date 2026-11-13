@@ -36,6 +36,15 @@ own lines (BOOT-10) and one line per service from init (USR-9).
 | The first version put `sink_drop`'s comment on the new prototype in `selftest.h` | restored |
 | `fbcon.c`'s `channel` shifted by whatever width and shift it was given | `fbcon_pack` gives 0 for a channel wider than 32 bits or shifted past bit 31, which the validator refuses anyway |
 
+## Found in review
+
+| Finding (#518) | Fix |
+|---|---|
+| Greptile: a release kernel with self-tests (`BUILD=release SELFTEST=1`) logs from INFO, so the test's two DEBUG lines are never written and `console-log-floor` fails | the test sets the log's level to DEBUG for its writes and restores it. By reading only: that pair does not compile, on main either (`kernel/timer/timer.c:721`, backlog BUILD-9) |
+| Greptile: when the ring has wrapped, `klog_copy(buf, KLOG_RING_SIZE)` can begin in the middle of a line; the fragment has no tag and the filter keeps it | both replays ask for `KLOG_RING_SIZE - 1` bytes, for which `klog_copy` begins at a whole line |
+| Greptile: `fbcon.h` uses `size_t` and does not include `<stddef.h>` | included |
+| Codex: `log_floor` is in what was padding; a module built against the old header that did not zero its sink would have an arbitrary floor, and the loader accepts it as ABI 11 | `COSMO_MODULE_ABI_VERSION` is 12, and the boot harness's `hello` marker with it |
+
 ## Validation
 
 Run on 2026-11-13 on the tree of `49e522d4` (the compiled files are those of `e86bbeca`). Both halves ran on the
@@ -73,6 +82,10 @@ Also:
   same target on main at `bf595f3a` on the same machine, fails the same five self-tests (5 of 525): it is not this
   PR's, and is backlog TEST-27. A debug `test-platforms` there gave "no userland within 240s" on every machine: a
   debug boot's self-tests take longer than that on that machine.
+- After the review's fixes (the table above), on the other machine: the debug and release builds and
+  `make host-test` on both architectures, and a debug `make test` on each: x86-64 PASS in 238.3 s, AArch64 PASS in
+  300.6 s (526 self-tests each, `console-log-floor` and `fb-switch` ok). The first of these boots failed the
+  harness's `hello` marker, which named ABI v11; the marker is v12 now.
 - An earlier matrix of the first version (`afddff3a`, the same behaviour in C) passed on both architectures, the
   AArch64 half on the Mac: its debug boots took 190 s to 225 s.
 - `python3 scripts/cee-share.py --gate origin/main`: no tree has more C to convert than origin/main.

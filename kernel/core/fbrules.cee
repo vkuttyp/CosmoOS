@@ -33,6 +33,8 @@ extern "C" {
     fn console_unregister(sink: *mut console_sink);
     fn console_puts(s: *CChar);
     fn klog(level: u32, format: *CChar, ...);
+    fn klog_get_level() -> u32;
+    fn klog_set_level(level: u32);
 
     // log.h's levels, which the C compiler checks.
     const KLOG_DEBUG: i32 = 0;
@@ -213,6 +215,9 @@ unsafe fn logFloorTest(reason: *mut *CChar) -> bool {
     ALL_INFO.store(0);
     ALL_PLAIN.store(0);
 
+    // A release kernel's log starts at INFO: the test's DEBUG lines must be written to be counted.
+    let level = klog_get_level();
+    klog_set_level(truncate<u32>(KLOG_DEBUG));
     console_register(quietSink);
     console_register(allSink);
     klog(truncate<u32>(KLOG_DEBUG), "console-log-floor: a line below the floor\0".ptr as *CChar);
@@ -221,6 +226,7 @@ unsafe fn logFloorTest(reason: *mut *CChar) -> bool {
     console_puts("console-log-floor: not a log line\n\0".ptr as *CChar);
     console_unregister(allSink);
     console_unregister(quietSink);
+    klog_set_level(level);
 
     klog(
         truncate<u32>(KLOG_INFO),

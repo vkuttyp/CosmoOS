@@ -114,7 +114,9 @@ DEBUG log lines, one INFO log line, and one `console_puts`. The sink
 with no floor must count 2, 1 and 1; the sink with the floor 0, 1 and 1.
 Then the replay's filter: of `[ INFO] a`, `[ERROR] b`, `plain`,
 `[ WARN] c` and an unfinished `[DEBUG] d`, a floor at ERROR must keep
-exactly `[ERROR] b` and `plain`.
+exactly `[ERROR] b` and `plain`. The test sets the log's level to DEBUG
+for its four writes and restores it: a release kernel's log starts at
+INFO and would not write the two DEBUG lines.
 
 **`fb-console`** (both architectures, whenever the machine has a
 display; skipped, as `fb-bench` is, when a display driver's surface holds

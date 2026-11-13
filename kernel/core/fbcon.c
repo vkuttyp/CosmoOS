@@ -334,7 +334,7 @@ static void replay_log(struct fbcon *c)
     char *buf = kmalloc(KLOG_RING_SIZE, 0);
     if (buf == NULL)
         return;
-    size_t n = fbcon_drop_hidden(buf, klog_copy(buf, KLOG_RING_SIZE), fbcon_log_floor());
+    size_t n = fbcon_drop_hidden(buf, klog_copy(buf, KLOG_RING_SIZE - 1), fbcon_log_floor());
 
     /* Walk back over at most `rows` newlines. */
     size_t start = n;
@@ -625,7 +625,7 @@ int fbcon_attach(const struct fbcon_surface *s)
         carry_text(n, prev);
     } else if (log != NULL) {
         /* No screen before: the newest screenful, as fbcon_init shows it. */
-        size_t log_len = fbcon_drop_hidden(log, klog_copy(log, KLOG_RING_SIZE), fbcon_log_floor());
+        size_t log_len = fbcon_drop_hidden(log, klog_copy(log, KLOG_RING_SIZE - 1), fbcon_log_floor());
         size_t start = log_len;
         unsigned lines = 0;
         while (start > 0 && lines < n->rows) {

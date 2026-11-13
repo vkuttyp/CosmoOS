@@ -35,7 +35,7 @@ Open lines (struck lines are not counted):
 |---|---|---|---|---|---|
 | Block devices | 3 | 0 | 2 | 4 | 9 |
 | Boot chain and verified boot | 0 | 6 | 3 | 1 | 10 |
-| Build and tooling | 0 | 2 | 0 | 4 | 6 |
+| Build and tooling | 0 | 2 | 0 | 5 | 7 |
 | cosmofs and storage | 4 | 1 | 7 | 13 | 25 |
 | Documentation | 0 | 0 | 1 | 1 | 2 |
 | Drivers and platforms | 4 | 0 | 2 | 12 | 18 |
@@ -53,7 +53,7 @@ Open lines (struck lines are not counted):
 | Commands | 1 | 0 | 6 | 1 | 8 |
 | VFS | 3 | 0 | 5 | 3 | 11 |
 | Virtualisation | 3 | 0 | 0 | 6 | 9 |
-| **all** | **47** | **23** | **50** | **103** | **223** |
+| **all** | **47** | **23** | **50** | **104** | **224** |
 
 ## Block devices
 
@@ -90,6 +90,7 @@ Open lines (struck lines are not counted):
 - **BUILD-6** nice-to-have, L. Native programs are static: no shared native libc and no native `PT_INTERP` (deferred by the owner past 1.1).
 - ~~**BUILD-7** correctness, S. An rc's release run reads `docs/releases/vX.Y.Z-rcN.md`, which no release has, so the final notes (`vX.Y.Z.md`) are first checked by `check-release-version.py` in the final tag's run: v1.0.11's failed on "CosmoOS 1.0.10" in its notes (run 39942569981) after v1.0.11-rc1 had passed (run 39938572061). Check `vX.Y.Z.md` in the rc's run, or in CI when `docs/releases/` changes.~~ Done by #446 (the rc's run builds and checks `vX.Y.Z.md`).
 - **BUILD-8** nice-to-have, S. The BusyBox port's `libclang_rt.builtins.a` takes every file of compiler-rt's `lib/builtins`, `crtbegin.c` and `crtend.c` with them: a link with clang's own `clang_rt.crtbegin.o` pulls `crtend.o` in a second time (duplicate `__CTOR_LIST_END__`). The ports' links use no crtbegin and are unaffected; exclude the two files (A1's clang evaluation, whose package drops them).
+- **BUILD-9** nice-to-have, S. `make BUILD=release SELFTEST=1` does not compile: `kernel/timer/timer.c:721` reads `g_test_cpu_offset_ns`, which only a debug build declares (main at `bf595f3a`; `docs/audit/2026-11-13-quiet-screen-report.md`). No target or CI job builds that pair.
 
 ## cosmofs and storage
 
