@@ -3765,3 +3765,13 @@ See the [history index](README.md).
     owner asked for the quiet screen in the release first.
   - The release run's package-repository job failed for want of its key
     (backlog BUILD-10); a dispatch of `repository.yml` published the index.
+- **Landing terminal, first PR: the screen's colours and escapes (2026-11-13;
+  the owner's request after v1.1.0).**
+  - The framebuffer console keeps colours per cell and obeys SGR colours,
+    clear, cursor placement and moves, and erase to the end of a row;
+    any other escape sequence draws nothing. The parser is CeeSafe
+    (`kernel/core/fbrules.cee`); self-test `fb-escapes`, and
+    `make test-display` reads a red word's pixels.
+  - `kernel/core/cmdline.c` is CeeSafe (`cmdline.cee`), so `kernel/` has
+    less C than before.
+  - Report: `docs/audit/2026-11-13-screen-colours-report.md`.

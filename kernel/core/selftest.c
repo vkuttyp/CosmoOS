@@ -921,6 +921,7 @@ static const struct selftest tests[] = {
     { "console-lines",   selftest_console_lines },
     { "console-sink-drop", selftest_console_sink_drop },
     { "console-log-floor", selftest_console_log_floor },
+    { "fb-escapes", selftest_fb_escapes },
     { "fb-bench",        selftest_fb_bench },
     { "fb-switch",       selftest_fb_switch },
     /* After the hotplug tests: unplugging the hub takes the keyboard

@@ -108,5 +108,15 @@ int fbcon_log_floor(void);
 size_t fbcon_drop_hidden(char *buf, size_t n, int floor);
 uint32_t fbcon_pack(const struct bootinfo_framebuffer *fb, uint32_t r, uint32_t g, uint32_t b);
 uint32_t fbcon_scale(uint32_t width, uint32_t height, uint32_t max);
+/* fbrules.cee, the escapes the screen obeys (design.md, "Colours and escapes"). */
+struct fbcon_esc { uint32_t state, count, p0, p1, p2, p3, fg, bg, bold, a, n, kind; };
+enum { FBCON_ESC_PUT, FBCON_ESC_NONE, FBCON_ESC_CLEAR, FBCON_ESC_MOVE, FBCON_ESC_REL, FBCON_ESC_ERASE };
+uint32_t fbcon_esc_feed(struct fbcon_esc *e, uint32_t b);
+void fbcon_esc_reset(struct fbcon_esc *e);
+uint32_t fbcon_esc_attr(const struct fbcon_esc *e);
+void fbcon_esc_place(const struct fbcon_esc *e, uint32_t *cx, uint32_t *cy, uint32_t cols, uint32_t rows);
+void fbcon_palette(const struct bootinfo_framebuffer *fb, uint32_t *out);
+size_t fbcon_tail_start(const char *buf, size_t n, uint32_t rows);
+uint32_t fbcon_rows_used(const char *text, uint32_t cols, uint32_t rows, uint32_t cy);
 
 #endif /* KERNEL_FBCON_H */

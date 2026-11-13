@@ -118,6 +118,28 @@ exactly `[ERROR] b` and `plain`. The test sets the log's level to DEBUG
 for its four writes and restores it: a release kernel's log starts at
 INFO and would not write the two DEBUG lines.
 
+**`fb-escapes`** (both architectures, any machine; CeeSafe,
+`kernel/core/fbrules.cee`): the escape parser alone. `ESC [ 1 ; 31 m`
+draws nothing and makes the attribute bright red (0x09), `ESC [ 44 m`
+adds a blue background (0x49), `ESC [ 0 m` restores 0x07; `ESC [ 2 J`
+is a clear; `ESC [ 5 ; 10 H` moves to row 4, column 9; `ESC [ 300 C`
+from column 120 of 128 stops at 127; `ESC [ K` erases; `ESC [ ? 25 l`
+is read past and the next byte drawn; a newline ends an unfinished
+`ESC [ 1` and is obeyed; the last two rows of `a\nb\nc` start at `b`.
+`ESC [ 66 ; 1 H` is a move to row 65, not a move down (rows 65 to 68
+are the letters A to D), the last row of a 48-row screen; `ESC [ 1 D`
+from a pending wrap (column 128 of 128) reaches 126; `ESC [ > 4 ; 1 m`
+leaves the attribute 0x07 and `ESC [ ? 2 J` does not clear; `ESC ( B`,
+`ESC ] 0 ; title BEL` and `ESC ] 0 ; t ESC \` draw nothing and the next
+byte is drawn; an ESC ends an unfinished `ESC [ 1` and `ESC [ 31 m` then
+makes red; a surface switch keeps rows through the cursor's and the last
+with text (`fbcon_rows_used`).
+
+`make test-display` also prints `colour-check RED grey` with `RED` in
+bright red through BusyBox `printf` and reads the screendump: the word
+`RED` is drawn in red pixels only, `grey` after the reset in grey, and
+the row reads back with no escape drawn.
+
 **`fb-console`** (both architectures, whenever the machine has a
 display; skipped, as `fb-bench` is, when a display driver's surface holds
 the console, which a display change can free under a pixel read). Everything is checked by reading the pixels back through the

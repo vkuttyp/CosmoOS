@@ -366,6 +366,7 @@ def check_shape(args, face, shape, want_w, want_h, results):
                        f"{want_w}x{want_h} screendump reads back as text in {8 * scale}x{16 * scale} cells ({used} non-blank rows of {len(lines)}), "
                        f"the marker at row {at} under its command, and on the serial console")
         if shape == "virtio":
+            check_colour(b, sock, shot, face, want_w, want_h, scale, results)
             check_resize(args, face, b, sock, vnc, want_w, want_h, marker, results)
         rc = b.finish()
         if rc != install_test.EXIT_SUCCESS:
@@ -373,6 +374,41 @@ def check_shape(args, face, shape, want_w, want_h, results):
     except BaseException:
         b.kill()
         raise
+
+
+def check_colour(b, sock, shot, face, w, h, scale, results):
+    """fbcon obeys colour escapes (docs/kernel/diagnostics/design.md,
+    "Colours and escapes"): a word printed bright red is drawn in red, and
+    the reset after it puts the next word back in the default grey; the
+    escapes themselves draw nothing. Its pixels are read, not just its
+    glyphs, which decode() finds in any colour."""
+    out = b.run("printf 'colour-check \\033[1;31mRED\\033[0m grey\\n'")
+    need(out, r"colour-check \x1b\[1;31mRED\x1b\[0m grey", "the escapes on the serial console, as written")
+    lines = screen_until(sock, shot, face, w, h, scale, lambda ls: "colour-check RED grey" in ls)
+    if "colour-check RED grey" not in lines:
+        raise Fail("colour: 'colour-check RED grey' is not on the screen (an escape drew something?); its last rows:\n"
+                   + "\n".join(lines[-6:]))
+    row = lines.index("colour-check RED grey")
+    _, _, px = read_ppm(shot)
+    cw, ch = 8 * scale, 16 * scale
+
+    def colours(col0, ncols):
+        seen = set()
+        for y in range(row * ch, (row + 1) * ch):
+            for x in range(col0 * cw, (col0 + ncols) * cw):
+                p = (y * w + x) * 3
+                if max(px[p:p + 3]) > 0x80:
+                    seen.add(tuple(px[p:p + 3]))
+        return seen
+
+    red = colours(len("colour-check "), 3)
+    grey = colours(len("colour-check RED "), 4)
+    if not red or any(not (r > 0xc0 and g < 0x80 and bl < 0x80) for r, g, bl in red):
+        raise Fail(f"colour: 'RED' is drawn in {sorted(red)}, not bright red")
+    if not grey or any(not (abs(r - g) < 8 and abs(g - bl) < 8) for r, g, bl in grey):
+        raise Fail(f"colour: 'grey' after the reset is drawn in {sorted(grey)}, not grey")
+    results.append(f"colour: ESC [ 1 ; 31 m drew 'RED' in {sorted(red)[0]} and ESC [ 0 m the next word in "
+                   f"{sorted(grey)[0]}, at row {row}, the escapes themselves drawing nothing")
 
 
 def check_resize(args, face, b, sock, vnc, w0, h0, marker, results):

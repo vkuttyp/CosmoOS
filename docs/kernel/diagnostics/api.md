@@ -87,8 +87,9 @@ when `console_any_sink()` is false (on AArch64 when the boot info names
 no serial port or the command line says `serial=none`; x86-64 always has
 COM1 by then). It draws through the loader's direct map
 (`bootinfo_phys_to_virt(fb->phys)`) with a static character buffer of
-`FBCON_EARLY_CELLS` (65536) cells -- no heap exists yet; a mode with more
-cells uses its top rows -- and registers the `fbcon` sink, logging
+`FBCON_EARLY_CELLS` (65536) bytes, half characters and half colours, so
+32768 cells -- no heap exists yet; a mode with more cells uses its top
+rows -- and registers the `fbcon` sink, logging
 `fbcon: no serial console: the framebuffer is the console from the first
 line (<cols>x<rows> cells)`. It does nothing when there is no
 framebuffer, the range extends beyond `hhdm_size` or overlaps usable
@@ -154,6 +155,23 @@ Also `fbrules.cee`. An eight-bit colour as a pixel of `fb`'s format (a
 channel wider than 32 bits or shifted past bit 31 contributes 0), and
 how many screen pixels a font pixel is each way on a screen of that
 size, 1 to `max`.
+
+### `uint32_t fbcon_esc_feed(struct fbcon_esc *e, uint32_t b)` and the rest of the escape parser
+
+`kernel/core/fbrules.cee`, for `fbcon.c` ("Colours and escapes" in
+`design.md`). `fbcon_esc_feed` says what byte `b` means after the bytes
+before it: `FBCON_ESC_PUT` (draw or obey it as itself), `NONE` (part of
+a sequence), `CLEAR`, `MOVE` (row `e->a`, column `e->n`, from 0), `REL`
+(direction `e->a`, 'A' to 'D', by `e->n`) or `ERASE`; `e->kind` says
+which of MOVE and REL `e->a` belongs to.
+`fbcon_esc_place` turns a MOVE or REL into the cursor's new cell on a
+screen of `cols` by `rows`; `fbcon_esc_attr` is the attribute byte the
+state draws with (foreground | background << 4); `fbcon_esc_reset`
+restores the defaults; `fbcon_palette` writes `fb`'s sixteen colours;
+`fbcon_tail_start` is where the last `rows` lines of a text start;
+`fbcon_rows_used` is how many rows of a screen's text a surface switch
+keeps (through the cursor's row and the last row with a character). The
+caller owns `e` and serialises its calls (the console lock).
 
 ## `kernel/log.h`
 

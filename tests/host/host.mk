@@ -278,7 +278,7 @@ $(HOST_OUT)/test_upgrade_be: $(call src_paths,$(HOST_UPBE_SRCS)) | $(CEE_STAMP)
 $(HOST_OUT)/test_gpt: $(call src_paths,$(HOST_GPT_SRCS)) | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
 	$(Q)mkdir -p $(dir $@)
-	$(Q)$(HOST_CC) $(HOST_CFLAGS) -DCMDLINE_HOST_TEST=1 $^ $(HOST_LDFLAGS) -o $@
+	$(Q)$(HOST_CC) $(HOST_CFLAGS) $^ $(HOST_LDFLAGS) -o $@
 
 $(HOST_OUT)/test_part: $(call src_paths,$(HOST_PART_SRCS)) $(ROOT)/kernel/include/kernel/part.h $(ROOT)/kernel/include/kernel/blk.h | $(CEE_STAMP)
 	$(call log,HOSTCC,$@)
