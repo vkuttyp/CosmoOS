@@ -4971,6 +4971,15 @@ the 240 s deadline. The PR changes the boot harness only where
 `Boot.per_command` is called, which `snapshot_test.py` does not. Three
 sightings now, all x86-64 and all a reset inside one QEMU, where the
 harness has no firmware-stall retry (backlog TEST-21). Rerun.
+**Fourth sighting, 2026-11-13:** CI, PR #520 at `6060f7ae` (run
+43448175726, job `net-login test (x86_64)`), the reboot stage: `FAIL:
+reboot: no a second kernel banner after reboot before the deadline`.
+`boot-reboot-times.log` ends at 12.35 s with `reboot: restart through
+the ACPI reset register (port 0xcf9, value 0xf)`, and `boot-reboot.log`
+has only the firmware's screen clears after it, five pairs. The PR
+changes the framebuffer console's escapes; the kernel had written its
+last line and reset the machine. The same job passed on the PR's
+previous head (run 43431573649). Rerun.
 
 
 ## ash history: the nested shell stopped, 2026-10-18 and 2026-10-20
