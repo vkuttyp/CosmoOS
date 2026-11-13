@@ -26,7 +26,7 @@ until python3 -c 'import socket; socket.create_connection(("127.0.0.1", 8000))' 
 Boot the installed system (the `hostfwd` option in these commands is
 what makes port 2222 on your computer reach port 22):
 
-<!-- test: session x86_64 prompt="cosmo$ " -->
+<!-- test: session x86_64 prompt="cosmo$ " login -->
 ```sh
 qemu-system-x86_64 -machine q35 -cpu qemu64,+nx -smp 2 -m 512M \
     -drive if=pflash,format=raw,readonly=on,file=efi-x86_64.fd \
@@ -39,7 +39,7 @@ qemu-system-x86_64 -machine q35 -cpu qemu64,+nx -smp 2 -m 512M \
 
 On AArch64:
 
-<!-- test: session aarch64 prompt="cosmo$ " -->
+<!-- test: session aarch64 prompt="cosmo$ " login -->
 ```sh
 qemu-system-aarch64 -machine virt -cpu cortex-a72 -smp 2 -m 512M \
     -drive if=pflash,format=raw,readonly=on,file=efi-aarch64.fd \
@@ -135,8 +135,8 @@ Power off from the console:
 
 <!-- test: console -->
 ```console
-cosmo$ exit
-...init: disk root synced
+cosmo$ poweroff
+...init: power off requested
 ```
 
 Next: [Packages](packages.md).

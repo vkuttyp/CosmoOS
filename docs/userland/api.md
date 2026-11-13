@@ -14,6 +14,9 @@ below are meant to stay; the exit statuses follow Unix convention.
 | `bin/<name>` | `/bin/<name>` | 0755 | `userland/shell/sh.c`, `userland/coreutils/<name>.c` |
 | `sbin/<name>` | `/sbin/<name>` | 0755 | `userland/system/<name>.c` |
 | `etc/rc` | `/etc/rc` | 0644 | `userland/etc/rc` |
+| `sbin/cosmo-console` | `/sbin/cosmo-console`: the console's session (design.md, "The console's session") | 0755 | `userland/system/cosmo-console.sh` |
+| `bin/cosmo-welcome` | `/bin/cosmo-welcome`: the welcome screen | 0755 | `userland/system/cosmo-welcome.sh` |
+| `etc/profile` | `/etc/profile`, read by a login shell: on the console the prompt, the path and the welcome | 0644 | `userland/etc/profile` |
 | `etc/fstab` | `/etc/fstab` (lists nothing; `mount -a` in `/etc/rc` reads it, shell completeness S6) | 0644 | `userland/etc/fstab` |
 | `etc/rc.test` | `/etc/rc.test` (self-test builds only, `SELFTEST=1`; its Linux and virtualization sections report `skipped` when the x86-only fixtures are absent) | 0644 | `userland/etc/rc.test` |
 
@@ -27,7 +30,7 @@ root and everything else under `/boot`.
 
 | Invocation | Behaviour | Exit status |
 |---|---|---|
-| `init` | prints `init: CosmoOS userland, pid N`; sets `PATH=/bin:/sbin:/usr/bin:/usr/sbin`, `HOME=/root` (and makes `/root`, 0700, on the root in use; `/` before shell completeness S2); if `/etc/rc` exists runs `sh /etc/rc`, waits, prints `init: rc exited with status N`; runs `sh` on the console (handles 0, 1, 2 inherited), waits, prints `init: shell exited with status N` | the shell's status (the kernel treats init's exit as the end of the boot) |
+| `init` | prints `init: CosmoOS userland, pid N`; sets `PATH=/bin:/sbin:/usr/bin:/usr/sbin`, `HOME=/root` (and makes `/root`, 0700, on the root in use; `/` before shell completeness S2); if `/etc/rc` exists runs `sh /etc/rc`, waits, prints `init: rc exited with status N`; runs `/bin/sh /sbin/cosmo-console` on the console when the script exists, else `sh` (handles 0, 1, 2 inherited; design.md, "The console's session"), waits, prints `init: shell exited with status N` | the shell's status (the kernel treats init's exit as the end of the boot) |
 | `init --selftest` | `fs_selftest`, `net_selftest`, `proc_selftest`, then the Phase 4 checks; prints `USERTEST: PASS` or `USERTEST: FAIL (n checks)` | 0 or 1 |
 | `init --crash` | prints `init: crashing on purpose` and writes to address 0 | 139 (fault) |
 | `init --block` | reads one byte from a pipe of its own and exits 5 (until the epoll-callback unit it read handle 0, and a key the HID harness typed ended it) | 128 + sig when killed; 5 if the read returns; 6 if the pipe cannot be made |

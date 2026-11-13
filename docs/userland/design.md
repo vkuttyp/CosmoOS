@@ -168,6 +168,44 @@ non-executable file and a directory `EACCES`, a missing file `ENOENT`,
 an empty `argv` `EINVAL`), `waitpid` with no children `ECHILD`,
 `kill(999999)` `ESRCH`, `kill(pid, 0)` `EINVAL`, `dup2(h, 64)` `EINVAL`.
 
+## The console's session
+
+What the console shows after `/etc/rc` is `/sbin/cosmo-console`'s, a
+shell script init runs with BusyBox ash (`/bin/sh /sbin/cosmo-console`:
+init's spawn takes a program, not a script) in place of the console shell
+when it exists (the console shell, `/etc/console-shell` or
+`/bin/cosmo-sh`, still runs `/etc/rc`). It leads the console's session as the shell did, with the
+same environment.
+
+- **The live system** (the root is in memory, not cosmofs): the welcome
+  screen (`/bin/cosmo-welcome`), then `exec` of the console shell, as
+  before. The image has no accounts to protect, and the harnesses drive
+  its shell as they always have.
+- **An installed system** (the root is cosmofs): root's password lives
+  in `/etc/shadow` (0600), and `/etc/passwd` says `x`. A root without one
+  (`*`, as every system before this had) is asked for one, once, with
+  BusyBox `passwd` (SHA-512 crypt), before the first login. Then the
+  login screen -- the release, the architecture, the machine's name and
+  address -- and BusyBox `login`, again after each logout. A system
+  installed before this, whose `/etc/passwd` held `root:*`, gets
+  `/etc/shadow` made and `x` written at its first such boot.
+
+The login shell reads `/etc/profile`, which on the console (no
+`SSH_CONNECTION`) sets the prompt and path the console shell always had
+and shows the welcome screen. `/bin/cosmo-welcome` clears the screen and
+prints the CosmoOS logo with the machine's facts beside it, each read
+from what any user may read (`uname`, `/proc`, `stty`, `ip`, `pkg`), in
+colour on a framebuffer console (docs/kernel/diagnostics/design.md,
+"Colours and escapes").
+
+Logging out (`exit`) brings the login screen back, so it no longer ends
+the boot: `poweroff` does (init's SIGUSR2), from any shell that holds
+PRIV_SYS_ADMIN. The scripts, not init, hold the policy so that no C is
+added (CI's `cee-share`; userland has no CeeSafe yet); init's only part
+is choosing `/sbin/cosmo-console` when it is there, which is how a
+system upgraded from an older release, whose `/etc/console-shell` names
+`/bin/sh`, gets the login too.
+
 ## The shell
 
 ### Structure (`userland/shell/sh.c`, one file)

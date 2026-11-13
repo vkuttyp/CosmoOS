@@ -11,7 +11,7 @@ server is `10.0.2.3`.
 Boot the installed system as on the previous page. On x86-64, then on
 AArch64:
 
-<!-- test: session x86_64 prompt="cosmo$ " -->
+<!-- test: session x86_64 prompt="cosmo$ " login -->
 ```sh
 qemu-system-x86_64 -machine q35 -cpu qemu64,+nx -smp 2 -m 512M \
     -drive if=pflash,format=raw,readonly=on,file=efi-x86_64.fd \
@@ -24,7 +24,7 @@ qemu-system-x86_64 -machine q35 -cpu qemu64,+nx -smp 2 -m 512M \
 
 On AArch64:
 
-<!-- test: session aarch64 prompt="cosmo$ " -->
+<!-- test: session aarch64 prompt="cosmo$ " login -->
 ```sh
 qemu-system-aarch64 -machine virt -cpu cortex-a72 -smp 2 -m 512M \
     -drive if=pflash,format=raw,readonly=on,file=efi-aarch64.fd \
@@ -180,8 +180,8 @@ kill $!
 
 <!-- test: console -->
 ```console
-cosmo$ exit
-...init: disk root synced
+cosmo$ poweroff
+...init: power off requested
 ```
 
 Next: [ssh](ssh.md).

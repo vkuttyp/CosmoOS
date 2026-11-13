@@ -213,8 +213,9 @@ typed at the prompt, every serial log kept in `$(OUT)/test-install/`.
   (root=boot-disk)`, the kernel's `root switched to cosmofs`
   with at least one mount moved, `the old root (ramfs) is released`, and
   the installed `/etc/rc`'s `CosmoOS userland ready`; then
-  `echo NONCE > /persist.txt && sync` and `/dev/console` listed; on exit,
-  `init: disk root synced`.
+  `echo NONCE > /persist.txt && sync` and `/dev/console` listed; at the
+  end, `init: power off requested` (or `init: disk root synced` from a
+  boot without a login).
 - **persist**: the same disk booted again: `cat /persist.txt` prints the
   nonce; then `pkg update && pkg install hello && hello && pkg list` exits
   0 with `hello, world (hello 1.1)` and `hello 1.1 prints a greeting`, from
@@ -227,6 +228,23 @@ typed at the prompt, every serial log kept in `$(OUT)/test-install/`.
   resolves it, init says
   `cannot mount vda ... staying on the live root`, and the live shell
   answers.
+
+### Logging in
+
+Every boot of an installed system logs in (design.md, "The console's
+session"), and `Boot` answers as a person would: root's password
+(`LOGIN_PASS`) at the first boot's `New password:` and `Retype
+password:`, then `root` and the password at each login. It types a
+password half a second after its prompt: BusyBox prints the prompt
+before it turns echo off, so an answer at once would be echoed into the
+log. After a login `finish()` ends the boot with `kill -USR2 1` (init's
+power off), because `exit` returns to the login screen, and a test may
+have rolled the base system back to a release without `poweroff`. The
+reboot stage checks the first boot's password (`root has no password
+yet`, `passwd: password for root changed by root`), the login, a 0600
+`/etc/shadow` holding a `$6$` hash for root, and `root:x` in
+`/etc/passwd`. The user guide's runner does the same for a session line
+marked `login` (`tests/guide/run_guide.py`).
 
 ## `make test-upgrade` (`tests/boot/upgrade_test.py`)
 

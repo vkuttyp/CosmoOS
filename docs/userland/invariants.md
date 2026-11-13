@@ -269,3 +269,17 @@ mount; every stage: no passphrase in the serial log; `keyfile`: no prompt).
 Gap: the prompt's code is the signed boot archive's (verified boot), but
 the disk it unlocks is not verified before it mounts (backlog BOOT-4): a
 disk replaced wholesale by a plain pool boots without asking.
+
+**U17. An installed system's console runs no shell before a login, and
+its password is readable by root alone.** On a cosmofs root,
+`/sbin/cosmo-console` runs `passwd` while root has no password and then
+only `login`; the shell runs as `login`'s child after a password that
+matches `/etc/shadow`, which it keeps at mode 0600, and a logout returns
+to `login`. The live image, which has no accounts, runs the console
+shell after the welcome. Check: every installed-system test boots through
+`tests/boot/install_test.py`'s `Boot`, which reaches a prompt only by
+answering the password and login prompts (`test-install` among them);
+`make test-install` also checks the password's first boot and
+`/etc/shadow`'s mode. Gap: the serial console is the same console, so
+anyone at it is at the login screen too, as on other systems; ssh is
+unchanged (key only).

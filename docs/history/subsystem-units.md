@@ -3775,3 +3775,15 @@ See the [history index](README.md).
   - `kernel/core/cmdline.c` is CeeSafe (`cmdline.cee`), so `kernel/` has
     less C than before.
   - Report: `docs/audit/2026-11-13-screen-colours-report.md`.
+- **Landing terminal, second PR: the welcome screen and the login (2026-11-13;
+  the owner's request after v1.1.0).**
+  - `/sbin/cosmo-console` (a script init runs with ash) is the console's
+    session: on the live image the welcome screen and the shell; on an
+    installed system root's password at the first boot (BusyBox
+    `passwd`, SHA-512, `/etc/shadow` 0600), then BusyBox `login`, again
+    after each logout. `/etc/profile` shows the welcome after a console
+    login: `/bin/cosmo-welcome`, the CosmoOS logo and the machine's facts
+    in colour. No C added; init only chooses the script.
+  - The harness and the guide's runner answer the password and login
+    prompts; a logged-in test boot ends with `kill -USR2 1`. U17.
+  - Report: `docs/audit/2026-11-13-console-login-report.md`.
