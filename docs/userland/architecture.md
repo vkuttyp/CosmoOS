@@ -46,7 +46,11 @@ provides `/`, `/tmp`, `/mnt`, `/dev`), runs `/etc/rc` through `/bin/sh`
 if it exists and waits for it, then runs `/bin/sh` on the console
 (handles 0, 1, 2 inherited) and waits; when the shell exits, init logs
 the status and exits with it, which ends the boot (the kernel treats the
-exit of init as "boot complete", as in earlier phases). Orphans are
+exit of init as "boot complete", as in earlier phases). Where
+`/sbin/cosmo-console` exists init runs it through `/bin/sh` in the
+shell's place: the console's session (design.md, "The console's
+session"), which on an installed system is a login, so there a shell's
+exit logs out and `poweroff` ends the boot. Orphans are
 reparented to init by the kernel; init reaps them with `waitpid(-1,
 WNOHANG)` whenever its wait returns. The `--selftest` and `--crash`
 modes remain (the kernel self-tests use them). Service supervision
