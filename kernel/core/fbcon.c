@@ -49,8 +49,11 @@ struct fbcon {
     uint32_t cell_w, cell_h;     /* FONT_WIDTH * scale, FONT_HEIGHT * scale */
     uint32_t cols, rows;         /* cells */
     uint32_t cx, cy;             /* cursor, in cells */
-    uint32_t fg, bg;             /* packed pixel values */
+    uint32_t fg, bg;             /* packed pixel values: the default colours */
+    uint32_t palette[16];        /* packed: the 16 colours an attribute names */
     char *text;                  /* cols * rows cells, the screen as characters */
+    uint8_t *attr;               /* cols * rows: each cell's colours (fbcon_esc_attr), after text */
+    struct fbcon_esc esc;        /* the escape sequence being read (fbrules.cee) */
     uint32_t scroll_rows;        /* cell rows moved by one scroll */
     bool ready;
     /* A driver's surface (fbcon_attach), or NULL for the boot framebuffer. */
@@ -156,8 +159,9 @@ static FBCON_DRAW void fbcon_draw_clear_rows(struct fbcon *c, uint32_t first, ui
     }
 }
 
-static FBCON_DRAW void fbcon_draw_glyph(struct fbcon *c, uint32_t col, uint32_t row, unsigned char ch)
+static FBCON_DRAW void fbcon_draw_glyph(struct fbcon *c, uint32_t col, uint32_t row, unsigned char ch, uint8_t attr)
 {
+    uint32_t fg = c->palette[attr & 15], bg = c->palette[attr >> 4];
     const uint8_t *glyph = font8x16[font_index(ch)];
     uint32_t s = c->scale;
     uint32_t x0 = col * c->cell_w;
@@ -174,7 +178,7 @@ static FBCON_DRAW void fbcon_draw_glyph(struct fbcon *c, uint32_t col, uint32_t 
         uint32_t n = 0;
 #pragma clang loop unroll(disable)
         for (uint32_t gx = 0; gx < FONT_WIDTH; gx++) {
-            uint32_t value = (bits & (0x80u >> gx)) ? c->fg : c->bg;
+            uint32_t value = (bits & (0x80u >> gx)) ? fg : bg;
 #pragma clang loop unroll(disable)
             for (uint32_t k = 0; k < s; k++)
                 line[n++] = value;
@@ -203,10 +207,8 @@ static FBCON_DRAW void fbcon_draw_glyph(struct fbcon *c, uint32_t col, uint32_t 
  * never a source, only a destination. */
 static FBCON_DRAW void fbcon_draw_repaint(struct fbcon *c)
 {
-    for (uint32_t row = 0; row < c->rows; row++) {
-        for (uint32_t col = 0; col < c->cols; col++)
-            fbcon_draw_glyph(c, col, row, (unsigned char)c->text[row * c->cols + col]);
-    }
+    for (uint32_t i = 0; i < c->rows * c->cols; i++)
+        fbcon_draw_glyph(c, i % c->cols, i / c->cols, (unsigned char)c->text[i], c->attr[i]);
     g_stats.repaints++;
 }
 
@@ -232,6 +234,8 @@ static void scroll(struct fbcon *c)
 
     memmove(c->text, c->text + (size_t)n * c->cols, keep);
     memset(c->text + keep, ' ', (size_t)n * c->cols);
+    memmove(c->attr, c->attr + (size_t)n * c->cols, keep);
+    memset(c->attr + keep, 0x07, (size_t)n * c->cols);
     fbcon_draw_repaint(c);
     damage(c, 0, c->rows * c->cell_h);
     g_stats.scrolls++;
@@ -248,10 +252,50 @@ static void newline(struct fbcon *c)
     c->cy = c->rows - c->scroll_rows;
 }
 
+/* Cells [from, to) of the cursor's row blank. */
+static void blank(struct fbcon *c, uint32_t from, uint32_t to)
+{
+    for (uint32_t x = from; x < to && x < c->cols; x++) {
+        c->text[c->cy * c->cols + x] = ' ';
+        c->attr[c->cy * c->cols + x] = 0x07;
+        fbcon_draw_glyph(c, x, c->cy, ' ', 0x07);
+    }
+    damage(c, c->cy * c->cell_h, (c->cy + 1) * c->cell_h);
+}
+
 static void putc(struct fbcon *c, char ch)
 {
     unsigned char b = (unsigned char)ch;
 
+    switch (fbcon_esc_feed(&c->esc, b)) {
+    case FBCON_ESC_PUT:
+        break;
+    case FBCON_ESC_CLEAR:
+        memset(c->text, ' ', (size_t)c->cols * c->rows);
+        memset(c->attr, 0x07, (size_t)c->cols * c->rows);
+        fbcon_draw_clear_rows(c, 0, c->rows);
+        damage(c, 0, c->height);
+        c->cx = c->cy = 0;
+        return;
+    case FBCON_ESC_MOVE:
+        c->cy = c->esc.a < c->rows ? c->esc.a : c->rows - 1;
+        c->cx = c->esc.n < c->cols ? c->esc.n : c->cols - 1;
+        return;
+    case FBCON_ESC_REL:
+        if (c->esc.a == 'A' || c->esc.a == 'D') {
+            uint32_t *v = c->esc.a == 'A' ? &c->cy : &c->cx;
+            *v = *v > c->esc.n ? *v - c->esc.n : 0;
+        } else {
+            uint32_t *v = c->esc.a == 'B' ? &c->cy : &c->cx, max = c->esc.a == 'B' ? c->rows - 1 : c->cols - 1;
+            *v = *v + c->esc.n < max ? *v + c->esc.n : max;
+        }
+        return;
+    case FBCON_ESC_ERASE:
+        blank(c, c->cx, c->cols);
+        return;
+    default:
+        return;
+    }
     switch (b) {
     case '\n':
         newline(c);
@@ -277,7 +321,8 @@ static void putc(struct fbcon *c, char ch)
     if (c->cx >= c->cols)
         newline(c);
     c->text[c->cy * c->cols + c->cx] = (char)b;
-    fbcon_draw_glyph(c, c->cx, c->cy, b);
+    c->attr[c->cy * c->cols + c->cx] = (uint8_t)fbcon_esc_attr(&c->esc);
+    fbcon_draw_glyph(c, c->cx, c->cy, b, c->attr[c->cy * c->cols + c->cx]);
     damage(c, c->cy * c->cell_h, (c->cy + 1) * c->cell_h);
     c->cx++;
 }
@@ -335,17 +380,7 @@ static void replay_log(struct fbcon *c)
     if (buf == NULL)
         return;
     size_t n = fbcon_drop_hidden(buf, klog_copy(buf, KLOG_RING_SIZE - 1), fbcon_log_floor());
-
-    /* Walk back over at most `rows` newlines. */
-    size_t start = n;
-    unsigned lines = 0;
-    while (start > 0 && lines < c->rows) {
-        start--;
-        if (buf[start] == '\n' && ++lines == c->rows) {
-            start++;
-            break;
-        }
-    }
+    size_t start = fbcon_tail_start(buf, n, c->rows);
     fbcon_put(c, buf + start, n - start);
     kfree(buf);
 }
@@ -383,8 +418,9 @@ static bool fbcon_setup(struct fbcon *c, const struct bootinfo_framebuffer *fb, 
     c->cols = fb->width / c->cell_w;
     c->rows = fb->height / c->cell_h;
     c->cx = c->cy = 0;
-    c->fg = fbcon_pack(fb, 0xd0, 0xd0, 0xd0);
-    c->bg = fbcon_pack(fb, 0x00, 0x00, 0x00);
+    fbcon_palette(fb, c->palette);
+    c->fg = c->palette[7];
+    c->bg = c->palette[0];
     if (c->cols == 0 || c->rows == 0) {
         kwarn("fbcon: %ux%u is smaller than one character cell", c->width, c->height);
         return false;
@@ -394,7 +430,10 @@ static bool fbcon_setup(struct fbcon *c, const struct bootinfo_framebuffer *fb, 
 
 static void fbcon_start(struct fbcon *c)
 {
+    c->attr = (uint8_t *)c->text + (size_t)c->cols * c->rows;
     memset(c->text, ' ', (size_t)c->cols * c->rows);
+    memset(c->attr, 0x07, (size_t)c->cols * c->rows);
+    fbcon_esc_reset(&c->esc);
     /* A scroll repaints the screen. With 16-row cells a screen holds few
      * rows, so it moves a quarter of itself at once rather than the eighth
      * it moved with 8x8 cells: the same repaints per line of text. */
@@ -425,8 +464,8 @@ void fbcon_early_init(void)
     struct fbcon *c = &g_boot_fbcon;
     if (!fbcon_setup(c, fb, (volatile uint8_t *)bootinfo_phys_to_virt(fb->phys)))
         return;
-    if ((size_t)c->cols * c->rows > FBCON_EARLY_CELLS) {
-        c->rows = FBCON_EARLY_CELLS / c->cols;   /* a very large mode: use the top of it */
+    if ((size_t)c->cols * c->rows > FBCON_EARLY_CELLS / 2) {
+        c->rows = FBCON_EARLY_CELLS / 2 / c->cols;   /* a very large mode: use the top of it */
         if (c->rows == 0)
             return;
     }
@@ -469,7 +508,7 @@ void fbcon_init(void)
 
     /* The screen as characters. Allocated once, here: the sink itself
      * runs in interrupt and panic context and never allocates. */
-    c->text = kmalloc((size_t)c->cols * c->rows, 0);
+    c->text = kmalloc((size_t)c->cols * c->rows * 2, 0);
     if (c->text == NULL) {
         kwarn("fbcon: cannot allocate a %ux%u text buffer", c->cols, c->rows);
         vm_unmap_phys(va);
@@ -554,8 +593,11 @@ static void carry_text(struct fbcon *c, const struct fbcon *prev)
     uint32_t n = used < c->rows ? used : c->rows;
     uint32_t first = used - n;
     uint32_t w = prev->cols < c->cols ? prev->cols : c->cols;
-    for (uint32_t i = 0; i < n; i++)
+    for (uint32_t i = 0; i < n; i++) {
         memcpy(c->text + (size_t)i * c->cols, prev->text + (size_t)(first + i) * prev->cols, w);
+        memcpy(c->attr + (size_t)i * c->cols, prev->attr + (size_t)(first + i) * prev->cols, w);
+    }
+    c->esc = prev->esc;
     c->cy = n - 1;
     c->cx = prev->cx < c->cols ? prev->cx : c->cols;
     fbcon_draw_repaint(c);
@@ -604,7 +646,7 @@ int fbcon_attach(const struct fbcon_surface *s)
     memset(&next, 0, sizeof(next));
     if (!fbcon_setup(&next, &fb, (volatile uint8_t *)s->base))
         return -EINVAL;
-    next.text = kmalloc((size_t)next.cols * next.rows, 0);
+    next.text = kmalloc((size_t)next.cols * next.rows * 2, 0);
     if (next.text == NULL)
         return -ENOMEM;
     next.surface = s;
@@ -626,15 +668,7 @@ int fbcon_attach(const struct fbcon_surface *s)
     } else if (log != NULL) {
         /* No screen before: the newest screenful, as fbcon_init shows it. */
         size_t log_len = fbcon_drop_hidden(log, klog_copy(log, KLOG_RING_SIZE - 1), fbcon_log_floor());
-        size_t start = log_len;
-        unsigned lines = 0;
-        while (start > 0 && lines < n->rows) {
-            start--;
-            if (log[start] == '\n' && ++lines == n->rows) {
-                start++;
-                break;
-            }
-        }
+        size_t start = fbcon_tail_start(log, log_len, n->rows);
         fbcon_put(n, log + start, log_len - start);
     }
     __atomic_store_n(&g_fb, n, __ATOMIC_RELEASE);
@@ -667,7 +701,7 @@ void fbcon_detach(const struct fbcon_surface *s)
     if (c->ready) {
         /* The boot framebuffer was not drawn while the surface was: it
          * gets the surface's screen before it is shown again. */
-        memset(c->text, ' ', (size_t)c->cols * c->rows);
+        fbcon_start(c);
         carry_text(c, prev);
     }
     __atomic_store_n(&g_fb, c, __ATOMIC_RELEASE);

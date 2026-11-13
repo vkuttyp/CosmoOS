@@ -36,6 +36,28 @@ extern "C" {
     fn klog_get_level() -> u32;
     fn klog_set_level(level: u32);
 
+    /// fbcon.h: the escape parser's state.
+    struct fbcon_esc {
+        state: u32;
+        count: u32;
+        p0: u32;
+        p1: u32;
+        p2: u32;
+        p3: u32;
+        fg: u32;
+        bg: u32;
+        bold: u32;
+        a: u32;
+        n: u32;
+    }
+    // fbcon.h's meanings of a byte, which the C compiler checks.
+    const FBCON_ESC_PUT: u32 = 0;
+    const FBCON_ESC_NONE: u32 = 1;
+    const FBCON_ESC_CLEAR: u32 = 2;
+    const FBCON_ESC_MOVE: u32 = 3;
+    const FBCON_ESC_REL: u32 = 4;
+    const FBCON_ESC_ERASE: u32 = 5;
+
     // log.h's levels, which the C compiler checks.
     const KLOG_DEBUG: i32 = 0;
     const KLOG_INFO: i32 = 1;
@@ -157,6 +179,208 @@ fn scaleC(width: u32, height: u32, max: u32) -> u32 {
     }
     return if (s > max) max else s;
 }
+
+// ---- Colours and escapes ----
+
+// The parser's states.
+const GROUND: u32 = 0;
+const ESCAPE: u32 = 1;
+const CSI: u32 = 2;
+/// A parameter's ceiling: larger numbers saturate rather than wrap.
+const PARAM_MAX: u32 = 9999;
+/// The parameters kept; a fifth and later are read and ignored.
+const PARAMS: u32 = 4;
+const DEFAULT_FG: u32 = 7;
+const DEFAULT_BG: u32 = 0;
+
+/// The `i`th parameter, 0 when absent.
+fn param(e: borrow fbcon_esc, i: u32) -> u32 {
+    if (i == 0) { return e.p0; }
+    if (i == 1) { return e.p1; }
+    if (i == 2) { return e.p2; }
+    if (i == 3) { return e.p3; }
+    return 0;
+}
+
+fn setParam(e: borrow mut fbcon_esc, i: u32, v: u32) {
+    if (i == 0) { e.p0 = v; }
+    if (i == 1) { e.p1 = v; }
+    if (i == 2) { e.p2 = v; }
+    if (i == 3) { e.p3 = v; }
+}
+
+/// The colours back to the defaults, the parser to its ground state.
+fn reset(e: borrow mut fbcon_esc) {
+    e.state = GROUND;
+    e.count = 0;
+    e.fg = DEFAULT_FG;
+    e.bg = DEFAULT_BG;
+    e.bold = 0;
+}
+
+/// One SGR parameter (ECMA-48 8.3.117, as the Linux console reads it): reset, bold, the eight colours and their
+/// bright versions, foreground and background, and their defaults. Others (underline, 256 colours) are ignored.
+fn sgr(e: borrow mut fbcon_esc, v: u32) {
+    if (v == 0) {
+        e.fg = DEFAULT_FG;
+        e.bg = DEFAULT_BG;
+        e.bold = 0;
+    } else if (v == 1) {
+        e.bold = 1;
+    } else if (v == 22) {
+        e.bold = 0;
+    } else if (v >= 30 && v <= 37) {
+        e.fg = v - 30;
+    } else if (v == 39) {
+        e.fg = DEFAULT_FG;
+    } else if (v >= 40 && v <= 47) {
+        e.bg = v - 40;
+    } else if (v == 49) {
+        e.bg = DEFAULT_BG;
+    } else if (v >= 90 && v <= 97) {
+        e.fg = v - 90 + 8;
+    } else if (v >= 100 && v <= 107) {
+        e.bg = v - 100 + 8;
+    }
+}
+
+/// What a byte means to the screen, given the bytes before it: FBCON_ESC_PUT (draw it, or the control it is),
+/// FBCON_ESC_NONE (part of an escape sequence, or one with nothing to draw), CLEAR (`ESC [ 2 J`, `ESC [ 3 J`,
+/// `ESC c`), MOVE to row `e.a`, column `e.n` (`ESC [ r ; c H`, 1-based in the stream), REL by `e.n` cells in
+/// direction `e.a` (`ESC [ n A` to `D`), ERASE to the end of the line (`ESC [ K`). An escape sequence the screen does not obey is
+/// consumed whole and draws nothing. A byte that cannot be in one ends it and is drawn.
+fn feed(e: borrow mut fbcon_esc, b: u32) -> u32 {
+    if (e.state == GROUND) {
+        if (b == 27) {
+            e.state = ESCAPE;
+            return FBCON_ESC_NONE;
+        }
+        return FBCON_ESC_PUT;
+    }
+    if (e.state == ESCAPE) {
+        if (b == 91) {   // '['
+            e.state = CSI;
+            e.count = 0;
+            e.p0 = 0;
+            e.p1 = 0;
+            e.p2 = 0;
+            e.p3 = 0;
+            return FBCON_ESC_NONE;
+        }
+        e.state = GROUND;
+        if (b == 99) {   // 'c': a full reset
+            reset(e);
+            return FBCON_ESC_CLEAR;
+        }
+        return if (b < 32) FBCON_ESC_PUT else FBCON_ESC_NONE;
+    }
+    // CSI: parameters, then one final byte.
+    if (b >= 48 && b <= 57) {   // a digit
+        if (e.count < PARAMS) {
+            let v = param(e, e.count) * 10 + (b - 48);
+            setParam(e, e.count, if (v > PARAM_MAX) PARAM_MAX else v);
+        }
+        return FBCON_ESC_NONE;
+    }
+    if (b == 59) {   // ';'
+        if (e.count < PARAMS) {
+            e.count += 1;
+        }
+        return FBCON_ESC_NONE;
+    }
+    if (b >= 32 && b < 64) {   // '?', '>' and other private or intermediate bytes: read past
+        return FBCON_ESC_NONE;
+    }
+    e.state = GROUND;
+    if (b < 32 || b > 126) {
+        return FBCON_ESC_PUT;   // not a sequence after all: the byte is drawn (or obeyed) on its own
+    }
+    if (b == 109) {   // 'm'
+        let last = if (e.count < PARAMS) e.count else PARAMS - 1;
+        var i: u32 = 0;
+        while (i <= last) {
+            sgr(e, param(e, i));
+            i += 1;
+        }
+        return FBCON_ESC_NONE;
+    }
+    if (b == 74) {   // 'J'
+        return if (e.p0 == 2 || e.p0 == 3) FBCON_ESC_CLEAR else FBCON_ESC_NONE;
+    }
+    if (b == 72 || b == 102) {   // 'H', 'f'
+        e.a = if (e.p0 > 0) e.p0 - 1 else 0;
+        e.n = if (e.p1 > 0) e.p1 - 1 else 0;
+        return FBCON_ESC_MOVE;
+    }
+    if (b >= 65 && b <= 68) {   // 'A' to 'D'
+        e.a = b;
+        e.n = if (e.p0 > 0) e.p0 else 1;
+        return FBCON_ESC_REL;
+    }
+    if (b == 75) {   // 'K'
+        return if (e.p0 == 0) FBCON_ESC_ERASE else FBCON_ESC_NONE;
+    }
+    return FBCON_ESC_NONE;
+}
+
+/// Safety: fbcon.h's contract: `e` points to a parser state nothing else uses during the call.
+@export("fbcon_esc_feed")
+unsafe fn feedC(e: *mut fbcon_esc, b: u32) -> u32 => feed(Ptr.toBorrowMut(e), b);
+
+/// Safety: as feedC.
+@export("fbcon_esc_reset")
+unsafe fn resetC(e: *mut fbcon_esc) {
+    reset(Ptr.toBorrowMut(e));
+}
+
+/// The attribute byte a cell is drawn with: the foreground (bright when bold) and the background, as palette indices.
+fn attr(e: borrow fbcon_esc) -> u32 {
+    let fg = if (e.bold != 0 && e.fg < 8) e.fg + 8 else e.fg;
+    return (fg & 15) | ((e.bg & 15) << 4);
+}
+
+/// Safety: `e` points to a live parser state.
+@export("fbcon_esc_attr")
+unsafe fn attrC(e: *fbcon_esc) -> u32 => attr(Ptr.toBorrow(e));
+
+/// The sixteen colours as eight-bit red, green, blue: the PC's, as the Linux console draws them, but for light grey,
+/// which is the 0xd0 the console has always drawn its text in.
+const PALETTE: [u32; 16] = [
+    0x000000, 0xaa0000, 0x00aa00, 0xaa5500, 0x0000aa, 0xaa00aa, 0x00aaaa, 0xd0d0d0,
+    0x555555, 0xff5555, 0x55ff55, 0xffff55, 0x5555ff, 0xff55ff, 0x55ffff, 0xffffff,
+];
+
+/// Safety: `fb` points to a live framebuffer description and `out` to 16 writable words.
+@export("fbcon_palette")
+unsafe fn paletteC(fb: *bootinfo_framebuffer, out: *mut u32) {
+    let colours = SliceMut.fromRaw(out, 16);
+    var i: usize = 0;
+    while (i < 16) {
+        let rgb = PALETTE[i];
+        colours[i] = packC(fb, (rgb >> 16) & 0xff, (rgb >> 8) & 0xff, rgb & 0xff);
+        i += 1;
+    }
+}
+
+/// Where the last `rows` lines of `text` start: after the `rows`th newline from the end, or at 0.
+fn tailStart(text: Slice<u8>, rows: u32) -> usize {
+    var start = text.length;
+    var lines: u32 = 0;
+    while (start > 0 && lines < rows) {
+        start -= 1;
+        if (text[start] == NEWLINE) {
+            lines += 1;
+            if (lines == rows) {
+                return start + 1;
+            }
+        }
+    }
+    return start;
+}
+
+/// Safety: `buf` points to `n` readable bytes.
+@export("fbcon_tail_start")
+unsafe fn tailStartC(buf: *CChar, n: usize, rows: u32) -> usize => tailStart(Slice.fromRaw(buf as *u8, n), rows);
 
 // ---- The self-test console-log-floor ----
 
