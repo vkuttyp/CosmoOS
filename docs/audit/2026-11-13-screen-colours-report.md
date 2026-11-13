@@ -23,7 +23,7 @@ and, to keep the kernel's C from growing, `kernel/core/cmdline.c` in CeeSafe.
 - **The cursor stays on the screen** whatever a sequence asks (`fbcon_esc_place`, I-DIAG-22).
 - **`cmdline.c` is CeeSafe** (`cmdline.cee`): the same parser, held to `tests/host/test_gpt.c`'s cases, which link
   it with a stand-in for `bootinfo_cmdline`. With the replay's tail (`fbcon_tail_start`) and the cursor placement
-  moved to CeeSafe, `kernel/` has 47 fewer lines of C than main (91,575 to 91,528).
+  moved to CeeSafe, `kernel/` has 39 fewer lines of C than main (91,575 to 91,536, `scripts/cee-share.py --ref`).
 - **Documents**: `docs/kernel/diagnostics/` (design "Colours and escapes", API, I-DIAG-22, testing),
   `docs/boot/design.md` (the command line's source).
 
@@ -31,7 +31,21 @@ and, to keep the kernel's C from growing, `kernel/core/cmdline.c` in CeeSafe.
 
 | Finding | Fix |
 |---|---|
-| The first version added 45 lines of C to `kernel/` and CI's `cee-share` would have refused it | the cursor placement and the replay's tail moved to CeeSafe, a clear reuses `fbcon_start`, and `cmdline.c` became CeeSafe |
+| The first version added 45 lines of C to `kernel/` and CI's `cee-share` would have refused it | the cursor placement and the replay's tail moved to CeeSafe, and `cmdline.c` became CeeSafe |
+
+## Found in review
+
+Greptile and Codex on #520; each fix is held by a new `fb-escapes` case.
+
+| Finding | Fix |
+|---|---|
+| `ESC [ 66 ; 1 H` did not move: a row of 65 to 68 was read as the direction 'A' to 'D' of a relative move, and 1920x1080 has 67 rows | the parser records which of the two it returned (`fbcon_esc.kind`) |
+| A CSI with a private or intermediate byte ran its final byte: `ESC [ > 4 ; 1 m` made bold, `ESC [ ? 2 J` cleared | such a sequence is read to its final byte and not obeyed |
+| `ESC ( B` drew `B`; `ESC ] 0 ; title BEL` drew `0;title` | an ESC with intermediate bytes is read through the byte after them; a control string through its BEL or ST |
+| An erase, a clear and a scroll's new rows were black whatever the background (`ESC [ 44 m ESC [ K`) | they blank in the colours being written, as the Linux console does |
+| `ESC [ K` at a pending wrap (the cursor past the last column) erased nothing | it blanks the last cell and cancels the wrap |
+| A surface switch kept the rows through the cursor's only, so a program that moved the cursor up lost the rows below it | `fbcon_rows_used`: through the cursor's row and the last row with text, the cursor's row kept on the new screen |
+| The design and API said the early console holds 65536 cells; since the colours it holds 32768 | both say 65536 bytes, 32768 cells |
 
 ## Validation
 
@@ -60,6 +74,11 @@ Also, on the same machine:
 - The debug boots' self-tests: `fb-escapes`, `fb-console`, `console-log-floor`, `fb-bench` and `fb-switch` ok on both
   architectures.
 - `python3 scripts/cee-share.py --gate origin/main`: no tree has more C to convert than origin/main.
+- After the review's fixes (commit `001ffcf7`), on the developer's Mac: debug `make test` x86-64 PASS in 217.9 s,
+  AArch64 PASS in 204.1 s, with `fb-escapes` (its eight new cases), `fb-console`, `console-log-floor`, `fb-bench`
+  and `fb-switch` ok on both; `make BUILD=release test-display` x86-64 PASS in 34.0 s, AArch64 PASS in 33.8 s, the
+  colour check reading the same pixels; `make host-test` and `make cee-check` pass; the `cee-share` gate as above.
+  The matrix above ran on the tree before these fixes and was not run again.
 - The AArch64 chaos boot took 305.6 s, over the 300 s the plain boots are given and inside its own budget: that
   machine emulates AArch64 slowly (the quiet screen's report, "Limits").
 
