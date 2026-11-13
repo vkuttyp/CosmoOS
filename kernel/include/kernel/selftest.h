@@ -275,6 +275,7 @@ bool selftest_fb_console(const char **reason);
 bool selftest_console_lines(const char **reason);
 bool selftest_console_sink_drop(const char **reason);   /* a sink that drops part of a write gets none of the rest */
 bool selftest_console_log_floor(const char **reason);   /* kernel/core/fbrules.cee: a sink's log floor, the replay's filter */
+bool selftest_fb_escapes(const char **reason);   /* kernel/core/fbrules.cee: the screen's escape parser */
 bool selftest_fb_bench(const char **reason);
 bool selftest_fb_switch(const char **reason);      /* kernel/core/fbtest.c: a surface switch keeps the screen, resizes the terminal */
 

@@ -515,3 +515,65 @@ unsafe fn logFloorTest(reason: *mut *CChar) -> bool {
     }
     return true;
 }
+
+// ---- The self-test fb-escapes ----
+
+/// Feed ESC and then `s` to `e`: the meaning of the last byte.
+fn esc(e: borrow mut fbcon_esc, s: StringView) -> u32 {
+    let b = s.bytes();
+    var kind = feed(e, 27);
+    var i: usize = 0;
+    while (i < b.length) {
+        kind = feed(e, b[i] as u32);
+        i += 1;
+    }
+    return kind;
+}
+
+/// fb-escapes: the escape parser alone, on the sequences a terminal program writes: colours (bold makes the eight
+/// bright), a clear, a cursor placed and moved (and kept on the screen), an erase, a private mode read past, an
+/// unfinished sequence ended by a newline; and where the replay's last rows start.
+/// Safety: the self-test runner's call; `reason` is its.
+@export("selftest_fb_escapes")
+unsafe fn escapesTest(reason: *mut *CChar) -> bool {
+    var e: fbcon_esc;
+    reset(borrow mut e);
+    if (attr(borrow e) != 0x07) {
+        return failed(reason, "check failed: the default attribute is light grey on black (0x07)\0");
+    }
+    if (esc(borrow mut e, "[1;31m") != FBCON_ESC_NONE || attr(borrow e) != 0x09) {
+        return failed(reason, "check failed: ESC [ 1 ; 31 m draws nothing and makes bright red (0x09)\0");
+    }
+    if (esc(borrow mut e, "[44m") != FBCON_ESC_NONE || attr(borrow e) != 0x49) {
+        return failed(reason, "check failed: ESC [ 44 m adds a blue background (0x49)\0");
+    }
+    if (esc(borrow mut e, "[0m") != FBCON_ESC_NONE || attr(borrow e) != 0x07) {
+        return failed(reason, "check failed: ESC [ 0 m restores the default attribute\0");
+    }
+    if (esc(borrow mut e, "[2J") != FBCON_ESC_CLEAR) {
+        return failed(reason, "check failed: ESC [ 2 J clears the screen\0");
+    }
+    if (esc(borrow mut e, "[5;10H") != FBCON_ESC_MOVE || e.a != 4 || e.n != 9) {
+        return failed(reason, "check failed: ESC [ 5 ; 10 H moves to row 4, column 9 (from 0)\0");
+    }
+    if (place(borrow e, 0, 0, 128, 48) != ((9 as u64 << 32) | 4)) {
+        return failed(reason, "check failed: the move places the cursor at column 9, row 4\0");
+    }
+    if (esc(borrow mut e, "[300C") != FBCON_ESC_REL || place(borrow e, 120, 3, 128, 48) != ((127 as u64 << 32) | 3)) {
+        return failed(reason, "check failed: ESC [ 300 C stops at the last column\0");
+    }
+    if (esc(borrow mut e, "[K") != FBCON_ESC_ERASE) {
+        return failed(reason, "check failed: ESC [ K erases to the end of the line\0");
+    }
+    if (esc(borrow mut e, "[?25l") != FBCON_ESC_NONE || feed(borrow mut e, 120) != FBCON_ESC_PUT) {
+        return failed(reason, "check failed: ESC [ ? 25 l is read past and the next byte drawn\0");
+    }
+    if (esc(borrow mut e, "[1") != FBCON_ESC_NONE || feed(borrow mut e, 10) != FBCON_ESC_PUT ||
+        feed(borrow mut e, 65) != FBCON_ESC_PUT) {
+        return failed(reason, "check failed: a newline ends an unfinished sequence and is obeyed\0");
+    }
+    if (tailStart("a\nb\nc".bytes(), 2) != 2 || tailStart("abc".bytes(), 2) != 0) {
+        return failed(reason, "check failed: the last two rows of a\\nb\\nc start at b\0");
+    }
+    return true;
+}
