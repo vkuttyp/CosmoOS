@@ -3758,3 +3758,10 @@ See the [history index](README.md).
     Self-test `console-log-floor`; `fb-switch` checks the cursor by a
     mark of its own.
   - Report: `docs/audit/2026-11-13-quiet-screen-report.md`.
+- **R0 done: v1.1.0 (2026-11-13, roadmap 1.3).**
+  - v1.1.0-rc2 and v1.1.0 tagged on `cb373fc1` (#518's merge); the
+    Parallels VM upgraded v1.0.14 -> rc2 -> v1.1.0
+    (`docs/guide/platforms.md`). rc1 (`bf595f3a`) was not proven: the
+    owner asked for the quiet screen in the release first.
+  - The release run's package-repository job failed for want of its key
+    (backlog BUILD-10); a dispatch of `repository.yml` published the index.

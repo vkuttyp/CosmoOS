@@ -208,6 +208,24 @@ to `build v1.0.13`, the encrypted one unlocked in 0.16 s, both roots
 checked clean, dropbear started, `pkg update` read serial 17, and ssh
 answered.
 
+**v1.1.0-rc2 and v1.1.0, 2026-11-13.** "CosmoOS", running v1.0.14, took
+-rc2 with its own `cosmo-upgrade`, the set served from the Mac: boot
+environment `be-v1.0.14`, 48 files replaced and 251 added on the root,
+`/etc/pkg/repos.conf` kept as changed here with the
+new one beside it. It rebooted to `build v1.1.0-rc2`, the root checked
+with 0 findings. The screen showed the banner, one kernel line (`[ERROR]
+device: pci:00:02.0: driver xhci probe failed (-19)`, on every Parallels
+boot since v1.0.9 at least), and what init and the services print; the
+kernel's informational lines were in `dmesg` only. `--status` was clean,
+`pkg update && pkg upgrade` read serial 22, `cc` built and ran a
+program, `ln` made a hard link, a 200-byte name was made in `/tmp`, `nice
+-n 5` showed in `ps -o nice`, `time` reported user time, and ssh
+answered. No long name was made on the root, which would have taken its
+pool to format 15 and ended the rollback to v1.0.14. Then `cosmo-upgrade
+--fetch v1.1.0` from the Pages repository (boot environment
+`be-v1.1.0-rc2`, no file changed), a reboot to `build v1.1.0`, the root
+checked clean, `pkg update` read serial 24, and ssh answered.
+
 The details, and why, are in
 [`docs/audit/2026-10-13-acpi-discovery-report.md`](../audit/2026-10-13-acpi-discovery-report.md)
 and [`docs/audit/2026-10-13-parallels-devices-report.md`](../audit/2026-10-13-parallels-devices-report.md).

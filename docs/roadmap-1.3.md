@@ -130,8 +130,10 @@ Size: about 0.2x for both.
 
 The half-converted kernel has run only in test boots. Release it.
 
-- [ ] **Acceptance:** `test-upgrade` takes an installed v1.0.14 to the rc;
-  the rc passes the VM rule; v1.1.0 is tagged on that commit.
+- [x] **Acceptance:** `test-upgrade` takes an installed v1.0.14 to the rc;
+  the rc passes the VM rule; v1.1.0 is tagged on that commit. Done
+  2026-11-13: v1.1.0-rc2 and v1.1.0 on `cb373fc1` (#517, #518), the
+  Parallels VM upgraded v1.0.14 -> rc2 -> v1.1.0 (`docs/guide/platforms.md`).
 
 ### R1 Images for the hypervisors people have
 
