@@ -258,7 +258,7 @@ fn feed(e: borrow mut fbcon_esc, b: u32) -> u32 {
         return FBCON_ESC_PUT;
     }
     if (e.state == ESCAPE) {
-        if (b == 91) {   // '['
+        if (b == 91) { // '['
             e.state = CSI;
             e.count = 0;
             e.p0 = 0;
@@ -268,34 +268,34 @@ fn feed(e: borrow mut fbcon_esc, b: u32) -> u32 {
             return FBCON_ESC_NONE;
         }
         e.state = GROUND;
-        if (b == 99) {   // 'c': a full reset
+        if (b == 99) { // 'c': a full reset
             reset(e);
             return FBCON_ESC_CLEAR;
         }
         return if (b < 32) FBCON_ESC_PUT else FBCON_ESC_NONE;
     }
     // CSI: parameters, then one final byte.
-    if (b >= 48 && b <= 57) {   // a digit
+    if (b >= 48 && b <= 57) { // a digit
         if (e.count < PARAMS) {
             let v = param(e, e.count) * 10 + (b - 48);
             setParam(e, e.count, if (v > PARAM_MAX) PARAM_MAX else v);
         }
         return FBCON_ESC_NONE;
     }
-    if (b == 59) {   // ';'
+    if (b == 59) { // ';'
         if (e.count < PARAMS) {
             e.count += 1;
         }
         return FBCON_ESC_NONE;
     }
-    if (b >= 32 && b < 64) {   // '?', '>' and other private or intermediate bytes: read past
+    if (b >= 32 && b < 64) { // '?', '>' and other private or intermediate bytes: read past
         return FBCON_ESC_NONE;
     }
     e.state = GROUND;
     if (b < 32 || b > 126) {
-        return FBCON_ESC_PUT;   // not a sequence after all: the byte is drawn (or obeyed) on its own
+        return FBCON_ESC_PUT; // not a sequence after all: the byte is drawn (or obeyed) on its own
     }
-    if (b == 109) {   // 'm'
+    if (b == 109) { // 'm'
         let last = if (e.count < PARAMS) e.count else PARAMS - 1;
         var i: u32 = 0;
         while (i <= last) {
@@ -304,20 +304,20 @@ fn feed(e: borrow mut fbcon_esc, b: u32) -> u32 {
         }
         return FBCON_ESC_NONE;
     }
-    if (b == 74) {   // 'J'
+    if (b == 74) { // 'J'
         return if (e.p0 == 2 || e.p0 == 3) FBCON_ESC_CLEAR else FBCON_ESC_NONE;
     }
-    if (b == 72 || b == 102) {   // 'H', 'f'
+    if (b == 72 || b == 102) { // 'H', 'f'
         e.a = if (e.p0 > 0) e.p0 - 1 else 0;
         e.n = if (e.p1 > 0) e.p1 - 1 else 0;
         return FBCON_ESC_MOVE;
     }
-    if (b >= 65 && b <= 68) {   // 'A' to 'D'
+    if (b >= 65 && b <= 68) { // 'A' to 'D'
         e.a = b;
         e.n = if (e.p0 > 0) e.p0 else 1;
         return FBCON_ESC_REL;
     }
-    if (b == 75) {   // 'K'
+    if (b == 75) { // 'K'
         return if (e.p0 == 0) FBCON_ESC_ERASE else FBCON_ESC_NONE;
     }
     return FBCON_ESC_NONE;
@@ -331,6 +331,37 @@ unsafe fn feedC(e: *mut fbcon_esc, b: u32) -> u32 => feed(Ptr.toBorrowMut(e), b)
 @export("fbcon_esc_reset")
 unsafe fn resetC(e: *mut fbcon_esc) {
     reset(Ptr.toBorrowMut(e));
+}
+
+/// Where a MOVE or REL that `feed` returned puts the cursor (`cx`, `cy`) on a screen of `cols` by `rows` cells: inside
+/// it, whatever the stream asked for: x in the high 32 bits, y in the low.
+fn place(e: borrow fbcon_esc, cx: u32, cy: u32, cols: u32, rows: u32) -> u64 {
+    if (e.state != GROUND || cols == 0 || rows == 0) {
+        return (cx as u64 << 32) | cy as u64;
+    }
+    var x = cx;
+    var y = cy;
+    if (e.a == 65) { // 'A': up
+        y = if (y > e.n) y - e.n else 0;
+    } else if (e.a == 66) { // 'B': down
+        y = if (y + e.n < rows - 1) y + e.n else rows - 1;
+    } else if (e.a == 67) { // 'C': right
+        x = if (x + e.n < cols - 1) x + e.n else cols - 1;
+    } else if (e.a == 68) { // 'D': left
+        x = if (x > e.n) x - e.n else 0;
+    } else { // MOVE: row e.a, column e.n
+        y = if (e.a < rows) e.a else rows - 1;
+        x = if (e.n < cols) e.n else cols - 1;
+    }
+    return (x as u64 << 32) | y as u64;
+}
+
+/// Safety: `e` points to a parser state, `cx` and `cy` to the cursor, nothing else using them during the call.
+@export("fbcon_esc_place")
+unsafe fn placeC(e: *fbcon_esc, cx: *mut u32, cy: *mut u32, cols: u32, rows: u32) {
+    let xy = place(Ptr.toBorrow(e), cx.read(), cy.read(), cols, rows);
+    cx.write(truncate<u32>(xy >> 32));
+    cy.write(truncate<u32>(xy & 0xffffffff));
 }
 
 /// The attribute byte a cell is drawn with: the foreground (bright when bold) and the background, as palette indices.

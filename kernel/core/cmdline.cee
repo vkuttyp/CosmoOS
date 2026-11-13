@@ -1,0 +1,102 @@
+// cmdline.cee - The kernel command line (kernel/include/kernel/cmdline.h), in CeeSafe.
+//
+// cmdline_find is the parser: whitespace-separated `key` and `key=value` tokens, `#` to the end of a line a comment,
+// the first match wins. It is a pure function of its text, and tests/host/test_gpt.c holds it to its cases. The other
+// two are the kernel's view of the loader's text (bootinfo_cmdline), and the host test gives them a stand-in.
+
+@header("kernel/bootinfo.h", "kernel/cmdline.h", "kernel/log.h", "kernel/string.h")
+extern "C" {
+    fn bootinfo_cmdline() -> *CChar;
+    fn strlen(s: *CChar) -> usize;
+    fn klog(level: u32, format: *CChar, ...);
+    // boot/protocol/cosmoboot.h and log.h, which the C compiler checks.
+    const COSMOBOOT_CMDLINE_MAX: u32 = 1023;
+    const KLOG_INFO: i32 = 1;
+}
+
+const HASH: u8 = 35;   // '#'
+const EQUALS: u8 = 61; // '='
+const NEWLINE: u8 = 10;
+
+/// C's isspace in the C locale.
+fn isSpace(c: u8) -> bool => c == 32 || (c >= 9 && c <= 13);
+
+/// The value of the first `key` token in `text`: its length, with the value and a terminating zero in `out`; -1 when
+/// there is none; -2 when the value and its zero do not fit in `out`. A bare `key` has the empty value.
+fn find(text: Slice<u8>, key: Slice<u8>, out: SliceMut<u8>) -> i32 {
+    var p: usize = 0;
+    while (true) {
+        while (p < text.length && isSpace(text[p])) {
+            p += 1;
+        }
+        if (p >= text.length) {
+            return -1;
+        }
+        if (text[p] == HASH) {
+            while (p < text.length && text[p] != NEWLINE) {
+                p += 1;
+            }
+            continue;
+        }
+        let tok = p;
+        while (p < text.length && !isSpace(text[p]) && text[p] != HASH) {
+            p += 1;
+        }
+        let tlen = p - tok;
+        var same = tlen >= key.length;
+        var i: usize = 0;
+        while (same && i < key.length) {
+            same = text[tok + i] == key[i];
+            i += 1;
+        }
+        if (!same || (tlen > key.length && text[tok + key.length] != EQUALS)) {
+            continue;
+        }
+        let val = if (tlen > key.length) tok + key.length + 1 else tok + tlen;
+        let vlen = p - val;
+        if (out.length == 0 || vlen > out.length - 1) {
+            return -2;
+        }
+        var k: usize = 0;
+        while (k < vlen) {
+            out[k] = text[val + k];
+            k += 1;
+        }
+        out[vlen] = 0;
+        return truncate<i32>(vlen); // at most out_len - 1, as the C cast was
+    }
+    return -1;
+}
+
+/// Safety: cmdline.h's contract: `text` and `key` are zero-terminated strings, `out` points to `out_len` writable
+/// bytes, and nothing else writes them during the call.
+@export("cmdline_find")
+unsafe fn findC(text: *CChar, key: *CChar, out: *mut CChar, outLen: usize) -> i32 =>
+    find(
+        Slice.fromRaw(text as *u8, strlen(text)), Slice.fromRaw(key as *u8, strlen(key)),
+        SliceMut.fromRaw(out as *mut u8, outLen),
+    );
+
+/// Safety: as cmdline_find's, `key` and `out`; the loader's text, which bootinfo_cmdline gives, is zero-terminated.
+@export("cmdline_get")
+unsafe fn getC(key: *CChar, out: *mut CChar, outLen: usize) -> i32 => findC(bootinfo_cmdline(), key, out, outLen);
+
+/// The command line in the log, on one line: the file's line breaks become spaces.
+/// Safety: bootinfo_cmdline's text is zero-terminated and at most COSMOBOOT_CMDLINE_MAX bytes.
+@export("cmdline_log")
+unsafe fn logC() {
+    let text = bootinfo_cmdline();
+    let n = strlen(text);
+    if (n == 0) {
+        klog(truncate<u32>(KLOG_INFO), "cmdline: none\0".ptr as *CChar);
+        return;
+    }
+    var line: [u8; 1024] = [0; 1024];
+    let src = Slice.fromRaw(text as *u8, n);
+    var i: usize = 0;
+    while (i < n && i < COSMOBOOT_CMDLINE_MAX as usize) {
+        line[i] = if (isSpace(src[i])) 32 else src[i];
+        i += 1;
+    }
+    klog(truncate<u32>(KLOG_INFO), "cmdline: %s\0".ptr as *CChar, borrow mut line[0] as *mut u8 as *mut CChar);
+}

@@ -252,6 +252,20 @@ static void newline(struct fbcon *c)
     c->cy = c->rows - c->scroll_rows;
 }
 
+static void fbcon_start(struct fbcon *c)
+{
+    c->attr = (uint8_t *)c->text + (size_t)c->cols * c->rows;
+    memset(c->text, ' ', (size_t)c->cols * c->rows);
+    memset(c->attr, 0x07, (size_t)c->cols * c->rows);
+    /* A scroll repaints the screen. With 16-row cells a screen holds few
+     * rows, so it moves a quarter of itself at once rather than the eighth
+     * it moved with 8x8 cells: the same repaints per line of text. */
+    c->scroll_rows = c->rows / 4 ? c->rows / 4 : 1;
+    c->ready = true;
+    fbcon_draw_clear_rows(c, 0, c->rows);
+    damage(c, 0, c->height);
+}
+
 /* Cells [from, to) of the cursor's row blank. */
 static void blank(struct fbcon *c, uint32_t from, uint32_t to)
 {
@@ -271,24 +285,12 @@ static void putc(struct fbcon *c, char ch)
     case FBCON_ESC_PUT:
         break;
     case FBCON_ESC_CLEAR:
-        memset(c->text, ' ', (size_t)c->cols * c->rows);
-        memset(c->attr, 0x07, (size_t)c->cols * c->rows);
-        fbcon_draw_clear_rows(c, 0, c->rows);
-        damage(c, 0, c->height);
+        fbcon_start(c);
         c->cx = c->cy = 0;
         return;
     case FBCON_ESC_MOVE:
-        c->cy = c->esc.a < c->rows ? c->esc.a : c->rows - 1;
-        c->cx = c->esc.n < c->cols ? c->esc.n : c->cols - 1;
-        return;
     case FBCON_ESC_REL:
-        if (c->esc.a == 'A' || c->esc.a == 'D') {
-            uint32_t *v = c->esc.a == 'A' ? &c->cy : &c->cx;
-            *v = *v > c->esc.n ? *v - c->esc.n : 0;
-        } else {
-            uint32_t *v = c->esc.a == 'B' ? &c->cy : &c->cx, max = c->esc.a == 'B' ? c->rows - 1 : c->cols - 1;
-            *v = *v + c->esc.n < max ? *v + c->esc.n : max;
-        }
+        fbcon_esc_place(&c->esc, &c->cx, &c->cy, c->cols, c->rows);
         return;
     case FBCON_ESC_ERASE:
         blank(c, c->cx, c->cols);
@@ -418,6 +420,7 @@ static bool fbcon_setup(struct fbcon *c, const struct bootinfo_framebuffer *fb, 
     c->cols = fb->width / c->cell_w;
     c->rows = fb->height / c->cell_h;
     c->cx = c->cy = 0;
+    fbcon_esc_reset(&c->esc);
     fbcon_palette(fb, c->palette);
     c->fg = c->palette[7];
     c->bg = c->palette[0];
@@ -428,20 +431,6 @@ static bool fbcon_setup(struct fbcon *c, const struct bootinfo_framebuffer *fb, 
     return true;
 }
 
-static void fbcon_start(struct fbcon *c)
-{
-    c->attr = (uint8_t *)c->text + (size_t)c->cols * c->rows;
-    memset(c->text, ' ', (size_t)c->cols * c->rows);
-    memset(c->attr, 0x07, (size_t)c->cols * c->rows);
-    fbcon_esc_reset(&c->esc);
-    /* A scroll repaints the screen. With 16-row cells a screen holds few
-     * rows, so it moves a quarter of itself at once rather than the eighth
-     * it moved with 8x8 cells: the same repaints per line of text. */
-    c->scroll_rows = c->rows / 4 ? c->rows / 4 : 1;
-    c->ready = true;
-    fbcon_draw_clear_rows(c, 0, c->rows);
-    damage(c, 0, c->height);
-}
 
 /*
  * The early console (docs/kernel/diagnostics/design.md, "The framebuffer

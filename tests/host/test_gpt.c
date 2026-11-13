@@ -1,6 +1,6 @@
 /*
  * test_gpt.c - The GPT parser and builder (kernel/block/gpt.c) and the
- * command-line parser (kernel/core/cmdline.c), on the host.
+ * command-line parser (kernel/core/cmdline.cee), on the host.
  */
 
 #include "harness.h"
@@ -206,6 +206,12 @@ static void test_limits(void)
     EXPECT(gpt_parse(1024, 4096, disk_read, d, (uint8_t[GPT_SCRATCH_BYTES]){ 0 }, &t, &why) == GPT_BAD);
     EXPECT(gpt_parse(512, 5, disk_read, d, (uint8_t[GPT_SCRATCH_BYTES]){ 0 }, &t, &why) == GPT_NONE);
     disk_free(d);
+}
+
+/* cmdline.cee's view of the loader's text, which this test does not read. */
+const char *bootinfo_cmdline(void)
+{
+    return "";
 }
 
 static void test_cmdline(void)

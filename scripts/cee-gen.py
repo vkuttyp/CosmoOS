@@ -329,6 +329,7 @@ PORTS = [
     ("kernel/core/fbrules.cee", "kernel/core/fbrules.c",
      "The framebuffer console's rules that draw nothing: the log lines the screen shows, a colour as a pixel, the "
      "font's scale; the self-test console-log-floor (fbcon.h, console.h)", None, False),
+    ("kernel/core/cmdline.cee", "kernel/core/cmdline.c", "The kernel command line (cmdline.h)", None, False),
     ("kernel/core/lz4_decode.cee", "kernel/core/lz4_decode.c", "The LZ4 block decoder (lz4.h)", None, False),
     ("kernel-services/network/cksum.cee", "kernel-services/network/cksum.c",
      "The Internet checksum over buffers and mbuf chains (cksum.h)", None, False),

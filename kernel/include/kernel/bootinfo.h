@@ -42,7 +42,7 @@ void *bootinfo_phys_to_virt(uint64_t phys);
 const char *bootinfo_mem_type_name(uint32_t type);
 
 /* v7: the command line as the loader passed it ("" when there was none),
- * a copy owned by the kernel. Parsed by kernel/core/cmdline.c. */
+ * a copy owned by the kernel. Parsed by kernel/core/cmdline.cee. */
 const char *bootinfo_cmdline(void);
 
 /* v7: the GUID of the GPT partition the loader was read from, in on-disk
