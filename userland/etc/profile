@@ -1,0 +1,7 @@
+# /etc/profile - read by a login shell (docs/userland/design.md, "The console's session"): a console login and an
+# ssh session. The console's login shell gets the prompt and the path the console shell always had, and the welcome
+# screen; an ssh session (dropbear sets SSH_CONNECTION) keeps its own.
+if [ -z "$SSH_CONNECTION" ]; then
+    export PATH=/bin:/sbin:/usr/bin:/usr/sbin HOME=/root PS1='cosmo$ '
+    /bin/cosmo-welcome
+fi

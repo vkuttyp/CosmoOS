@@ -25,6 +25,10 @@ one is an error, so no command can be left untested.
       every harness boot is (tests/boot/firmware_stall.py). It becomes the
       current session; one started while another runs (ssh while QEMU
       runs) is current until it ends, and then the one under it again.
+      With `login` (an installed system's console, docs/userland/design.md,
+      "The console's session"), the runner answers the console's password
+      and login prompts as the guide tells the reader to: root, and the
+      password GUIDE_PASSWORD, chosen at the first boot's `New password:`.
   <!-- test: console -->   ```console
       Typed into the current session. A line starting with the session's
       prompt is a command, typed when the prompt is shown; the lines after
@@ -58,6 +62,7 @@ import argparse
 import math
 import os
 import re
+import secrets
 import shutil
 import signal
 import subprocess
@@ -116,7 +121,7 @@ def parse(page):
                     raise Fail(f"{page}:{i + 1}: a ```{lang} block with no <!-- test: ... --> line before it")
                 words = pending[1].split()
                 kind, rest = words[0], " ".join(words[1:])
-                attrs = {"prompt": None, "host": None, "arch": None, "optional": False}
+                attrs = {"prompt": None, "host": None, "arch": None, "optional": False, "login": False}
                 pm = re.search(r'prompt="([^"]*)"', rest)
                 if pm:
                     attrs["prompt"] = pm.group(1)
@@ -128,6 +133,8 @@ def parse(page):
                         attrs["arch"] = w
                     elif w == "optional" and kind == "console":
                         attrs["optional"] = True
+                    elif w == "login" and kind == "session":
+                        attrs["login"] = True
                     else:
                         raise Fail(f"{page}:{pending[0]}: unknown word {w!r} in the test line")
                 if kind not in ("host", "session", "console"):
@@ -210,11 +217,20 @@ class HostShell:
             self.proc.kill()
 
 
+# The password the guide's installed system is given at its first boot (a
+# session line's `login`): the console asks for it, and then root's login.
+# Made for the run.
+GUIDE_PASSWORD = secrets.token_hex(8)
+LOGIN_ANSWERS = ((b"New password: ", GUIDE_PASSWORD), (b"Retype password: ", GUIDE_PASSWORD), (b" login: ", "root"),
+                 (b"\nPassword: ", GUIDE_PASSWORD))
+
+
 class Session:
     """An interactive command: QEMU on its serial console, or ssh."""
 
-    def __init__(self, cmd, prompt, workdir, log_path, timeout):
+    def __init__(self, cmd, prompt, workdir, log_path, timeout, login=False):
         self.prompt = prompt
+        self.login = login
         self.timeout = timeout
         self.lock = threading.Lock()
         self.consumed = 0          # bytes of output already matched
@@ -265,6 +281,7 @@ class Session:
             raise Fail(f"session '{cmd[:40]}': {e}")
 
     def _read(self, proc, log, buf):
+        answered = 0
         while True:
             b = proc.stdout.read1(4096)
             if not b:
@@ -273,6 +290,21 @@ class Session:
                 buf += b
             log.write(b)
             log.flush()
+            while self.login:   # the console's prompts, answered in the order they appear
+                with self.lock:
+                    hits = [(buf.find(p, answered), p, a) for p, a in LOGIN_ANSWERS]
+                hits = [h for h in hits if h[0] >= 0]
+                if not hits:
+                    break
+                i, p, a = min(hits)
+                answered = i + len(p)
+                if p != b" login: ":
+                    time.sleep(0.5)   # as a person types it: BusyBox turns echo off after the prompt
+                try:
+                    proc.stdin.write(a.encode() + b"\n")
+                    proc.stdin.flush()
+                except (BrokenPipeError, ValueError):
+                    return
 
     def text(self):
         with self.lock:
@@ -443,7 +475,7 @@ def main():
                         raise Fail(f"{where}: a session block holds exactly one command")
                     nsess += 1
                     stack.append(Session(cmds[0], attrs["prompt"], work,
-                                         os.path.join(work, f"session-{nsess}.log"), args.timeout))
+                                         os.path.join(work, f"session-{nsess}.log"), args.timeout, attrs["login"]))
                     stack[-1].wait_prompt("the session's start")
                 elif attrs["optional"]:
                     if run_console(stack[-1] if stack else None, body, where, warned):

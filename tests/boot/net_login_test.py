@@ -620,14 +620,18 @@ def stage_processes(b, results):
     """h: BusyBox ps over /proc/<pid>/stat (shell completeness S3)."""
     out = b.run("echo shell=$$ parent=$PPID; svc status dropbear")
     m = need(out, r"^shell=(\d+) parent=(\d+)$", "the console shell's pid and its parent's")
-    sh_pid, init_pid = m.group(1), m.group(2)
+    # The login shell's parent is the console's session (/sbin/cosmo-console,
+    # run by ash), init's child (docs/userland/design.md, "The console's session").
+    sh_pid, session_pid = m.group(1), m.group(2)
     sup = need(out, r"^dropbear\s+running \(supervisor (\d+)\)$", "svc status dropbear").group(1)
     out = b.run("ps -o pid,ppid,stat,comm")
-    need(out, rf"^\s*{init_pid}\s+0\s+S\s+init$", "ps: init, sleeping, no parent")
+    init_pid = need(out, r"^\s*(\d+)\s+0\s+S\s+init$", "ps: init, sleeping, no parent").group(1)
+    need(out, rf"^\s*{session_pid}\s+{init_pid}\s+S\s+sh$", "ps: the console's session, init's child")
     sshd = need(out, rf"^\s*(\d+)\s+{sup}\s+S\s+dropbear$", "ps: the ssh server, its supervisor's child").group(1)
-    need(out, rf"^\s*{sh_pid}\s+{init_pid}\s+S\s+sh$", "ps: this shell, waiting for ps")
+    need(out, rf"^\s*{sh_pid}\s+{session_pid}\s+S\s+sh$", "ps: this shell, waiting for ps")
     need(out, rf"^\s*\d+\s+{sh_pid}\s+R\s+ps$", "ps: ps itself, running")
-    results.append(f"h. ps: init {init_pid} S, dropbear {sshd} S (supervisor {sup}), the shell {sh_pid} S, ps R")
+    results.append(f"h. ps: init {init_pid} S, the console's session {session_pid} S, dropbear {sshd} S (supervisor "
+                   f"{sup}), the shell {sh_pid} S, ps R")
 
 
 OWN_CHECK = "stat -c '%n %u %g' /root/s4own; stat -c '%n %u %g' /root/s4lnk"

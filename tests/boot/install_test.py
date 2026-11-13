@@ -30,6 +30,7 @@ work directory. Exit 0 PASS, 1 FAIL.
 import argparse
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -56,6 +57,16 @@ PROMPT = b"\ncosmo$ "
 # stage runs the B1-B4 tests this way).
 ENCRYPT_PASS = os.environ.get("COSMO_TEST_ENCRYPT", "")
 ENCRYPT_PROMPTS = (b"new passphrase: ", b"new passphrase again: ", b"passphrase for cosmo-root: ")
+
+# An installed system's console logs in (docs/userland/design.md, "The
+# console's session"): at its first boot it asks for root's password, then
+# at every boot for the login. Boot answers each prompt as a person would,
+# with this password, so every test of an installed system logs in. It is
+# made for the run, and kept in the environment so that a test this one
+# starts logs in to the same disks.
+LOGIN_PASS = os.environ.setdefault("COSMO_TEST_LOGIN", "cosmo-" + secrets.token_hex(6))
+LOGIN_ANSWERS = ((b"New password: ", LOGIN_PASS), (b"Retype password: ", LOGIN_PASS), (b" login: ", "root"),
+                 (b"\nPassword: ", LOGIN_PASS))
 
 
 # The format a fresh install is at, and the one a first snapshot leaves:
@@ -88,6 +99,7 @@ class Boot:
         self.log_path = os.path.join(workdir, f"boot-{name}.log")
         self.lock = threading.Lock()
         self.prompts_seen = 0
+        self.logged_in = False   # a login prompt was answered: `exit` would log out, not end the boot
         # Seconds each command typed may take, when a boot's length is the
         # sum of its commands rather than a property (per_command below).
         self.command_budget = None
@@ -157,7 +169,7 @@ class Boot:
             raise Fail(f"{name}: {e}")
 
     def _read(self, proc, log, buf):
-        answered = 0   # where the last passphrase prompt answered ends
+        answered = 0   # where the last prompt answered (a passphrase, a password, the login) ends
         partial = b""
         times = self.times
         while True:
@@ -173,16 +185,23 @@ class Boot:
                 self.last_line_s = time.monotonic() - self.t0
                 times.write(b"".join(b"%8.2f %s\n" % (self.last_line_s, ln.rstrip(b"\r")) for ln in lines))
                 times.flush()
-            while ENCRYPT_PASS:
+            answers = LOGIN_ANSWERS + (tuple((p, ENCRYPT_PASS) for p in ENCRYPT_PROMPTS) if ENCRYPT_PASS else ())
+            while True:
                 with self.lock:
-                    hits = [(buf.find(p, answered), p) for p in ENCRYPT_PROMPTS]
-                hits = [(i, p) for i, p in hits if i >= 0]
+                    hits = [(buf.find(p, answered), p, a) for p, a in answers]
+                hits = [h for h in hits if h[0] >= 0]
                 if not hits:
                     break
-                i, p = min(hits)
+                i, p, a = min(hits)
                 answered = i + len(p)
+                if p == b" login: ":
+                    self.logged_in = True
+                elif p in (b"New password: ", b"Retype password: ", b"\nPassword: "):
+                    # As a person types it: after the prompt, which BusyBox
+                    # prints before it turns echo off (bb_ask_noecho).
+                    time.sleep(0.5)
                 try:
-                    proc.stdin.write(ENCRYPT_PASS.encode() + b"\n")
+                    proc.stdin.write(a.encode() + b"\n")
                     proc.stdin.flush()
                 except (BrokenPipeError, ValueError):
                     return
@@ -235,7 +254,13 @@ class Boot:
         return out + self.run(f"echo {tag}=$?")
 
     def finish(self, cmd="exit"):
-        """Type `cmd` (ending init), wait for QEMU to exit, return its code."""
+        """Type `cmd` (ending init), wait for QEMU to exit, return its code.
+        After a login, `exit` logs out to the login screen: SIGUSR2 to init
+        ends the boot as `exit` from the console shell did (BusyBox's
+        `poweroff` sends it, but a test may have rolled the base system back
+        to a release without that applet; `kill` is the shell's own)."""
+        if cmd == "exit" and self.logged_in:
+            cmd = "kill -USR2 1"
         if self.command_budget is not None:
             self.deadline = max(self.deadline, time.monotonic() + self.command_budget)
         self.proc.stdin.write(cmd.encode() + b"\n")
@@ -438,6 +463,16 @@ def stage_reboot(args, results, inst, nonce):
         need(log, r"^\[ INFO\] vfs: root switched to cosmofs on \S+; [1-9]\d* mount\(s\) moved onto it$",
              "the installed boot")
         need(log, r"^CosmoOS userland ready$", "the installed /etc/rc")
+        # The console's session (U17): the first boot asks for root's
+        # password, which then lives hashed in /etc/shadow, root's alone,
+        # and the shell came after a login.
+        need(log, r"root has no password yet: choose one now\.$", "the first boot's password")
+        need(log, r"^passwd: password for root changed by root$", "the first boot's password")
+        need(log, r" login: root$", "the login")
+        out = b.run("ls -l /etc/shadow; grep -c '^root:\\$6\\$' /etc/shadow; grep '^root:' /etc/passwd")
+        need(out, r"^-rw-------\s+1 root\s+root\s", "/etc/shadow readable by root alone")
+        need(out, r"^1$", "root's password as a SHA-512 crypt hash")
+        need(out, r"^root:x:0:0:", "/etc/passwd naming /etc/shadow")
         no_free_warning(log, "the installed boot's root mount")
         # Roadmap M3: the installed system's console -- and its /etc/rc --
         # is BusyBox ash (/etc/console-shell), which the kernel names 'sh';
@@ -468,8 +503,10 @@ def stage_reboot(args, results, inst, nonce):
                        "cat /run/svc/dropbear.pid", "stale")
         need(out, r"^stale=0$", "stale pid files on the root's own /run")
         rc = b.finish()
-        # After the shell's next prompt, when poweroff exits first.
-        need(b.text(), r"^(?:cosmo\$ )?init: disk root synced$", "the installed boot's power-off")
+        # After the shell's next prompt, when poweroff exits first. After a
+        # login, finish() powers off (`exit` logs out): init's SIGUSR2
+        # handler syncs and says so with its own line.
+        need(b.text(), r"^(?:cosmo\$ )?init: (?:disk root synced|power off requested)$", "the installed boot's power-off")
         if rc != EXIT_SUCCESS:
             raise Fail(f"reboot boot: QEMU exit code {rc}")
     except Exception:

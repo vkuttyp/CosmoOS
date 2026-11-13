@@ -464,7 +464,11 @@ def stage_new(args, results, keyid, nonce):
         need(out, r"^/sbin/mkfs\.cosmofs$", "the new base system")
         need(out, r"^1$", "the new /etc/rc (unchanged since the install, so replaced)")
         need(out, rf"^{nonce}$", "the operator's /root/keep")
-        need(out, r"^root:\*:0:0:root:/root:/bin/sh$", "the installer's /etc/passwd, kept")
+        # The installer's /etc/passwd was the set's, unchanged, so the new
+        # set's replaced it: root's password is in /etc/shadow ("x"), which
+        # the console's first boot made (docs/userland/design.md, "The
+        # console's session").
+        need(out, r"^root:x:0:0:root:/root:/bin/sh$", "the new set's /etc/passwd, root's password in /etc/shadow")
         need(out, r"^/var/lib/pkg/repo$", "the installer's /etc/pkg/repos.conf, kept")
         out = sh(b, "cosmo-upgrade --status", "status")
         need(out, rf"^cosmo-upgrade: current: \S+, kernel\.elf \d+ bytes, boot\.tar \d+ bytes, key {keyid}$",

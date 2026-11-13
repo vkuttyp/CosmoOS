@@ -107,6 +107,8 @@ native_bin_name = $(if $(filter $(1),$(BUSYBOX_APPLETS)),cosmo-$(1),$(1))
 USER_ARCHIVE_ENTRIES := \
 	$(foreach p,$(USER_BIN_PROGRAMS),bin/$(call native_bin_name,$(p))=$(call prog_elf,$(p))) \
 	$(foreach p,$(USER_SBIN_PROGRAMS),sbin/$(p)=$(call prog_elf,$(p))) \
+	sbin/cosmo-console=$(ROOT)/userland/system/cosmo-console.sh bin/cosmo-welcome=$(ROOT)/userland/system/cosmo-welcome.sh \
+	etc/profile=$(ROOT)/userland/etc/profile \
 	etc/rc=$(ROOT)/userland/etc/rc \
 	etc/fstab=$(ROOT)/userland/etc/fstab \
 	etc/passwd=$(ROOT)/userland/etc/passwd \
@@ -123,7 +125,8 @@ USER_ARCHIVE_ENTRIES += etc/rc.test=$(ROOT)/userland/etc/rc.test etc/rc.linux=$(
 endif
 USER_ARCHIVE_DEPS := $(USER_ELFS) $(ROOT)/userland/etc/rc $(ROOT)/userland/etc/fstab $(ROOT)/userland/etc/rc.test $(ROOT)/userland/etc/rc.linux \
 	$(ROOT)/userland/etc/pkg/repos.conf $(ROOT)/userland/etc/pkg/provides $(ROOT)/userland/etc/cosmo-release.conf $(PKG_TRUST_PUBS) $(ROOT)/userland/etc/passwd $(ROOT)/userland/etc/group \
-	$(ROOT)/userland/etc/svc/hello $(ROOT)/userland/etc/svc/greeter $(ROOT)/userland/etc/svc/syslogd
+	$(ROOT)/userland/etc/svc/hello $(ROOT)/userland/etc/svc/greeter $(ROOT)/userland/etc/svc/syslogd \
+	$(ROOT)/userland/system/cosmo-console.sh $(ROOT)/userland/system/cosmo-welcome.sh $(ROOT)/userland/etc/profile
 
 .PHONY: userland
 userland: $(USER_ELFS)
