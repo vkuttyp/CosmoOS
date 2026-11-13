@@ -34,8 +34,8 @@ Open lines (struck lines are not counted):
 | | correctness | security | usability | nice-to-have | total |
 |---|---|---|---|---|---|
 | Block devices | 3 | 0 | 2 | 4 | 9 |
-| Boot chain and verified boot | 0 | 6 | 2 | 1 | 9 |
-| Build and tooling | 0 | 2 | 0 | 4 | 6 |
+| Boot chain and verified boot | 0 | 6 | 3 | 1 | 10 |
+| Build and tooling | 0 | 2 | 0 | 5 | 7 |
 | cosmofs and storage | 4 | 1 | 7 | 13 | 25 |
 | Documentation | 0 | 0 | 1 | 1 | 2 |
 | Drivers and platforms | 4 | 0 | 2 | 12 | 18 |
@@ -49,11 +49,11 @@ Open lines (struck lines are not counted):
 | Quiescence | 0 | 0 | 0 | 3 | 3 |
 | Scheduler and SMP | 1 | 0 | 1 | 5 | 7 |
 | Security and isolation | 0 | 11 | 1 | 2 | 14 |
-| Testing and CI | 9 | 0 | 0 | 11 | 20 |
-| Commands | 1 | 0 | 5 | 1 | 7 |
+| Testing and CI | 9 | 0 | 0 | 12 | 21 |
+| Commands | 1 | 0 | 6 | 1 | 8 |
 | VFS | 3 | 0 | 5 | 3 | 11 |
 | Virtualisation | 3 | 0 | 0 | 6 | 9 |
-| **all** | **47** | **23** | **48** | **102** | **220** |
+| **all** | **47** | **23** | **50** | **104** | **224** |
 
 ## Block devices
 
@@ -78,6 +78,7 @@ Open lines (struck lines are not counted):
 - **BOOT-7** usability, S. The loader allocates below 4 GiB only (`LOADER_ALLOC_LIMIT`); a machine with all RAM above cannot boot.
 - **BOOT-9** security, M. No TPM-sealed key: an encrypted root (roadmap 1.2 B5) unlocks unattended only through a key file on the unencrypted ESP; sealing the master key to measured PCRs (needs BOOT-3) is out of B5's scope.
 - **BOOT-8** nice-to-have, S. `direct_map_size` covers the RSDP's tables, not those reached through the FADT (DSDT, FACS).
+- **BOOT-10** usability, S. The loader prints its progress on the screen; the lines show until the kernel clears it for the quiet screen (`docs/kernel/diagnostics/design.md`, "The quiet screen").
 
 ## Build and tooling
 
@@ -89,6 +90,7 @@ Open lines (struck lines are not counted):
 - **BUILD-6** nice-to-have, L. Native programs are static: no shared native libc and no native `PT_INTERP` (deferred by the owner past 1.1).
 - ~~**BUILD-7** correctness, S. An rc's release run reads `docs/releases/vX.Y.Z-rcN.md`, which no release has, so the final notes (`vX.Y.Z.md`) are first checked by `check-release-version.py` in the final tag's run: v1.0.11's failed on "CosmoOS 1.0.10" in its notes (run 39942569981) after v1.0.11-rc1 had passed (run 39938572061). Check `vX.Y.Z.md` in the rc's run, or in CI when `docs/releases/` changes.~~ Done by #446 (the rc's run builds and checks `vX.Y.Z.md`).
 - **BUILD-8** nice-to-have, S. The BusyBox port's `libclang_rt.builtins.a` takes every file of compiler-rt's `lib/builtins`, `crtbegin.c` and `crtend.c` with them: a link with clang's own `clang_rt.crtbegin.o` pulls `crtend.o` in a second time (duplicate `__CTOR_LIST_END__`). The ports' links use no crtbegin and are unaffected; exclude the two files (A1's clang evaluation, whose package drops them).
+- **BUILD-9** nice-to-have, S. `make BUILD=release SELFTEST=1` does not compile: `kernel/timer/timer.c:721` reads `g_test_cpu_offset_ns`, which only a debug build declares (main at `bf595f3a`; `docs/audit/2026-11-13-quiet-screen-report.md`). No target or CI job builds that pair.
 
 ## cosmofs and storage
 
@@ -333,6 +335,7 @@ Open lines (struck lines are not counted):
 - **TEST-23** nice-to-have, M. `test-large` sets main's CI time: 32-80 min per architecture (every other job within about 35), the spread runner speed (run 40680963987: aarch64 40 min, x86-64 62, every stage scaling together). Its summary gives no time for the remount and old-kernel stages, about 60% of it; print each stage's time, then see whether a pool and file smaller than 1 GiB still prove CFS-32 (a file past the old run bound, about 128 MiB).
 - **TEST-25** nice-to-have, M. Under KVM (one CPU, no IOMMU) `vm-replace-race` fails (`e.probes > 0`, line 832) and the boot stops in `net-accept-race` with kmain blocked on a socket (`docs/audit/2026-11-12-t2-faster-boot-report.md`). Neither diagnosed.
 - **TEST-26** nice-to-have, M. Twenty self-tests are 55% of the debug boot's 155 s of test time under TCG, and 24 of those measured take the same time under KVM: they wait on the clock (timeouts, settles). `cosmofs-replay` alone is 24 s. Shorten the waits that are not the test's subject (`docs/audit/2026-11-12-t2-faster-boot-report.md`).
+- **TEST-27** nice-to-have, S. A debug `make test-display` fails in its second boot ("both"): `cosmofs-format` (line 223: a mount that must give -EIO succeeds, on a `vda` at generation 16), `cosmofs-ops`, `cosmofs-crash`, `cosmofs-fixture-cleanup` and `process-user`, on main at `bf595f3a` as on the branch after it (`docs/audit/2026-11-13-quiet-screen-report.md`). CI runs the target with `BUILD=release`, which runs no self-tests and passes.
 - ~~**TEST-24** correctness, S. `test-net-login` stage j's RTC bound allows 2 s below and the x86-64 firmware's century write (edk2, every boot, the clock running) rewinds QEMU's RTC by up to a second more (main red, CI run 40739284519).~~ Fixed 2026-10-28: 3 s below on x86-64 (`docs/audit/2026-10-28-rtc-century-report.md`).
 
 ## Commands
@@ -345,6 +348,7 @@ Open lines (struck lines are not counted):
 - **USR-6** correctness, S. `cosmo-sh` hands the terminal to a foreground job as its last stage is spawned (COSMO_SPAWN_FOREGROUND), so the group holds every stage when it takes ^C; the earlier stages of a pipeline start in the background for the moment the spawns take, and one that checks the terminal at its first instruction can still stop itself. A start barrier (spawn stopped, continue the group) would close it (Codex on #424).
 - **USR-7** usability, S. No `/dev/urandom` or `/dev/random`: a shell script wanting random or incompressible bytes reads nothing (`head -c N /dev/urandom` gives at most the error); tests use awk's `rand()` or gzip output instead (test-pkgtx, test-fsck).
 - ~~**USR-8** correctness, S. On the installed system `/run/svc` is on the root disk and nothing clears it at boot, so a pid file outlives its service; `svc`'s `running()` trusts any pid `kill(p, 0)` can signal, and a boot where another process has that pid says `svc: dropbear is already running` and never starts it. Seen on the Parallels VM 2026-10-23: `dropbear.pid` held 13 from 2026-10-22, pid 13 was `syslogd` at every boot, and ssh was refused through several boots and upgrades (cleared by hand). Clear `/run` at boot (or mount a ramfs on it), or check the pid is the service's supervisor.~~ Done by #446 (a fresh ramfs on `/run` at every boot; a pid file records the start time and is checked against the supervisor's cmdline; U14).
+- **USR-9** usability, S. The quiet screen shows init's and the services' lines as they print them: there is no one line per service started or failed, as a Linux distribution's boot has.
 
 ## VFS
 

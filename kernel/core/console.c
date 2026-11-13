@@ -74,10 +74,10 @@ static void write_unlocked(const char *s, size_t len)
 
 /* One hold of console_write `call`: a sink that dropped an earlier part
  * of the call is passed none of the rest. Lock held. */
-static void write_call(const char *s, size_t len, uint64_t call)
+static void write_call(const char *s, size_t len, uint64_t call, int level)
 {
     for (struct console_sink *k = g_sinks; k != NULL; k = k->next) {
-        if (k->skip_call == call)
+        if (k->skip_call == call || level < k->log_floor)
             continue;
         k->dropped = false;
         k->write(k, s, len);
@@ -86,7 +86,7 @@ static void write_call(const char *s, size_t len, uint64_t call)
     }
 }
 
-void console_write(const char *s, size_t len)
+void console_write_log(int level, const char *s, size_t len)
 {
     if (console_in_panic_mode()) {
         write_unlocked(s, len);
@@ -103,11 +103,16 @@ void console_write(const char *s, size_t len)
 #endif
         if (call == 0)
             call = ++g_calls;
-        write_call(s, n, call);
+        write_call(s, n, call, level);
         spin_unlock_irqrestore(&g_console_lock, st);
         s += n;
         len -= n;
     }
+}
+
+void console_write(const char *s, size_t len)
+{
+    console_write_log(0x7fffffff, s, len);   /* not a log line: above every sink's floor */
 }
 
 size_t console_test_hold_max(bool reset)

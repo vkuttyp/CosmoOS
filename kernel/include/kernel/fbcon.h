@@ -14,6 +14,7 @@
 #define KERNEL_FBCON_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 void fbcon_init(void);
@@ -98,5 +99,14 @@ void fbcon_detach(const struct fbcon_surface *s);
 /* The pixel rows [y0, y1) drawn on `s` since the last call, cleared;
  * false when there are none (or `s` is not attached). Thread context. */
 bool fbcon_take_damage(const struct fbcon_surface *s, uint32_t *y0, uint32_t *y1);
+
+/* fbrules.cee, for fbcon.c: the screen's log floor (ERROR; 0 with `verbose`);
+ * `n` bytes of the log without the lines below `floor`, in place, and their
+ * length; a colour as a pixel of `fb`; the font's scale, 1 to `max`. */
+struct bootinfo_framebuffer;
+int fbcon_log_floor(void);
+size_t fbcon_drop_hidden(char *buf, size_t n, int floor);
+uint32_t fbcon_pack(const struct bootinfo_framebuffer *fb, uint32_t r, uint32_t g, uint32_t b);
+uint32_t fbcon_scale(uint32_t width, uint32_t height, uint32_t max);
 
 #endif /* KERNEL_FBCON_H */

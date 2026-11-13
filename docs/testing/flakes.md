@@ -131,6 +131,13 @@ branch that pins ceesafec 0.33.0. Three `gmake host-test` runs of the same
 tree at a load near 10 passed `online-late`, as did the run before the
 failing one. The mechanism above fits: nothing was changed.
 
+**Third sighting, 2026-11-13:** the same two lines, in `make matrix`'s
+`host-test-aarch64` step on the same Mac at a one-minute load average
+near 94 (another project's compiler suite), on the branch `quiet-boot`,
+which changes nothing under `tests/host/` or in the quiesce code. The
+x86-64 `make host-test` of the same tree passed on the other machine at
+the same time. Nothing was changed.
+
 **Observed once, firmware handover in `test-harness-retry` (2026-10-09):**
 the first x86-64 QEMU process printed no `cosmoboot-uefi` banner during the
 30 s handover window, so `tests/boot/run_boot_test.py` killed it and

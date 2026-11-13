@@ -326,6 +326,9 @@ PORTS = [
      "The network receive path's decoders: frames, TCP segments, DHCP and DNS (netparse_types.h)",
      "kernel/include/kernel/net/netparse_types.h", False),
     ("kernel/core/fbvalid.cee", "kernel/core/fbvalid.c", "The framebuffer validator (bootinfo.h)", None, False),
+    ("kernel/core/fbrules.cee", "kernel/core/fbrules.c",
+     "The framebuffer console's rules that draw nothing: the log lines the screen shows, a colour as a pixel, the "
+     "font's scale; the self-test console-log-floor (fbcon.h, console.h)", None, False),
     ("kernel/core/lz4_decode.cee", "kernel/core/lz4_decode.c", "The LZ4 block decoder (lz4.h)", None, False),
     ("kernel-services/network/cksum.cee", "kernel-services/network/cksum.c",
      "The Internet checksum over buffers and mbuf chains (cksum.h)", None, False),

@@ -13,7 +13,9 @@ checked at compile time; a non-literal format is a build error.
   `virtio_console` module registers a `virtio-console` sink when it
   loads.
 - **Inputs**: `sink` with `name` and non-NULL `write`; `next` is owned by
-  the console.
+  the console. `log_floor` (an `enum klog_level`, 0 for none) is set
+  before the call: the kernel's log lines below it are not given to the
+  sink ("The quiet screen" in `design.md`).
 - **Ownership/lifetime**: the object must stay valid until
   `console_unregister` (module unload) or forever (static).
 - **Concurrency**: the list is prepended without the console lock; safe
@@ -49,6 +51,14 @@ checked at compile time; a non-literal format is a build error.
   `write` (it gave up on what it was given) is passed none of the rest of
   that call. After `console_set_panic_mode` a call is written whole,
   without the lock.
+
+### `void console_write_log(int level, const char *s, size_t len)`
+- **Purpose**: `console_write` for one line of the kernel's log at
+  `level`; `kvlog` is its caller. A sink whose `log_floor` is above
+  `level` is not given the line. `console_write` is this call at a level
+  above every floor.
+- **Concurrency**: as `console_write`. After `console_set_panic_mode`
+  every sink is given the line, whatever its floor.
 
 ### `void console_set_panic_mode(void)` / `bool console_in_panic_mode(void)`
 - **Purpose**: irreversibly enter/query fatal-output mode. The getter is
@@ -129,6 +139,21 @@ address space.
 ### `const struct bootinfo_framebuffer *bootinfo_framebuffer(void)`
 
 The validated description, or NULL. Set once by `bootinfo_init`.
+
+### `int fbcon_log_floor(void)` / `size_t fbcon_drop_hidden(char *buf, size_t n, int floor)`
+
+`kernel/core/fbrules.cee`, for `fbcon.c`. The screen's log floor:
+`KLOG_ERROR`, or 0 with `verbose` on the command line; callable once
+`bootinfo_init` has run. `fbcon_drop_hidden` removes from `n` bytes of
+the log's text, in place, each line that begins with the tag of a level
+below `floor`, and returns the new length.
+
+### `uint32_t fbcon_pack(const struct bootinfo_framebuffer *fb, uint32_t r, uint32_t g, uint32_t b)` / `uint32_t fbcon_scale(uint32_t width, uint32_t height, uint32_t max)`
+
+Also `fbrules.cee`. An eight-bit colour as a pixel of `fb`'s format (a
+channel wider than 32 bits or shifted past bit 31 contributes 0), and
+how many screen pixels a font pixel is each way on a screen of that
+size, 1 to `max`.
 
 ## `kernel/log.h`
 

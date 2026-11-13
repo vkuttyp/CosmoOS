@@ -168,6 +168,49 @@ gives a screen half the rows, so the chunk went from an eighth of the
 screen to a quarter. What the chunk costs is blank space at the bottom,
 which the next lines fill.
 
+## The quiet screen
+
+A sink has a log floor (`console_sink.log_floor`, an `enum klog_level`;
+0 is none). `kvlog` passes each line to the console with its level
+(`console_write_log`), and `write_call` does not give the line to a sink
+whose floor is above it. Everything else -- `console_write` and
+`console_puts`, which carry a program's output from `tty.c`, `kprintf`
+and the banner -- is passed at a level above every floor, so no floor
+hides it. The level travels with the write and is not read from the
+text, because the text cannot say: `dmesg` writes the ring's lines, tags
+and all, through `console_write`, and they must reach the screen it was
+typed on. In panic mode the unlocked path gives every sink everything.
+
+The framebuffer console's floor is `KLOG_ERROR` (`fbcon_log_floor`), set
+where its sink is registered (`sink_register`: the early console,
+`fbcon_init`, and a first surface in `fbcon_attach`). The screen then
+shows the kernel's ERROR and PANIC lines, a panic's report, and what
+programs print; the DEBUG, INFO and WARN lines go to the serial port,
+the virtio console and the ring, whose sinks have no floor. `verbose` on
+the kernel command line (`docs/boot/design.md`, "Keys the kernel reads")
+makes the screen's floor 0: every line, as before this unit.
+
+The two replays of the ring (`replay_log`, and `fbcon_attach` with no
+screen before) apply the floor to the ring's text, where the tag is all
+there is: `fbcon_drop_hidden` removes each line that begins with the tag
+of a level below the floor (`[DEBUG] `, `[ INFO] ` and `[ WARN] ` for
+ERROR) and keeps every other line. Both ask `klog_copy` for one byte less
+than the ring holds: a ring that has wrapped then begins at a whole line
+(`klog_copy` skips to one whenever it was asked for less than it has),
+so the filter is not given the tail of a line whose tag is gone.
+
+These rules are CeeSafe, `kernel/core/fbrules.cee`: the floor, the
+filter and the self-test `console-log-floor`. Two pure functions of
+`fbcon.c` moved there with them, the colour packing (`fbcon_pack`) and
+the font's scale (`fbcon_scale`), so the unit adds no C to the kernel
+(roadmap 2.0's CeeSafe rule, CI's `cee-share`). `fbcon_pack` gives 0 for
+a channel the validator would refuse, where the C shifted by whatever it
+was given.
+
+Not changed: the loader's own lines, which are on the screen until the
+kernel clears it (backlog BOOT-10), and what init and the services
+print, which the screen shows as they print it (backlog USR-9).
+
 ## log.c: levels, prefix, truncation
 
 Levels: `KLOG_DEBUG` (0), `KLOG_INFO`, `KLOG_WARN`, `KLOG_ERROR`,

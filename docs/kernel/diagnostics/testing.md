@@ -107,6 +107,17 @@ time must not make a stalled device -- the virtio console, whose spin
 waits 200 ms for its device -- wait once a line where it waited once a
 write.
 
+**`console-log-floor`** (both architectures, any machine; CeeSafe,
+`kernel/core/fbrules.cee`): two sinks of the test's own, one with a
+floor at INFO and one with none, are given the same four writes: two
+DEBUG log lines, one INFO log line, and one `console_puts`. The sink
+with no floor must count 2, 1 and 1; the sink with the floor 0, 1 and 1.
+Then the replay's filter: of `[ INFO] a`, `[ERROR] b`, `plain`,
+`[ WARN] c` and an unfinished `[DEBUG] d`, a floor at ERROR must keep
+exactly `[ERROR] b` and `plain`. The test sets the log's level to DEBUG
+for its four writes and restores it: a release kernel's log starts at
+INFO and would not write the two DEBUG lines.
+
 **`fb-console`** (both architectures, whenever the machine has a
 display; skipped, as `fb-bench` is, when a display driver's surface holds
 the console, which a display change can free under a pixel read). Everything is checked by reading the pixels back through the
@@ -134,8 +145,10 @@ firmware's framebuffer, 160x50 cells on x86-64 and 100x37 on AArch64):
 written between them with `console_puts`, which reaches the sinks
 without the log ring as a program's output does, the second left
 unfinished. On the 40x12 surface the two must be on consecutive rows,
-the second continued at column 15 by `fbcon_attach`'s own log line,
-which shows the cursor moved with the screen. A size set by
+the second continued at column 15, which shows the cursor moved with
+the screen: by a `!` the test writes after the switch on a quiet screen,
+and by `fbcon_attach`'s own log line on a `verbose` one (the screen's
+floor hides that line otherwise; "The quiet screen" in `design.md`). A size set by
 `TIOCSWINSZ` before the second switch must have given way to 40x12
 (`tty_console_resized`), and one set after it must survive that
 switch's notice delivered late (9x4 kept). Detaching must give back the first console at

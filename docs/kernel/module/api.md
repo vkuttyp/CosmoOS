@@ -9,7 +9,7 @@ ABI section is the exception and is versioned.
 
 ## Module ABI (`kernel/include/kernel/module.h`)
 
-**ABI stability: versioned.** `COSMO_MODULE_ABI_VERSION` is 11 (its
+**ABI stability: versioned.** `COSMO_MODULE_ABI_VERSION` is 12 (its
 history is under "Module ABI v3" below). It is
 bumped on any incompatible change to the exported symbol set, to a
 structure an exported function takes, to `struct cosmo_module_info`,
@@ -70,7 +70,7 @@ export (`-EEXIST`); the kernel panics at `ksym_init` on a duplicate.
 
 ### Module ABI v3: the exported symbols
 
-`COSMO_MODULE_ABI_VERSION` is 11. Version 2 (the lifetime pass): `struct
+`COSMO_MODULE_ABI_VERSION` is 12. Version 2 (the lifetime pass): `struct
 kobject` gained `owner`, which moves every field after the embedded
 kobject in `struct device`, `struct blkdev` and `struct netif`, and the
 release callbacks (`struct device.release`, `struct blkdev_ops.release`,
@@ -94,7 +94,10 @@ gained `handoff`, the waiter the next unlock hands the mutex to (S33),
 which changes the size of every exported structure embedding one.
 Version 11 (the virtio-gpu unit): `struct virtio_transport` gained
 `write_config32` after `read_config`, which moves every callback after
-it. An older module is refused by `modelf_check_info`.
+it. Version 12 (the quiet screen): `struct console_sink` gained
+`log_floor`, in what was padding after `dropped`: a sink an older module
+did not zero would have a floor nobody set. An older module is refused
+by `modelf_check_info`.
 
 The exports include device, PCI, DMA, block, entropy and console-sink
 interfaces, the mbuf and network-interface surface a NIC driver needs,

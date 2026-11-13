@@ -98,23 +98,6 @@ static void damage(struct fbcon *c, uint32_t y0, uint32_t y1)
         c->dmg_y1 = y1;
 }
 
-/* An eight-bit intensity in a channel of `bits` bits. Deeper channels
- * exist (ten bits a colour is a real mode) and the validator allows them,
- * so this scales both ways rather than shifting by a negative amount. */
-static uint32_t channel(unsigned value8, uint8_t bits)
-{
-    if (bits >= 8)
-        return (uint32_t)value8 << (bits - 8);
-    return (uint32_t)value8 >> (8 - bits);
-}
-
-static uint32_t pack(const struct bootinfo_framebuffer *fb, unsigned r, unsigned g, unsigned b)
-{
-    return (channel(r, fb->red_bits) << fb->red_shift) |
-           (channel(g, fb->green_bits) << fb->green_shift) |
-           (channel(b, fb->blue_bits) << fb->blue_shift);
-}
-
 /*
  * The drawing loops, each in a function of its own that cannot straddle a
  * page boundary: aligned to FBCON_DRAW_ALIGN and no larger than it, which
@@ -337,12 +320,21 @@ static void fbcon_write(struct console_sink *sink, const char *s, size_t len)
  * megabytes of bus traffic to draw frames nobody sees, and `dmesg` has
  * the whole ring either way.
  */
+/* The sink joins the console with the screen's log floor (fbrules.cee,
+ * "The quiet screen"). */
+static void sink_register(void)
+{
+    g_sink.log_floor = fbcon_log_floor();
+    console_register(&g_sink);
+    g_registered = true;
+}
+
 static void replay_log(struct fbcon *c)
 {
     char *buf = kmalloc(KLOG_RING_SIZE, 0);
     if (buf == NULL)
         return;
-    size_t n = klog_copy(buf, KLOG_RING_SIZE);
+    size_t n = fbcon_drop_hidden(buf, klog_copy(buf, KLOG_RING_SIZE - 1), fbcon_log_floor());
 
     /* Walk back over at most `rows` newlines. */
     size_t start = n;
@@ -375,19 +367,6 @@ static bool overlaps_usable_ram(uint64_t pa, uint64_t len)
     return false;
 }
 
-/*
- * How many screen pixels a font pixel is, each way. The face is 8x16, the
- * size of a PC or Linux text console, and is drawn one-to-one up to
- * 1920x1080 (Parallels Desktop's 1024x768: 128x48 cells, the owner's
- * choice on 2026-10-13 after trying 2x). A screen of twice that each way
- * (4K) and up draws it larger: min(width / 1920, height / 1080), 1 to 4.
- */
-static uint32_t fbcon_scale(uint32_t width, uint32_t height)
-{
-    uint32_t s = width / 1920 < height / 1080 ? width / 1920 : height / 1080;
-    return s < 1 ? 1 : s > FBCON_SCALE_MAX ? FBCON_SCALE_MAX : s;
-}
-
 /* Fill in the console over an already-mapped framebuffer at `base`, with
  * `text` (cols * rows cells) as its character buffer. False, with a
  * warning, when the mode cannot hold one cell. */
@@ -398,14 +377,14 @@ static bool fbcon_setup(struct fbcon *c, const struct bootinfo_framebuffer *fb, 
     c->bytes_pp = fb->bpp / 8;
     c->width = fb->width;
     c->height = fb->height;
-    c->scale = fbcon_scale(fb->width, fb->height);
+    c->scale = fbcon_scale(fb->width, fb->height, FBCON_SCALE_MAX);
     c->cell_w = FONT_WIDTH * c->scale;
     c->cell_h = FONT_HEIGHT * c->scale;
     c->cols = fb->width / c->cell_w;
     c->rows = fb->height / c->cell_h;
     c->cx = c->cy = 0;
-    c->fg = pack(fb, 0xd0, 0xd0, 0xd0);
-    c->bg = pack(fb, 0x00, 0x00, 0x00);
+    c->fg = fbcon_pack(fb, 0xd0, 0xd0, 0xd0);
+    c->bg = fbcon_pack(fb, 0x00, 0x00, 0x00);
     if (c->cols == 0 || c->rows == 0) {
         kwarn("fbcon: %ux%u is smaller than one character cell", c->width, c->height);
         return false;
@@ -453,8 +432,7 @@ void fbcon_early_init(void)
     }
     c->text = g_early_text;
     fbcon_start(c);
-    console_register(&g_sink);
-    g_registered = true;
+    sink_register();
     kinfo("fbcon: no serial console: the framebuffer is the console from the first line (%ux%u cells)", c->cols,
           c->rows);
 }
@@ -499,8 +477,7 @@ void fbcon_init(void)
     }
     fbcon_start(c);
     replay_log(c);
-    console_register(&g_sink);
-    g_registered = true;
+    sink_register();
     kinfo("fbcon: %ux%u cells of %ux%u pixels at %p, scrolling %u rows at a time", c->cols, c->rows,
           c->cell_w, c->cell_h, (void *)(uintptr_t)c->base, c->scroll_rows);
 }
@@ -648,7 +625,7 @@ int fbcon_attach(const struct fbcon_surface *s)
         carry_text(n, prev);
     } else if (log != NULL) {
         /* No screen before: the newest screenful, as fbcon_init shows it. */
-        size_t log_len = klog_copy(log, KLOG_RING_SIZE);
+        size_t log_len = fbcon_drop_hidden(log, klog_copy(log, KLOG_RING_SIZE - 1), fbcon_log_floor());
         size_t start = log_len;
         unsigned lines = 0;
         while (start > 0 && lines < n->rows) {
@@ -662,10 +639,8 @@ int fbcon_attach(const struct fbcon_surface *s)
     }
     __atomic_store_n(&g_fb, n, __ATOMIC_RELEASE);
     bool panicking = switch_done();
-    if (!g_registered) {
-        console_register(&g_sink);   /* writers walk the list under this lock */
-        g_registered = true;
-    }
+    if (!g_registered)
+        sink_register();   /* writers walk the list under this lock */
     char *old_text = prev->surface != NULL && !panicking ? prev->text : NULL;
     bool resized = !prev->ready || prev->cols != n->cols || prev->rows != n->rows;
     uint32_t gen = resized ? __atomic_add_fetch(&g_switches, 1, __ATOMIC_RELEASE) : 0;
