@@ -5588,3 +5588,54 @@ read during the failed boots (0.10 before the reruns, 1.41 after), so
 what took the CPUs is not known. The screen-colours matrix's four-CPU
 boot on the same machine that morning passed in 241.3 s. Nothing was
 changed.
+
+## `rr_dequeue` assertions on two CPUs as the console's session started, AArch64 `test-be`, 2026-11-14
+
+Not a flake: a defect, fixed (S36). Main's run 43523266637 on `24421af8` (the v1.1.1 notes, documentation only),
+job `upgrade test (aarch64)`: `test-be: FAIL: be-crash-set: QEMU exited (code 35) waiting for the first prompt`.
+The boot's log (artifact `test-upgrade-aarch64`, `test-be/boot-be-crash-set.log`) ends, 9.0 s in, after `init: rc
+exited with status 0`, `pid 21 'sh' created` and `pid 22 'cat' exited`, with
+
+- `KERNEL PANIC (concurrent) on CPU 0: assertion failed: !list_empty(&t->rq_link) at kernel/scheduler/policy_rr.c:80
+  (rr_dequeue)`;
+- `KERNEL PANIC: assertion failed: rq->nr_running > 0 at kernel/scheduler/policy_rr.c:84 (rr_dequeue)`, CPU 1,
+  thread 38 'sh', whose stack (the release set's `cosmoos-aarch64-kernel.elf`) is `el0_sync`, `handle_sync`,
+  `syscall_dispatch`, `syscall_handle_read`, `ceeF_objRead`, `ceeF_ringRead`, `wait_floor_until_killable`,
+  `sched_set_running_current`.
+
+Mechanism: `sh` was reading the pipe of `$(cat /etc/console-shell)` (`/sbin/cosmo-console`'s first line), woken by
+the pipe and by its child's exit; `sched_wake` read `t->cpu` and did not read it again under the queue's lock
+(`docs/kernel/scheduler/invariants.md`, S36). The first sighting; the console's session (#521) runs that pipeline
+at every installed boot. Proof: `sched-wake-moved`, `tools/wake-moved-probe.py`.
+
+## x86-64 four-CPU debug boots have a slow mode: `cosmofs-replay` at 53 s against 35 s, 2026-11-14
+
+Unexplained; backlog TEST-28. A four-CPU x86-64 debug boot runs in one of two modes, and the same image on the
+same idle machine gives either. On the other machine (the CI image, one container of 4 CPUs), 2026-11-14:
+
+| tree | `QEMU_SMP=4` `make test` | `test-chaos` | `test-harness-retry` |
+|---|---|---|---|
+| the wake fix, first run | 35254 ms, PASS in 254.3 s | 54364 ms, timed out | 53458 ms, timed out |
+| the wake fix, second run (same code but one check of a self-test) | 35224 ms, PASS in 252.6 s | 55704 ms, timed out | 53049 ms, timed out |
+| main `24421af8` | 53623 ms, timed out | 35692 ms, PASS in 258.0 s | 35315 ms, PASS in 253.8 s |
+| the wake fix, its images built again and booted twice | not run | 31110 ms, PASS in 249.1 s; 35761 ms, PASS in 257.0 s | 53426 ms, timed out; 35366 ms, PASS in 254.6 s |
+| main `24421af8`, the same images again | 34762 ms, PASS in 252.9 s; then 52814 ms, timed out | 36002 ms, PASS in 262.8 s | not run |
+
+The number is `cosmofs-replay`'s time. In the slow mode `cosmofs-snap-reserved` takes 8.6 to 9.1 s against 3.9 to
+5.7 s (over its 8 s bound), the self-tests' total is 252 to 261 s against 195 to 205 s, `lockdep-graph-bench` (one
+CPU, no I/O) is the same in both (9.0 to 9.2 s), and the boot runs out of its 300 s. The one- and two-CPU boots of
+the same images took 27.6 to 30.2 s for `cosmofs-replay`, every time. The machine was idle in the slow boots: a
+`vmstat` sample each minute of the second run shows one CPU busy of eight, no I/O wait, no blocked process. The
+three kernels of the second run (debug, chaos, harness-retry) differ in layout by 16 bytes from one point on, and no
+function crosses a page in the two slow ones only; the repeat on main's images rules the image out in any case.
+
+Earlier sightings read as the machine's: 2026-11-13's entry above (the four-CPU debug boot and
+`test-harness-retry`, both passing an hour later on the same images); #520's matrix on that machine the same day
+passed all three. On CI: main's run 43523266637 (`24421af8`, documentation only), job `build, boot,
+analyze (x86_64, boots)`: its first boot passed in 223.4 s (`cosmofs-replay` 28199 ms, 175173 ms of self-tests); its
+second failed after 267.6 s with `self-test cosmofs-replay took 41132 ms (budget 40000 ms)` and `[WATCHDOG] no
+progress for 40003 ms` (217995 ms of self-tests, `cosmofs-snap-reserved` 6384 ms, `lockdep-graph-bench` 10709 ms
+against 10653 ms). The same picture, on a faster machine.
+
+What is not known: what the slow mode is (the guest's scheduling at four CPUs, or QEMU's), and since when. No
+budget was changed: the bound is not what is wrong when the same boot takes 35 s or 53 s.

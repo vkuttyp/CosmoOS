@@ -185,6 +185,30 @@ round; then a wait on a completion nobody completes returns false at its
 deadline. It fails when the timeout wait drops its handshake (the lock is
 still held on return).
 
+### `sched-wake-moved` (S36)
+
+In CeeSafe (`kernel/scheduler/waketest.cee`); two CPUs, else skipped, as it
+is in a build without `CONFIG_SELFTEST`. A thread made on the test's CPU
+waits with no queue, as a futex waiter does. The test, with preemption
+off so that its CPU runs nothing else, arms `sched_wake`'s seam for that
+thread and wakes it: the seam (`sched_test_wake_point`, between the wake's
+read of `t->cpu` and its lock of that CPU's queue) makes the first wake,
+moves the thread to the other CPU with `sched_migrate` (asked again while
+it is not there: a migrator may move it back; the other CPU's balancer may
+make the move first, which serves as well, so the test counts its own
+moves and requires none), and waits for it to arm
+its next wait there (`sched_prepare_block_current`, interrupts off, the
+thread still running). The held wake then goes on, and the test looks
+where the thread is queued (`sched_test_find_queued`): it must be the CPU
+the thread is on. Without the re-read it is the test's CPU; the test then
+has the thread leave its CPU as a ready thread does, lets its own CPU run
+it only once the other's switch is over (the switch count moves under the
+queue's lock, which is held across the switch), and fails with `a wake
+queued a thread on the CPU it had left (S36)`, leaving nothing corrupt.
+`tools/wake-moved-probe.py --arch ARCH [--old]` boots both ways at two
+CPUs. `sched_migrate_result_name`, which only tests call, lives in the
+same file.
+
 ### `wait-multi-prepare` (S34, the scp-sftp unit)
 Pinned: prepare on queue A, wake A (the thread is READY and queued while
 it still runs), prepare on queue B; the thread must still be READY, not

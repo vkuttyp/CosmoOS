@@ -449,3 +449,24 @@ against 0, 0 against 19), and `test_fair` on the host (the arithmetic
 against Linux's table and 128-bit arithmetic; one CPU simulated for
 400 s per mix, shares within 2 % of the weights, a sleeper's lead bounded).
 
+**S36. A wake queues a thread on the queue of the CPU it is on.**
+`sched_wake` reads `t->cpu`, locks that CPU's queue and reads `t->cpu`
+again under the lock, taking the lock again if it changed, as
+`sched_reprioritize` does. The first read alone is not enough for a
+thread with two wakers, each on its own path (a pipe's reader: the
+writer's close through the wait queue, the child's exit through signal
+delivery): between one waker's read and its lock the other wake can make
+the thread ready, a migration move it, and the thread run on its new CPU
+and arm its next wait there, BLOCKED and still that CPU's current. The
+first waker then queued it on the CPU it had left, a queue that
+`sched_set_running_current` on its own CPU does not lock (S25): that CPU
+took it off the wrong queue while the other picked it, and
+`rr_dequeue`'s assertions stopped both (found 2026-11-14 in CI's
+`test-be` on AArch64, as the console's session started its first
+pipeline; the code dates from the first SMP scheduler). Under the lock
+of the queue `t->cpu` names the CPU cannot change: a migration holds
+that lock, and a pick writes the CPU of the queue the thread is on.
+Check: `sched-wake-moved` (`kernel/scheduler/waketest.cee`), which holds
+a waker at the seam between the read and the lock while the first wake
+lands and the thread moves; `tools/wake-moved-probe.py`.
+

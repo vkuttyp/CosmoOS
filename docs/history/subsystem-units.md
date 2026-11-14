@@ -3787,3 +3787,14 @@ See the [history index](README.md).
   - The harness and the guide's runner answer the password and login
     prompts; a logged-in test boot ends with `kill -USR2 1`. U17.
   - Report: `docs/audit/2026-11-13-console-login-report.md`.
+- **A wake whose thread moved under it (2026-11-14; main red on the v1.1.1
+  notes' merge).**
+  - `sched_wake` reads the thread's CPU again under the queue's lock (S36).
+    With two wakers a thread could be woken, moved and blocked again
+    between one waker's read and its lock, and was then queued on the CPU
+    it had left: `rr_dequeue`'s assertions on two CPUs, in CI's `test-be`
+    on AArch64 as the console's session started.
+  - Self-test `sched-wake-moved` in CeeSafe (`kernel/scheduler/waketest.cee`)
+    with a seam in `sched_wake`; `tools/wake-moved-probe.py`.
+    `sched_migrate_result_name` moved to the same file: no C added.
+  - Report: `docs/audit/2026-11-14-wake-moved-report.md`.

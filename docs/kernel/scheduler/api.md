@@ -165,7 +165,9 @@ them under `runqueue.lock`.
   CPU's `need_resched` if `t` outranks its current thread or the CPU is
   idle. **No-op** for any other state, which is what makes the
   `wait_event` protocol lost-wakeup free.
-- **Concurrency**: `runqueue.lock` irqsave; interrupt-safe.
+- **Concurrency**: `runqueue.lock` irqsave; interrupt-safe. `t->cpu` is
+  read again under the lock and the lock taken again if it changed: a
+  second waker may have let the thread move in between (S36).
 
 ### `void sched_block_current(void)`
 - Caller has already set `current->state = THREAD_BLOCKED` under a
