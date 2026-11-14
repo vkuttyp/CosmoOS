@@ -574,16 +574,25 @@ void sched_block_current(void)
     schedule();
 }
 
+/* The queue `t->cpu` names, read again under its lock: the thread may have moved (S36). */
 bool sched_wake(struct thread *t)
 {
-    KASSERT(t->cpu >= 0);
-    struct runqueue *rq = &g_rqs[t->cpu];
+    struct runqueue *rq;
+    arch_irq_state_t s;
     bool woke = false;
-#if CONFIG_SELFTEST
-    sched_test_wake_point(t);   /* sched-wake-moved's seam (waketest.cee) */
-#endif
 
-    arch_irq_state_t s = spin_lock_irqsave(&rq->lock);
+    for (;;) {
+        int cpu = __atomic_load_n(&t->cpu, __ATOMIC_ACQUIRE);
+        KASSERT(cpu >= 0);
+#if CONFIG_SELFTEST
+        sched_test_wake_point(t);   /* sched-wake-moved's seam (waketest.cee) */
+#endif
+        rq = &g_rqs[cpu];
+        s = spin_lock_irqsave(&rq->lock);
+        if (__atomic_load_n(&t->cpu, __ATOMIC_ACQUIRE) == cpu)
+            break;
+        spin_unlock_irqrestore(&rq->lock, s);
+    }
     if (t->state == THREAD_BLOCKED) {
         t->state = THREAD_READY;
         g_policy->enqueue(rq, t, false);
