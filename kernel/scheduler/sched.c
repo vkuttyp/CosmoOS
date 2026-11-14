@@ -579,6 +579,9 @@ bool sched_wake(struct thread *t)
     KASSERT(t->cpu >= 0);
     struct runqueue *rq = &g_rqs[t->cpu];
     bool woke = false;
+#if CONFIG_SELFTEST
+    sched_test_wake_point(t);   /* sched-wake-moved's seam (waketest.cee) */
+#endif
 
     arch_irq_state_t s = spin_lock_irqsave(&rq->lock);
     if (t->state == THREAD_BLOCKED) {
@@ -688,22 +691,6 @@ void sched_set_running_current(void)
 }
 
 /* --- migration --- */
-
-const char *sched_migrate_result_name(enum sched_migrate_result r)
-{
-    switch (r) {
-    case SCHED_MIGRATED: return "migrated";
-    case SCHED_MIGRATE_SAME_CPU: return "same-cpu";
-    case SCHED_MIGRATE_NOT_READY: return "not-ready";
-    case SCHED_MIGRATE_CURRENT: return "current";
-    case SCHED_MIGRATE_PREEMPTED: return "preempted";
-    case SCHED_MIGRATE_AFFINITY: return "affinity";
-    case SCHED_MIGRATE_OFFLINE: return "offline";
-    case SCHED_MIGRATE_GAP: return "gap-closed";
-    case SCHED_MIGRATE_RESULT_COUNT: break;   /* not a result: the array size */
-    }
-    return "?";
-}
 
 /* Both run-queue locks, increasing CPU id (S24). Interrupts are off. */
 static void rq_lock_pair(unsigned a, unsigned b)

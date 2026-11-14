@@ -1,0 +1,339 @@
+// waketest.cee - the self-test sched-wake-moved: a wake whose thread moved under it (S36;
+// docs/kernel/scheduler/testing.md).
+//
+// Two wakers of one thread: a pipe's reader is woken by the writer's close and by its child's exit, each by its own
+// path. The second reads the thread's CPU; before it locks that CPU's queue the first wake lands, the thread is moved,
+// runs on the other CPU and arms its next wait there (BLOCKED, still running). The second wake must queue it where it
+// runs: queued on the CPU it left, its sched_set_running_current takes it off the wrong queue while that CPU picks it
+// (`rq->nr_running > 0`, rr_dequeue, test-be on AArch64, 2026-11-14). sched_wake's seam holds the second waker at that
+// point; the thread stays on its CPU with interrupts off, armed, until the test has looked.
+//
+// The thread's state is in statics, as nettest_lifetime.cee's parked retry's: no thread outlives what it reads.
+
+@header(
+    "kernel/compiler.h",
+    "kernel/sched.h",
+    "kernel/thread.h",
+    "kernel/selftest.h",
+    "kernel/smp.h",
+    "kernel/percpu.h",
+)
+extern "C" {
+    struct thread {
+        state: u32;
+        cpu: i32;
+    }
+
+    fn thread_create_on(
+        entry: extern "C" fn(*mut void),
+        arg: *mut void,
+        name: *CChar,
+        priority: i32,
+        affinity: u64,
+    ) -> *mut thread;
+    fn thread_set_affinity(t: *mut thread, affinity: u64);
+    fn thread_pin_self() -> u64;
+    fn thread_set_affinity_self(affinity: u64);
+    fn thread_join(t: *mut thread) -> i32;
+    fn thread_count() -> u32;
+    fn thread_sleep_ns(ns: u64);
+    fn sched_wake(t: *mut thread) -> bool;
+    fn sched_block_current();
+    fn sched_migrate(t: *mut thread, cpu: u32) -> u32;
+    fn sched_switch_count(cpu: u32) -> u64;
+    fn sched_yield();
+    fn sched_test_find_queued(t: *thread, cpu: *mut u32, level: *mut i32, bitSet: *mut bool) -> bool;
+    /// A pause instruction.
+    @effects()
+    fn arch_cpu_relax();
+    fn cpu_count() -> u32;
+    fn cpu_online(cpu: u32) -> bool;
+    fn clock_now_ns() -> u64;
+    /// compiler.h: whether this build has the self-tests' seams (CONFIG_SELFTEST).
+    @constant
+    fn COSMO_CONFIG_SELFTEST() -> bool;
+}
+
+// sched_internal.h, which is the scheduler's own: declared here as wait.cee declares them.
+extern "C" {
+    /// Each takes this CPU's run-queue lock, with interrupts off, and sleeps nowhere.
+    @effects()
+    fn sched_prepare_block_current();
+    @effects()
+    fn sched_set_running_current();
+}
+
+static SELFTEST_BUILD: bool = COSMO_CONFIG_SELFTEST();
+
+// thread.h and sched.h values.
+const THREAD_BLOCKED: u32 = 2;
+const SCHED_MIGRATED: u32 = 0;
+const SCHED_PRIO_DEFAULT: i32 = 32;
+const NS_PER_MS: u64 = 1000000;
+
+/// The thread whose next sched_wake stops at the seam, as an address; 0 when none.
+static SEAM_FOR: AtomicU64 = AtomicU64.constant(0);
+static GO: AtomicU32 = AtomicU32.constant(0);
+static ARMED: AtomicU32 = AtomicU32.constant(0);
+static RELEASE: AtomicU32 = AtomicU32.constant(0);
+static RAN_ON: AtomicU32 = AtomicU32.constant(0);
+static MOVES: AtomicU32 = AtomicU32.constant(0);
+static REWOKE: AtomicU32 = AtomicU32.constant(0);
+static LEAVE: AtomicU32 = AtomicU32.constant(0);
+static mut MOVED: *mut thread = 0 as *mut thread;
+static mut OTHER: u32 = 0;
+
+/// Safety: the monotonic clock.
+fn now() -> u64 => unsafe { clock_now_ns() };
+
+/// A failed check: its reason, for the runner's report, and false.
+/// Safety: `reason` is the runner's; `why` is a zero-terminated literal, which outlives the report.
+fn failed(reason: *mut *CChar, why: StringView) -> bool {
+    unsafe {
+        let r = Ptr.toBorrowMut(reason);
+        put(r, why.ptr as *CChar);
+    }
+    return false;
+}
+
+fn put(slot: borrow mut *CChar, why: *CChar) {
+    slot = why;
+}
+
+/// The thread. It waits for GO as a futex waiter does, with no queue: armed, then blocked unless GO came meanwhile.
+/// Then, where it runs next, it arms a wait as waitqueue_prepare ends (BLOCKED, on the CPU) and holds there, with
+/// interrupts off, until RELEASE; and ends the wait as waitqueue_finish does.
+/// Safety: the statics are set before the thread is created.
+@callback
+unsafe fn movedMain(arg: *mut void) {
+    while (GO.loadWith(LoadOrdering.Acquire) == 0) {
+        {
+            let off = IrqGuard.enter();
+            sched_prepare_block_current();
+        }
+        if (GO.loadWith(LoadOrdering.Acquire) == 0) {
+            sched_block_current();
+        }
+        sched_set_running_current();
+    }
+    {
+        let off = IrqGuard.enter();
+        RAN_ON.storeWith(arch_cpu_id(), StoreOrdering.Release);
+        sched_prepare_block_current();
+        ARMED.storeWith(1, StoreOrdering.Release);
+        while (RELEASE.loadWith(LoadOrdering.Acquire) == 0) {
+            arch_cpu_relax();
+        }
+        if (LEAVE.loadWith(LoadOrdering.Acquire) == 0) {
+            sched_set_running_current();
+        }
+    }
+    // The failure: READY on a queue that is not this CPU's. It leaves the CPU as a ready thread does, and the CPU
+    // whose queue holds it runs it from here.
+    if (LEAVE.loadWith(LoadOrdering.Acquire) != 0) {
+        sched_yield();
+    }
+}
+
+/// In the second waker, which has read the thread's CPU: the first wake, the move, and the thread's next wait armed on
+/// the other CPU. The move is asked again while the thread is not there (a migrator may move it back), and the
+/// other CPU's balancer may make it first, which serves as well: the thread cannot run here, where the test holds the
+/// CPU, so its next wait is armed on the other.
+/// Safety: called at sched_wake's seam in the test's thread; MOVED is the live thread.
+unsafe fn seam() {
+    GO.storeWith(1, StoreOrdering.Release);
+    if (sched_wake(MOVED)) {
+        REWOKE.storeWith(1, StoreOrdering.Release);
+    }
+    let giveUp = now() + 2000 * NS_PER_MS;
+    while (ARMED.loadWith(LoadOrdering.Acquire) == 0 && now() < giveUp) {
+        if (sched_migrate(MOVED, OTHER) == SCHED_MIGRATED) {
+            MOVES.fetchAddWith(1, Ordering.Relaxed);
+        }
+        arch_cpu_relax();
+    }
+}
+
+/// sched_wake's seam (CONFIG_SELFTEST builds call it): between the wake's read of the thread's CPU and its lock of that
+/// CPU's queue. For any thread but the one a test named it reads one word and returns; for that one, once, it runs the
+/// test's part. The test's wake is made in thread context, so what runs here may wait.
+/// Safety: `t` is the thread sched_wake was given.
+@export("sched_test_wake_point")
+unsafe fn wakePoint(t: *mut thread) {
+    if (SEAM_FOR.loadWith(LoadOrdering.Acquire) != t as usize as u64) {
+        return;
+    }
+    SEAM_FOR.storeWith(0, StoreOrdering.Release); // once: the seam's own wake of the thread passes
+    seam();
+}
+
+/// sched_migrate's answers by name, for the tests' reports (sched.h's enum, in its order).
+@export("sched_migrate_result_name")
+fn migrateResultName(r: u32) -> *CChar {
+    let name: StringView = match (r) {
+        0 => "migrated\0",
+        1 => "same-cpu\0",
+        2 => "not-ready\0",
+        3 => "current\0",
+        4 => "preempted\0",
+        5 => "affinity\0",
+        6 => "offline\0",
+        7 => "gap-closed\0",
+        _ => "?\0",
+    };
+    return name.ptr as *CChar;
+}
+
+/// The thread let go and joined, and the thread count back where it was.
+/// Safety: MOVED is the live thread.
+unsafe fn finish(before: u32) -> bool {
+    GO.storeWith(1, StoreOrdering.Release);
+    RELEASE.storeWith(1, StoreOrdering.Release);
+    sched_wake(MOVED);
+    thread_join(MOVED);
+    let settle = now() + 200 * NS_PER_MS;
+    while (thread_count() != before && now() < settle) {
+        thread_sleep_ns(NS_PER_MS);
+    }
+    return thread_count() == before;
+}
+
+/// Safety: the runner's `reason`; the caller is pinned to the CPU it is on, and another CPU is online.
+unsafe fn pinned(reason: *mut *CChar) -> bool {
+    let before = thread_count();
+    let here = arch_cpu_id();
+    var other = here;
+    for (c in 0..cpu_count()) {
+        if (other == here && c != here && cpu_online(c)) {
+            other = c;
+        }
+    }
+    GO.storeWith(0, StoreOrdering.Relaxed);
+    ARMED.storeWith(0, StoreOrdering.Relaxed);
+    RELEASE.storeWith(0, StoreOrdering.Relaxed);
+    MOVES.storeWith(0, StoreOrdering.Relaxed);
+    REWOKE.storeWith(0, StoreOrdering.Relaxed);
+    LEAVE.storeWith(0, StoreOrdering.Relaxed);
+    RAN_ON.storeWith(here, StoreOrdering.Relaxed);
+    OTHER = other;
+    // Made on this CPU, so that it blocks here; then free to run on the other.
+    MOVED = thread_create_on(
+        movedMain,
+        0 as *mut void,
+        "wake-moved\0".ptr as *CChar,
+        SCHED_PRIO_DEFAULT - 16,
+        (1 as u64) << here,
+    );
+    if (MOVED.isNull()) {
+        return failed(reason, "could not create the thread\0");
+    }
+    let giveUp = now() + 1000 * NS_PER_MS;
+    while (Ptr.toBorrow(MOVED as *thread).state != THREAD_BLOCKED) {
+        if (now() > giveUp) {
+            finish(before);
+            return failed(reason, "the thread never blocked\0");
+        }
+        thread_sleep_ns(NS_PER_MS);
+    }
+    thread_set_affinity(MOVED, ((1 as u64) << here) | ((1 as u64) << other));
+    if (Ptr.toBorrow(MOVED as *thread).cpu != truncate<i32>(here)) {
+        finish(before);
+        return failed(reason, "the thread blocked on another CPU than the test's\0");
+    }
+
+    var qcpu: u32 = 0;
+    var qlevel: i32 = 0;
+    var qbit = false;
+    preempt_disable(); // this CPU runs nothing else: the thread's next run is on the other
+    SEAM_FOR.storeWith(MOVED as usize as u64, StoreOrdering.Release);
+    let woke = sched_wake(MOVED);
+    let queued = sched_test_find_queued(
+        MOVED as *thread,
+        borrow mut qcpu as *mut u32,
+        borrow mut qlevel as *mut i32,
+        borrow mut qbit as *mut bool,
+    );
+    let tcpu = Ptr.toBorrow(MOVED as *thread).cpu;
+    let misqueued = queued && truncate<i32>(qcpu) != tcpu;
+    if (misqueued) {
+        // The thread is ready on this CPU's queue and running on the other. It is told to leave that CPU; this one
+        // may run it once it has: the other CPU's switch count moves under its queue's lock, which is held until the
+        // switch is over, and the look below passes through that lock.
+        let switches = sched_switch_count(other);
+        LEAVE.storeWith(1, StoreOrdering.Release);
+        RELEASE.storeWith(1, StoreOrdering.Release);
+        let leftBy = now() + 2000 * NS_PER_MS;
+        while (sched_switch_count(other) == switches && now() < leftBy) {
+            arch_cpu_relax();
+        }
+        sched_test_find_queued(
+            MOVED as *thread,
+            borrow mut qcpu as *mut u32,
+            borrow mut qlevel as *mut i32,
+            borrow mut qbit as *mut bool,
+        );
+    }
+    RELEASE.storeWith(1, StoreOrdering.Release);
+    preempt_enable();
+    if (!finish(before)) {
+        return failed(reason, "the thread did not leave\0");
+    }
+
+    if (REWOKE.loadWith(LoadOrdering.Acquire) == 0) {
+        return failed(reason, "the first wake did not find the thread BLOCKED\0");
+    }
+    if (ARMED.loadWith(LoadOrdering.Acquire) == 0) {
+        return failed(reason, "the thread did not arm its next wait\0");
+    }
+    if (RAN_ON.loadWith(LoadOrdering.Acquire) != other) {
+        return failed(reason, "the thread armed its next wait on the test's CPU\0");
+    }
+    if (!woke) {
+        return failed(reason, "the second wake did not find the thread BLOCKED\0");
+    }
+    if (!queued) {
+        return failed(reason, "the second wake left the thread on no queue\0");
+    }
+    var buffer: [u8; 224] = [0; 224];
+    var line = TextWriter.create(mut buffer[..]);
+    if (misqueued) {
+        line.text("selftest: sched-wake-moved: a wake that had read CPU ");
+        line.decimal(here as u64);
+        line.text(" queued the thread on CPU ");
+        line.decimal(qcpu as u64);
+        line.text(" while it ran on CPU ");
+        line.decimal(other as u64);
+        KernelLog.send(LogLevel.Warn, line);
+        return failed(reason, "a wake queued a thread on the CPU it had left (S36)\0");
+    }
+    line.text("selftest: sched-wake-moved: a wake that had read CPU ");
+    line.decimal(here as u64);
+    line.text(" for a thread since moved (");
+    line.decimal(MOVES.loadWith(LoadOrdering.Acquire) as u64);
+    line.text(" move(s) by the test) queued it on CPU ");
+    line.decimal(qcpu as u64);
+    line.text(", where it ran");
+    KernelLog.send(LogLevel.Info, line);
+    return true;
+}
+
+/// Safety: the runner's `reason`.
+@export("selftest_sched_wake_moved")
+unsafe fn wakeMoved(reason: *mut *CChar) -> bool {
+    var buffer: [u8; 96] = [0; 96];
+    var line = TextWriter.create(mut buffer[..]);
+    if (!SELFTEST_BUILD) {
+        line.text("selftest: sched-wake-moved: needs CONFIG_SELFTEST; skipping");
+        KernelLog.send(LogLevel.Info, line);
+        return true;
+    }
+    if (cpu_count() < 2) {
+        line.text("selftest: sched-wake-moved: one CPU; skipping");
+        KernelLog.send(LogLevel.Info, line);
+        return true;
+    }
+    let saved = thread_pin_self();
+    let ok = pinned(reason);
+    thread_set_affinity_self(saved);
+    return ok;
+}
