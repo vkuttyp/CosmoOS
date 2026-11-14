@@ -5637,5 +5637,12 @@ second failed after 267.6 s with `self-test cosmofs-replay took 41132 ms (budget
 progress for 40003 ms` (217995 ms of self-tests, `cosmofs-snap-reserved` 6384 ms, `lockdep-graph-bench` 10709 ms
 against 10653 ms). The same picture, on a faster machine.
 
+A second sighting on CI, #523's run 43563291971 (`4e4bcc68`), job `build, boot, analyze (x86_64, stress)`:
+`test-chaos` passed in 262.7 s (`cosmofs-replay` 37040 ms, 211959 ms of self-tests) and `test-harness-retry` failed
+after 269.9 s with `self-test cosmofs-replay took 41904 ms (budget 40000 ms)` and the watchdog's line (218846 ms).
+Over the five runs from `727b4bba` to `4e4bcc68` the x86-64 boots' self-tests summed 120 to 219 s and
+`cosmofs-replay` took 11.6 to 41.9 s; the two failures are the two boots with the largest sums, so on CI a slow
+runner and the slow mode are not told apart by these numbers.
+
 What is not known: what the slow mode is (the guest's scheduling at four CPUs, or QEMU's), and since when. No
 budget was changed: the bound is not what is wrong when the same boot takes 35 s or 53 s.

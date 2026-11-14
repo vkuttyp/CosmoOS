@@ -105,8 +105,10 @@ the two loads read another CPU's `irq_depth` and panicked as "in
 interrupt context". Under both locks
 the thread is dequeued, `t->cpu` rewritten, and enqueued at the
 destination, so at every instant no run-queue lock is held a thread is on
-exactly one queue and `t->cpu` names it. `sched_wake`'s unlocked read of
-`t->cpu` stays correct because the thread it can wake is BLOCKED. Check:
+exactly one queue and `t->cpu` names it. `sched_wake` reads `t->cpu`
+unlocked to find the queue and again under that queue's lock (S36): a
+BLOCKED thread does not move, but one woken by another waker does, and
+can be BLOCKED again elsewhere before this waker has its lock. Check:
 `sched-migrate` (the moved worker's first run is on the destination),
 `sched-migrate-refuses` (each refusal by name, the window built with
 `waitqueue_prepare` and a wake under preemption off), `sched-migrate-stress`

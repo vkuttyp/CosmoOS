@@ -187,8 +187,8 @@ still held on return).
 
 ### `sched-wake-moved` (S36)
 
-In CeeSafe (`kernel/scheduler/waketest.cee`); two CPUs, else skipped, as it
-is in a build without `CONFIG_SELFTEST`. A thread made on the test's CPU
+In CeeSafe (`kernel/scheduler/waketest.cee`); two CPUs online, else
+skipped, as it is in a build without `CONFIG_SELFTEST`. A thread made on the test's CPU
 waits with no queue, as a futex waiter does. The test, with preemption
 off so that its CPU runs nothing else, arms `sched_wake`'s seam for that
 thread and wakes it: the seam (`sched_test_wake_point`, between the wake's

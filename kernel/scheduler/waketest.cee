@@ -208,6 +208,14 @@ unsafe fn pinned(reason: *mut *CChar) -> bool {
             other = c;
         }
     }
+    if (other == here) {
+        // cpu_count() counts a CPU that did not start; the test needs one that runs.
+        var buffer: [u8; 96] = [0; 96];
+        var line = TextWriter.create(mut buffer[..]);
+        line.text("selftest: sched-wake-moved: no other CPU online; skipping");
+        KernelLog.send(LogLevel.Info, line);
+        return true;
+    }
     GO.storeWith(0, StoreOrdering.Relaxed);
     ARMED.storeWith(0, StoreOrdering.Relaxed);
     RELEASE.storeWith(0, StoreOrdering.Relaxed);
