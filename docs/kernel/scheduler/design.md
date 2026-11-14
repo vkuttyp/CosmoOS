@@ -358,7 +358,10 @@ void sched_block_current(void);   /* caller already set state BLOCKED under a wq
 void sched_wake(struct thread *t);
 ```
 
-`sched_wake`: lock the run queue of `t->cpu`; if `t->state == BLOCKED`,
+`sched_wake`: lock the run queue of `t->cpu`, reading `t->cpu` again under
+the lock and starting over if it changed (S36: with two wakers the thread
+can be woken, moved and blocked again between one waker's read and its
+lock); if `t->state == BLOCKED`,
 set READY and enqueue at tail; if `t` has higher priority than that
 CPU's current, set its `need_resched`; unlock. Waking an already READY or
 RUNNING thread is a no-op (this is what makes the wait protocol safe).

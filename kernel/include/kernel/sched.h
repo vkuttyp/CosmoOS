@@ -207,12 +207,14 @@ bool sched_test_repair_blocked_queued(void);
  * that picks the thread already running, which sched_switch_count does
  * not: a self-test's "nothing ran the scheduler here meanwhile" (TEST-1). */
 uint64_t sched_pick_count(unsigned cpu);
+#endif
 /* Where `t` is linked: the CPU and level of the ready list that holds it
  * (each queue locked in turn), and whether that level's bitmap bit is set,
  * which is what makes pick_next look there. False when no ready list holds
  * it. For a stranded-thread failure's diagnosis (sched-migrate-stress). */
 bool sched_test_find_queued(const struct thread *t, unsigned *cpu, int *level, bool *bit_set);
-#endif
+/* sched_wake's seam, between its read of the thread's CPU and its lock (waketest.cee). */
+void sched_test_wake_point(struct thread *t);
 /* A subsystem's contribution to sched_dump: printed after the thread
  * table on every dump (the watchdog's, a lockup report's, the panic's).
  * The hook runs in interrupt context with interrupts off and must take

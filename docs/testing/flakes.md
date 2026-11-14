@@ -5588,3 +5588,80 @@ read during the failed boots (0.10 before the reruns, 1.41 after), so
 what took the CPUs is not known. The screen-colours matrix's four-CPU
 boot on the same machine that morning passed in 241.3 s. Nothing was
 changed.
+
+## `rr_dequeue` assertions on two CPUs as the console's session started, AArch64 `test-be`, 2026-11-14
+
+Not a flake: a defect, fixed (S36). Main's run 43523266637 on `24421af8` (the v1.1.1 notes, documentation only),
+job `upgrade test (aarch64)`: `test-be: FAIL: be-crash-set: QEMU exited (code 35) waiting for the first prompt`.
+The boot's log (artifact `test-upgrade-aarch64`, `test-be/boot-be-crash-set.log`) ends, 9.0 s in, after `init: rc
+exited with status 0`, `pid 21 'sh' created` and `pid 22 'cat' exited`, with
+
+- `KERNEL PANIC (concurrent) on CPU 0: assertion failed: !list_empty(&t->rq_link) at kernel/scheduler/policy_rr.c:80
+  (rr_dequeue)`;
+- `KERNEL PANIC: assertion failed: rq->nr_running > 0 at kernel/scheduler/policy_rr.c:84 (rr_dequeue)`, CPU 1,
+  thread 38 'sh', whose stack (the release set's `cosmoos-aarch64-kernel.elf`) is `el0_sync`, `handle_sync`,
+  `syscall_dispatch`, `syscall_handle_read`, `ceeF_objRead`, `ceeF_ringRead`, `wait_floor_until_killable`,
+  `sched_set_running_current`.
+
+Mechanism: `sh` was reading the pipe of `$(cat /etc/console-shell)` (`/sbin/cosmo-console`'s first line), woken by
+the pipe and by its child's exit; `sched_wake` read `t->cpu` and did not read it again under the queue's lock
+(`docs/kernel/scheduler/invariants.md`, S36). The first sighting; the console's session (#521) runs that pipeline
+at every installed boot. Proof: `sched-wake-moved`, `tools/wake-moved-probe.py`.
+
+## x86-64 four-CPU debug boots have a slow mode: `cosmofs-replay` at 53 s against 35 s, 2026-11-14
+
+Unexplained; backlog TEST-28. A four-CPU x86-64 debug boot runs in one of two modes, and the same image on the
+same idle machine gives either. On the other machine (the CI image, one container of 4 CPUs), 2026-11-14:
+
+| tree | `QEMU_SMP=4` `make test` | `test-chaos` | `test-harness-retry` |
+|---|---|---|---|
+| the wake fix, first run | 35254 ms, PASS in 254.3 s | 54364 ms, timed out | 53458 ms, timed out |
+| the wake fix, second run (same code but one check of a self-test) | 35224 ms, PASS in 252.6 s | 55704 ms, timed out | 53049 ms, timed out |
+| main `24421af8` | 53623 ms, timed out | 35692 ms, PASS in 258.0 s | 35315 ms, PASS in 253.8 s |
+| the wake fix, its images built again and booted twice | not run | 31110 ms, PASS in 249.1 s; 35761 ms, PASS in 257.0 s | 53426 ms, timed out; 35366 ms, PASS in 254.6 s |
+| main `24421af8`, the same images again | 34762 ms, PASS in 252.9 s; then 52814 ms, timed out | 36002 ms, PASS in 262.8 s | not run |
+
+The number is `cosmofs-replay`'s time. In the slow mode `cosmofs-snap-reserved` takes 8.6 to 9.1 s against 3.9 to
+5.7 s (over its 8 s bound), the self-tests' total is 252 to 261 s against 195 to 205 s, `lockdep-graph-bench` (one
+CPU, no I/O) is the same in both (9.0 to 9.2 s), and the boot runs out of its 300 s. The one- and two-CPU boots of
+the same images took 27.6 to 30.2 s for `cosmofs-replay`, every time. The machine was idle in the slow boots: a
+`vmstat` sample each minute of the second run shows one CPU busy of eight, no I/O wait, no blocked process. The
+three kernels of the second run (debug, chaos, harness-retry) differ in layout by 16 bytes from one point on, and no
+function crosses a page in the two slow ones only; the repeat on main's images rules the image out in any case.
+
+Earlier sightings read as the machine's: 2026-11-13's entry above (the four-CPU debug boot and
+`test-harness-retry`, both passing an hour later on the same images); #520's matrix on that machine the same day
+passed all three. On CI: main's run 43523266637 (`24421af8`, documentation only), job `build, boot,
+analyze (x86_64, boots)`: its first boot passed in 223.4 s (`cosmofs-replay` 28199 ms, 175173 ms of self-tests); its
+second failed after 267.6 s with `self-test cosmofs-replay took 41132 ms (budget 40000 ms)` and `[WATCHDOG] no
+progress for 40003 ms` (217995 ms of self-tests, `cosmofs-snap-reserved` 6384 ms, `lockdep-graph-bench` 10709 ms
+against 10653 ms). The same picture, on a faster machine.
+
+A second sighting on CI, #523's run 43563291971 (`4e4bcc68`), job `build, boot, analyze (x86_64, stress)`:
+`test-chaos` passed in 262.7 s (`cosmofs-replay` 37040 ms, 211959 ms of self-tests) and `test-harness-retry` failed
+after 269.9 s with `self-test cosmofs-replay took 41904 ms (budget 40000 ms)` and the watchdog's line (218846 ms).
+Over the five runs from `727b4bba` to `4e4bcc68` the x86-64 boots' self-tests summed 120 to 219 s and
+`cosmofs-replay` took 11.6 to 41.9 s; the two failures are the two boots with the largest sums, so on CI a slow
+runner and the slow mode are not told apart by these numbers.
+
+What is not known: what the slow mode is (the guest's scheduling at four CPUs, or QEMU's), and since when. No
+budget was changed: the bound is not what is wrong when the same boot takes 35 s or 53 s.
+
+## lxtest killed by signal 12 in `test-entropy`'s second boot, x86-64, 2026-11-14
+
+A defect, not fixed here: backlog LX-25. #523's run 43570128667 (`18e848ab`), job `entropy boots (x86_64)`: the
+second boot (`test-entropy`'s seeded one) failed after 179.8 s, `SHTEST: FAIL 1` and every `LINUXTEST`, musl and
+`lxsig` marker missing; 528 self-tests passed. The serial log: `LXSIGFD: signalfd read/...`, then at once `process:
+pid 595 'lxtest' exited with status 140 (82466 syscalls)` and `sh: /boot/tests/linux/lxtest: signal 12`, with no
+`forked from 595` line between.
+
+Mechanism, from the code. After the signalfd test lxtest joins a thread (`t_flag_waiter`, through its
+CHILD_CLEARTID word), then `fork_tests` blocks signal 12 and sends it to its own process with `kill`, expecting it to
+stay pending. The joiner is woken in `process_thread_exit`, but the thread leaves `p->threads` only when the reaper
+frees it (`kernel/scheduler/thread.c`). `route_locked` (`kernel/process/signal.c`) decides a process-directed
+default-terminate signal by asking whether any thread on `p->threads` does not block it; the dead thread, whose mask
+was the creator's before the block, does not, and the process is killed with 128 + 12. Whether the reaper has run
+by then is timing: the first sighting in the entropy jobs of the last ten CI runs (the others' boots passed; a
+passing boot keeps no serial log, so an earlier death that still passed cannot be ruled out, but this one fails the
+boot). The wake fix under test changes no part of that path.
+

@@ -69,6 +69,7 @@ KERNEL_GENERIC_SRCS := \
 	kernel/scheduler/completion.c \
 	kernel/scheduler/completion_floor.c \
 	kernel/scheduler/schedtest.c \
+	kernel/scheduler/waketest.c \
 	kernel/scheduler/smptest.c \
 	kernel/object/object.c \
 	kernel/object/object_floor.c \

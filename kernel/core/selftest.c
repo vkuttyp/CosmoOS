@@ -676,6 +676,7 @@ static const struct selftest tests[] = {
     { "lockdep-rq-order", selftest_lockdep_rq_order },
     { "sched-migrate",   selftest_sched_migrate },
     { "sched-migrate-refuses", selftest_sched_migrate_refuses },
+    { "sched-wake-moved", selftest_sched_wake_moved },
     { "sched-migrate-stress", selftest_sched_migrate_stress },
     { "sched-fair",      selftest_sched_fair },
     { "nvme",            selftest_nvme },

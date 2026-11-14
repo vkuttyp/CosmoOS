@@ -197,6 +197,7 @@ Open lines (struck lines are not counted):
 - **LX-23** nice-to-have, M. glibc's dynamic linker untried; no vDSO (`AT_SYSINFO_EHDR`).
 
 - **LX-24** correctness, S. BusyBox `yes` with a 53-byte line, piped to `head -c N | md5sum`, never exits once `head` has its N bytes: `md5sum` prints, `head` exits, and `yes` runs on (state R, its stdout the pipe's write end) until killed, so the shell waits for ever. `yes abc` exits at once with `Broken pipe` at every size tried (1000 B to 200 MiB); the 53-byte line hangs at 10 MB and 200 MiB, every time. Seen on v1.0.14-rc1 and on v1.0.13 (Parallels, aarch64, 2026-10-26), so not v1.0.14's. `pipe_ring_write` returns `-EPIPE` once the readers are gone and no write raises SIGPIPE here; what `yes` gets back instead is not yet known.
+- **LX-25** correctness, S. A process-directed signal whose default is to terminate kills a process whose live threads all block it, when a thread that has exited is still on `p->threads` (it leaves the list when the reaper frees it, after its joiner has been woken): `route_locked`'s loop in `kernel/process/signal.c` reads the dead thread's mask. lxtest died of signal 12 in `fork_tests` (block 12, `kill(pid, 12)`) after joining `t_flag_waiter` (flakes.md, 2026-11-14). Skip a thread that has left (`nr_live`'s accounting) in `route_locked`'s loop.
 
 ## Lock validator and concurrency
 
@@ -339,6 +340,7 @@ Open lines (struck lines are not counted):
 - **TEST-26** nice-to-have, M. Twenty self-tests are 55% of the debug boot's 155 s of test time under TCG, and 24 of those measured take the same time under KVM: they wait on the clock (timeouts, settles). `cosmofs-replay` alone is 24 s. Shorten the waits that are not the test's subject (`docs/audit/2026-11-12-t2-faster-boot-report.md`).
 - **TEST-27** nice-to-have, S. A debug `make test-display` fails in its second boot ("both"): `cosmofs-format` (line 223: a mount that must give -EIO succeeds, on a `vda` at generation 16), `cosmofs-ops`, `cosmofs-crash`, `cosmofs-fixture-cleanup` and `process-user`, on main at `bf595f3a` as on the branch after it (`docs/audit/2026-11-13-quiet-screen-report.md`). CI runs the target with `BUILD=release`, which runs no self-tests and passes.
 - ~~**TEST-24** correctness, S. `test-net-login` stage j's RTC bound allows 2 s below and the x86-64 firmware's century write (edk2, every boot, the clock running) rewinds QEMU's RTC by up to a second more (main red, CI run 40739284519).~~ Fixed 2026-10-28: 3 s below on x86-64 (`docs/audit/2026-10-28-rtc-century-report.md`).
+- **TEST-28** correctness, M. A four-CPU x86-64 debug boot has a slow mode in which the cosmofs self-tests take half as long again (`cosmofs-replay` 53 s against 35 s on the other machine, 41 s against 28 s on CI: over its 40 s bound) and the boot runs out of time; the same image on the same idle machine gives either mode (flakes.md, 2026-11-14). It turned main red once (run 43523266637) and fails two of seven x86-64 matrix boots at a time. Find the mechanism: what differs between a slow boot and a fast one of one image.
 
 ## Commands
 

@@ -53,6 +53,7 @@ bool selftest_yield(const char **reason);
 bool selftest_preempt(const char **reason);
 bool selftest_preempt_wake(const char **reason);
 bool selftest_preempt_wake_direct(const char **reason);
+bool selftest_sched_wake_moved(const char **reason);
 bool selftest_preempt_wake_locked(const char **reason);
 bool selftest_prio_inversion(const char **reason);   /* a mutex owner is boosted to a blocked waiter's priority */
 bool selftest_irqrestore_bench(const char **reason);

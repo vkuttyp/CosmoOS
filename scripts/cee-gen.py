@@ -102,6 +102,8 @@ PORTS = [
      "kernel/include/kernel/completion_types.h", False),
     ("kernel/scheduler/semaphore.cee", "kernel/scheduler/semaphore.c", "Counting semaphores (semaphore.h)",
      "kernel/include/kernel/semaphore_types.h", False),
+    ("kernel/scheduler/waketest.cee", "kernel/scheduler/waketest.c",
+     "The scheduler's self-test sched-wake-moved", None, True),
     ("kernel/scheduler/mutex.cee", "kernel/scheduler/mutex.c", "Sleeping mutexes with priority inheritance (mutex.h)",
      "kernel/include/kernel/mutex_types.h", False),
     ("kernel/core/quiesce.cee", "kernel/core/quiesce.c", "Quiescence: epoch-based reclamation (quiesce.h)",
