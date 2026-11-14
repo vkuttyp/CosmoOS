@@ -5646,3 +5646,22 @@ runner and the slow mode are not told apart by these numbers.
 
 What is not known: what the slow mode is (the guest's scheduling at four CPUs, or QEMU's), and since when. No
 budget was changed: the bound is not what is wrong when the same boot takes 35 s or 53 s.
+
+## lxtest killed by signal 12 in `test-entropy`'s second boot, x86-64, 2026-11-14
+
+A defect, not fixed here: backlog LX-25. #523's run 43570128667 (`18e848ab`), job `entropy boots (x86_64)`: the
+second boot (`test-entropy`'s seeded one) failed after 179.8 s, `SHTEST: FAIL 1` and every `LINUXTEST`, musl and
+`lxsig` marker missing; 528 self-tests passed. The serial log: `LXSIGFD: signalfd read/...`, then at once `process:
+pid 595 'lxtest' exited with status 140 (82466 syscalls)` and `sh: /boot/tests/linux/lxtest: signal 12`, with no
+`forked from 595` line between.
+
+Mechanism, from the code. After the signalfd test lxtest joins a thread (`t_flag_waiter`, through its
+CHILD_CLEARTID word), then `fork_tests` blocks signal 12 and sends it to its own process with `kill`, expecting it to
+stay pending. The joiner is woken in `process_thread_exit`, but the thread leaves `p->threads` only when the reaper
+frees it (`kernel/scheduler/thread.c`). `route_locked` (`kernel/process/signal.c`) decides a process-directed
+default-terminate signal by asking whether any thread on `p->threads` does not block it; the dead thread, whose mask
+was the creator's before the block, does not, and the process is killed with 128 + 12. Whether the reaper has run
+by then is timing: the first sighting in the entropy jobs of the last ten CI runs (the others' boots passed; a
+passing boot keeps no serial log, so an earlier death that still passed cannot be ruled out, but this one fails the
+boot). The wake fix under test changes no part of that path.
+
